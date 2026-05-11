@@ -10,6 +10,16 @@ const XLSX = require("xlsx");
 
 dotenv.config();
 
+function envValue(name) {
+  const value = process.env[name];
+  if (value === undefined || value === null) return "";
+  return String(value).trim().replace(/^['\"]|['\"]$/g, "");
+}
+
+function hasEnv(name) {
+  return Boolean(envValue(name));
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "80mb" }));
@@ -176,6 +186,22 @@ function pickDeepSeekModel({ mode, modeId, apiMode, model, routerModel }) {
 function wantsDeepSeekThinking(body = {}) {
   const raw = String(body.apiMode || body.mode || body.modeId || "").toLowerCase();
   return body.thinking === true || body.thinking === "true" || THINKING_MODE_IDS.has(raw);
+}
+
+function pickOpenRouterDeepSeekModel(body = {}, thinkingEnabled = false) {
+  const explicit = String(body.routerModel || "").trim();
+
+  // Frontend bazen deepseek/deepseek-v4-flash gibi OpenRouter'da olmayan/yenilenen adlar gönderebilir.
+  // Geçerli ve özel bir routerModel gelirse onu kullan; değilse güvenli varsayılanlara düş.
+  if (explicit && !explicit.toLowerCase().includes("deepseek-v4-flash") && !explicit.toLowerCase().includes("deepseek-v4-pro")) {
+    return explicit;
+  }
+
+  if (thinkingEnabled) {
+    return envValue("OPENROUTER_DEEPSEEK_REASONER_MODEL") || envValue("OPENROUTER_DEEPSEEK_MODEL") || "deepseek/deepseek-reasoner";
+  }
+
+  return envValue("OPENROUTER_DEEPSEEK_MODEL") || "deepseek/deepseek-chat";
 }
 
 function buildSystemPrompt(body = {}) {
@@ -559,8 +585,18 @@ async function answerLiveWebIfNeeded(body = {}) {
 }
 
 async function askDeepSeek(body = {}) {
-  const key = process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY_ALT;
-  if (!key) throw new Error("DEEPSEEK_API_KEY .env içinde yok");
+  const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
+  const openRouterKey = envValue("OPENROUTER_API_KEY");
+
+  console.log("LUCY ENV CHECK:", {
+    DEEPSEEK_API_KEY: Boolean(deepSeekKey),
+    DEEPSEEK_API_KEY_ALT: Boolean(envValue("DEEPSEEK_API_KEY_ALT")),
+    OPENROUTER_API_KEY: Boolean(openRouterKey),
+  });
+
+  if (!deepSeekKey && !openRouterKey) {
+    throw new Error("DEEPSEEK_API_KEY veya OPENROUTER_API_KEY Railway Variables içinde yok");
+  }
 
   const cleanMessages = normalizeMessages(body.messages);
   if (!cleanMessages.length) throw new Error("DeepSeek'e gönderilecek geçerli mesaj yok");
@@ -589,12 +625,12 @@ async function askDeepSeek(body = {}) {
     ? { ...basePayload, thinking: { type: "enabled" }, enable_thinking: true }
     : basePayload;
 
-  async function callDeepSeek(requestPayload) {
+  async function callDeepSeekDirect(requestPayload) {
     const response = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
+        Authorization: `Bearer ${deepSeekKey}`,
       },
       body: JSON.stringify(requestPayload),
     });
@@ -603,25 +639,73 @@ async function askDeepSeek(body = {}) {
     return { response, data };
   }
 
-  let { response, data } = await callDeepSeek(payload);
+  async function callOpenRouterDeepSeek() {
+    const routerModel = pickOpenRouterDeepSeekModel(body, thinkingEnabled);
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openRouterKey}`,
+        "HTTP-Referer": envValue("LUCY_APP_URL") || "https://fastidious-cannoli-e51dad.netlify.app",
+        "X-Title": "LUCY GPT",
+      },
+      body: JSON.stringify({
+        model: routerModel,
+        messages: finalMessages,
+        temperature,
+        max_tokens: maxTokens,
+        stream: false,
+      }),
+    });
 
-  if (!response.ok && thinkingEnabled) {
-    const message = String(data?.error?.message || data?.message || "").toLowerCase();
-    if (response.status === 400 || message.includes("thinking") || message.includes("enable_thinking")) {
-      ({ response, data } = await callDeepSeek(basePayload));
+    const data = await response.json().catch(() => ({}));
+    return { response, data, routerModel };
+  }
+
+  let lastErrorMessage = "";
+
+  if (deepSeekKey) {
+    try {
+      let { response, data } = await callDeepSeekDirect(payload);
+
+      if (!response.ok && thinkingEnabled) {
+        const message = String(data?.error?.message || data?.message || "").toLowerCase();
+        if (response.status === 400 || message.includes("thinking") || message.includes("enable_thinking")) {
+          ({ response, data } = await callDeepSeekDirect(basePayload));
+        }
+      }
+
+      if (response.ok) {
+        const choiceMessage = data?.choices?.[0]?.message || {};
+        return choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.";
+      }
+
+      lastErrorMessage = data?.error?.message || data?.message || `DeepSeek API hatası: ${response.status}`;
+      console.warn("DeepSeek direct başarısız, OpenRouter fallback deneniyor:", lastErrorMessage);
+    } catch (error) {
+      lastErrorMessage = error.message || String(error);
+      console.warn("DeepSeek direct exception, OpenRouter fallback deneniyor:", lastErrorMessage);
     }
   }
 
-  if (!response.ok) {
-    throw new Error(data?.error?.message || data?.message || `DeepSeek API hatası: ${response.status}`);
+  if (openRouterKey) {
+    const { response, data, routerModel } = await callOpenRouterDeepSeek();
+    if (!response.ok) {
+      const routerError = data?.error?.message || data?.message || `OpenRouter DeepSeek API hatası: ${response.status}`;
+      throw new Error(lastErrorMessage ? `${lastErrorMessage} | OpenRouter fallback: ${routerError}` : routerError);
+    }
+
+    const choiceMessage = data?.choices?.[0]?.message || {};
+    const answer = choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.";
+    console.log("LUCY cevap OpenRouter DeepSeek fallback ile üretildi:", routerModel);
+    return answer;
   }
 
-  const choiceMessage = data?.choices?.[0]?.message || {};
-  return choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.";
+  throw new Error(lastErrorMessage || "DeepSeek cevabı alınamadı");
 }
 
 async function askOpenRouterVision({ prompt, filePath, mimeType, originalName }) {
-  const key = process.env.OPENROUTER_API_KEY;
+  const key = envValue("OPENROUTER_API_KEY");
   if (!key) throw new Error("OPENROUTER_API_KEY .env içinde yok");
 
   const buffer = fs.readFileSync(filePath);
@@ -658,7 +742,7 @@ async function askOpenRouterVision({ prompt, filePath, mimeType, originalName })
 }
 
 async function askOpenRouterText({ prompt, modelEnv = "OPENROUTER_TEXT_MODEL", fallbackModel = "openai/gpt-4o-mini" }) {
-  const key = process.env.OPENROUTER_API_KEY;
+  const key = envValue("OPENROUTER_API_KEY");
   if (!key) throw new Error("OPENROUTER_API_KEY .env içinde yok");
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -911,7 +995,7 @@ const VOICE_MODE_SETTINGS = {
 function pickVoiceProfile(mode = "normal") {
   const key = String(mode || "normal").toLowerCase();
   const profile = VOICE_MODE_SETTINGS[key] || VOICE_MODE_SETTINGS.normal;
-  const voiceId = process.env[profile.envVoiceId] || process.env[profile.fallbackEnvVoiceId] || process.env.ELEVENLABS_VOICE_ID;
+  const voiceId = envValue(profile.envVoiceId) || envValue(profile.fallbackEnvVoiceId) || envValue("ELEVENLABS_VOICE_ID");
   return {
     id: VOICE_MODE_SETTINGS[key] ? key : "normal",
     voiceId,
@@ -924,7 +1008,7 @@ app.post("/api/speak", async (req, res) => {
     const text = sanitizeSpeechText(req.body?.text);
     if (!text) return res.status(400).json({ success: false, error: "Seslendirilecek temiz metin bulunamadı." });
     const voiceProfile = pickVoiceProfile(req.body?.voiceMode);
-    if (!process.env.ELEVENLABS_API_KEY || !voiceProfile.voiceId) {
+    if (!envValue("ELEVENLABS_API_KEY") || !voiceProfile.voiceId) {
       return res.status(500).json({ success: false, error: "ElevenLabs bilgileri eksik" });
     }
 
@@ -932,7 +1016,7 @@ app.post("/api/speak", async (req, res) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "xi-api-key": process.env.ELEVENLABS_API_KEY,
+        "xi-api-key": envValue("ELEVENLABS_API_KEY"),
       },
       body: JSON.stringify({
         text,
