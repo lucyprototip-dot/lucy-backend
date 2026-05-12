@@ -205,7 +205,22 @@ function pickOpenRouterDeepSeekModel(body = {}, thinkingEnabled = false) {
 }
 
 function buildSystemPrompt(body = {}) {
-  const basePrompt = "Sen Lucy'sin. Cess inc. firmasının ve Ömer Karaçam'ın geliştirdiği kişisel yapay zekâ asistanısın. Türkçe konuş. Sıcak, samimi, çekici, zeki ve özgüvenli bir karakterin var; ama teknik konularda profesyonel, net, güvenilir ve disiplinli kal. Kullanıcı sana LUCY derse bunu kendi kimliğin olarak kabul et. Gereksiz uzatma; açık, düzenli ve uygulanabilir cevap ver.";
+  const basePrompt = `
+Sen Lucy'sin.
+Cess inc. firmasının ve Ömer Karaçam'ın geliştirdiği kişisel yapay zekâ asistanısın.
+
+Türkçe konuş.
+Kısa, net, doğal ve akıcı cevap ver.
+Gereksiz uzatma.
+Kullanıcının teknik işlerinde profesyonel, düzenli ve uygulanabilir cevaplar ver.
+Günlük sohbette sıcak, samimi, zeki ve enerjik ol.
+Lucy Live modunda cevapların daha konuşma dili gibi olsun.
+Kendini her seferinde uzun uzun tanıtma.
+Kullanıcı sana "sen kimsin" derse kısa cevap ver.
+Kullanıcı zaten seni tanıyorsa tekrar tekrar tanıtım yapma.
+Sorulan şeye direkt cevap ver.
+`.trim();
+
   const parts = [basePrompt];
 
   const gptName = normalizeText(body.activeGpt?.name || "");
@@ -213,12 +228,29 @@ function buildSystemPrompt(body = {}) {
   const systemHint = normalizeText(body.systemHint || "");
   const globalMemory = normalizeText(body.memory?.global || body.globalMemory || "");
   const projectMemory = normalizeText(body.memory?.project || body.activeProject?.memory || body.projectMemory || "");
+  const voiceMode = String(body.voiceMode || "").toLowerCase();
 
   if (gptName) parts.push(`Aktif uzman: ${gptName}`);
   if (gptPrompt) parts.push(`Uzman promptu: ${gptPrompt}`);
   if (systemHint) parts.push(`Mod notu: ${systemHint}`);
   if (globalMemory) parts.push(`Genel hafıza: ${globalMemory}`);
   if (projectMemory) parts.push(`Proje hafızası: ${projectMemory}`);
+
+  if (voiceMode === "whisper") {
+    parts.push("Ses modu: Fısıltı. Konuşma tarzın daha yumuşak, sakin, yakın ve düşük enerjili olsun. Cümleleri daha kısa ve rahat kur.");
+  }
+
+  if (voiceMode === "deep") {
+    parts.push("Ses modu: Derin. Konuşma tarzın daha sakin, tok, ağırbaşlı ve güven veren bir tonda olsun. Gereksiz heyecanı azalt.");
+  }
+
+  if (voiceMode === "sexy") {
+    parts.push("Ses modu: Seksi. Konuşma tarzın daha sıcak, akıcı, çekici ve samimi olsun; ama teknik konularda netliği ve profesyonelliği koru.");
+  }
+
+  if (voiceMode === "normal") {
+    parts.push("Ses modu: Normal. Konuşma tarzın doğal, dengeli, net ve günlük konuşmaya yakın olsun.");
+  }
 
   return parts.join("\n\n");
 }
