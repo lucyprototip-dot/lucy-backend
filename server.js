@@ -32,18 +32,76 @@ const upload = multer({
 });
 
 // ============================================================
-//  LUCY KALICI DATA STORE
+//  LUCY WEB KALICI DATA STORE
 //  Chrome localStorage temizlense bile gitmeyen ana kayıt dosyası.
-//  Proje kökü: C:\Users\KARACAM\Desktop\lucy-gpt
-//  Kayıt:      C:\Users\KARACAM\Desktop\lucy-gpt\data\lucy-store.json
+//
+//  Varsayılan kayıt yolu:
+//  backend/data/lucy_web_arsiv.json
+//
+//  Railway/hosting için istersen Variables içine şunları verebilirsin:
+//  LUCY_DATA_DIR=/data
+//  LUCY_STORE_FILE=lucy_web_arsiv.json
 // ============================================================
 
-const DATA_DIR = process.env.LUCY_DATA_DIR || path.resolve(__dirname, "..", "data");
-const STORE_PATH = path.join(DATA_DIR, "lucy-store.json");
+const DATA_DIR = process.env.LUCY_DATA_DIR || path.resolve(__dirname, "data");
+const STORE_FILE_NAME = process.env.LUCY_STORE_FILE || "lucy_web_arsiv.json";
+const STORE_PATH = path.join(DATA_DIR, STORE_FILE_NAME);
+const LEGACY_STORE_PATH = path.join(DATA_DIR, "lucy-store.json");
+const BACKUP_DIR = path.join(DATA_DIR, "backup");
+const BACKUP_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_BACKUP_FILES = Number(process.env.LUCY_MAX_BACKUPS || 30);
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+
+  if (!fs.existsSync(BACKUP_DIR)) {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  }
+}
+
+function backupFileName() {
+  return `lucy_web_arsiv_${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+}
+
+function rotateBackups() {
+  try {
+    const files = fs.readdirSync(BACKUP_DIR)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => ({
+        name,
+        path: path.join(BACKUP_DIR, name),
+        time: fs.statSync(path.join(BACKUP_DIR, name)).mtimeMs,
+      }))
+      .sort((a, b) => b.time - a.time);
+
+    files.slice(MAX_BACKUP_FILES).forEach((file) => safeUnlink(file.path));
+  } catch (error) {
+    console.error("LUCY backup temizleme hatası:", error.message);
+  }
+}
+
+function createLucyStoreBackup() {
+  try {
+    if (!fs.existsSync(STORE_PATH)) return;
+    const stat = fs.statSync(STORE_PATH);
+    if (!stat.size) return;
+
+    const backups = fs.readdirSync(BACKUP_DIR)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => ({
+        name,
+        time: fs.statSync(path.join(BACKUP_DIR, name)).mtimeMs,
+      }))
+      .sort((a, b) => b.time - a.time);
+
+    if (backups[0] && Date.now() - backups[0].time < BACKUP_INTERVAL_MS) return;
+
+    fs.copyFileSync(STORE_PATH, path.join(BACKUP_DIR, backupFileName()));
+    rotateBackups();
+  } catch (error) {
+    console.error("LUCY backup oluşturulamadı:", error.message);
   }
 }
 
@@ -56,6 +114,8 @@ function emptyLucyStore() {
     academy: [],
     projects: [],
     memory: "",
+    exporter: [],
+    live: {},
     activeChatId: "",
     activeGptId: "lucy-standard",
     activeProjectId: "",
@@ -72,6 +132,11 @@ function emptyLucyStore() {
 
 function readLucyStore() {
   ensureDataDir();
+
+  // Eski lucy-store.json varsa ve yeni arşiv yoksa otomatik taşı.
+  if (!fs.existsSync(STORE_PATH) && fs.existsSync(LEGACY_STORE_PATH)) {
+    fs.copyFileSync(LEGACY_STORE_PATH, STORE_PATH);
+  }
 
   if (!fs.existsSync(STORE_PATH)) {
     const initialStore = emptyLucyStore();
@@ -97,6 +162,8 @@ function writeLucyStore(nextStore = {}) {
     ...nextStore,
     updatedAt: new Date().toISOString(),
   };
+
+  createLucyStoreBackup();
 
   const tempPath = `${STORE_PATH}.tmp`;
   fs.writeFileSync(tempPath, JSON.stringify(safeStore, null, 2), "utf8");
@@ -618,16 +685,15 @@ async function answerLiveWebIfNeeded(body = {}) {
 
 async function askDeepSeek(body = {}) {
   const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
-  const openRouterKey = envValue("OPENROUTER_API_KEY");
 
   console.log("LUCY ENV CHECK:", {
     DEEPSEEK_API_KEY: Boolean(deepSeekKey),
     DEEPSEEK_API_KEY_ALT: Boolean(envValue("DEEPSEEK_API_KEY_ALT")),
-    OPENROUTER_API_KEY: Boolean(openRouterKey),
+    OPENROUTER_API_KEY_FOR_MEDIA_ONLY: Boolean(envValue("OPENROUTER_API_KEY")),
   });
 
-  if (!deepSeekKey && !openRouterKey) {
-    throw new Error("DEEPSEEK_API_KEY veya OPENROUTER_API_KEY Railway Variables içinde yok");
+  if (!deepSeekKey) {
+    throw new Error("DEEPSEEK_API_KEY Railway Variables içinde yok. Chat artık sadece direkt DeepSeek kullanır; OpenRouter yalnızca resim/video/yedek multimodal işler içindir.");
   }
 
   const cleanMessages = normalizeMessages(body.messages);
@@ -651,8 +717,8 @@ async function askDeepSeek(body = {}) {
     stream: false,
   };
 
-  // V4 Flash thinking modu: API destekliyorsa reasoning_content alanı döndürür.
-  // API parametreyi kabul etmezse otomatik normal isteğe düşer; sistem çökmez.
+  // V4 Flash/Pro thinking modu: API destekliyorsa reasoning_content alanı döndürür.
+  // API parametreyi kabul etmezse aynı isteği normal payload ile tekrar dener.
   const payload = thinkingEnabled
     ? { ...basePayload, thinking: { type: "enabled" }, enable_thinking: true }
     : basePayload;
@@ -671,69 +737,22 @@ async function askDeepSeek(body = {}) {
     return { response, data };
   }
 
-  async function callOpenRouterDeepSeek() {
-    const routerModel = pickOpenRouterDeepSeekModel(body, thinkingEnabled);
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${openRouterKey}`,
-        "HTTP-Referer": envValue("LUCY_APP_URL") || "https://fastidious-cannoli-e51dad.netlify.app",
-        "X-Title": "LUCY GPT",
-      },
-      body: JSON.stringify({
-        model: routerModel,
-        messages: finalMessages,
-        temperature,
-        max_tokens: maxTokens,
-        stream: false,
-      }),
-    });
+  let { response, data } = await callDeepSeekDirect(payload);
 
-    const data = await response.json().catch(() => ({}));
-    return { response, data, routerModel };
-  }
-
-  let lastErrorMessage = "";
-
-  if (deepSeekKey) {
-    try {
-      let { response, data } = await callDeepSeekDirect(payload);
-
-      if (!response.ok && thinkingEnabled) {
-        const message = String(data?.error?.message || data?.message || "").toLowerCase();
-        if (response.status === 400 || message.includes("thinking") || message.includes("enable_thinking")) {
-          ({ response, data } = await callDeepSeekDirect(basePayload));
-        }
-      }
-
-      if (response.ok) {
-        const choiceMessage = data?.choices?.[0]?.message || {};
-        return choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.";
-      }
-
-      lastErrorMessage = data?.error?.message || data?.message || `DeepSeek API hatası: ${response.status}`;
-      console.warn("DeepSeek direct başarısız, OpenRouter fallback deneniyor:", lastErrorMessage);
-    } catch (error) {
-      lastErrorMessage = error.message || String(error);
-      console.warn("DeepSeek direct exception, OpenRouter fallback deneniyor:", lastErrorMessage);
+  if (!response.ok && thinkingEnabled) {
+    const message = String(data?.error?.message || data?.message || "").toLowerCase();
+    if (response.status === 400 || message.includes("thinking") || message.includes("enable_thinking")) {
+      ({ response, data } = await callDeepSeekDirect(basePayload));
     }
   }
 
-  if (openRouterKey) {
-    const { response, data, routerModel } = await callOpenRouterDeepSeek();
-    if (!response.ok) {
-      const routerError = data?.error?.message || data?.message || `OpenRouter DeepSeek API hatası: ${response.status}`;
-      throw new Error(lastErrorMessage ? `${lastErrorMessage} | OpenRouter fallback: ${routerError}` : routerError);
-    }
-
-    const choiceMessage = data?.choices?.[0]?.message || {};
-    const answer = choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.";
-    console.log("LUCY cevap OpenRouter DeepSeek fallback ile üretildi:", routerModel);
-    return answer;
+  if (!response.ok) {
+    const deepSeekError = data?.error?.message || data?.message || `DeepSeek API hatası: ${response.status}`;
+    throw new Error(deepSeekError);
   }
 
-  throw new Error(lastErrorMessage || "DeepSeek cevabı alınamadı");
+  const choiceMessage = data?.choices?.[0]?.message || {};
+  return choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.";
 }
 
 async function askOpenRouterVision({ prompt, filePath, mimeType, originalName }) {
@@ -749,7 +768,7 @@ async function askOpenRouterVision({ prompt, filePath, mimeType, originalName })
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${key}`,
-      "HTTP-Referer": "http://localhost:5173",
+      "HTTP-Referer": envValue("LUCY_APP_URL") || "https://lucyai-8xn.pages.dev",
       "X-Title": "LUCY GPT",
     },
     body: JSON.stringify({
@@ -782,7 +801,7 @@ async function askOpenRouterText({ prompt, modelEnv = "OPENROUTER_TEXT_MODEL", f
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${key}`,
-      "HTTP-Referer": "http://localhost:5173",
+      "HTTP-Referer": envValue("LUCY_APP_URL") || "https://lucyai-8xn.pages.dev",
       "X-Title": "LUCY GPT",
     },
     body: JSON.stringify({
