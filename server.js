@@ -9,6 +9,13 @@ const mammoth = require("mammoth");
 const XLSX = require("xlsx");
 
 dotenv.config();
+const DATA_DIR = process.env.LUCY_DATA_DIR || path.join(__dirname, "data");
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+const ARCHIVE_FILE = path.join(DATA_DIR, "lucy_web_arsiv.json");
 
 function envValue(name) {
   const value = process.env[name];
@@ -1330,7 +1337,40 @@ app.post("/api/export-chat", async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+app.get("/api/archive", async (req, res) => {
+  try {
+    if (!fs.existsSync(ARCHIVE_FILE)) {
+      fs.writeFileSync(
+        ARCHIVE_FILE,
+        JSON.stringify(
+          {
+            version: "lucy-v11.9.0",
+            updatedAt: new Date().toISOString(),
+            chats: [],
+            gpts: [],
+            academy: [],
+            projects: [],
+            memory: "",
+            exporter: [],
+            live: {},
+          },
+          null,
+          2
+        )
+      );
+    }
 
+    const raw = fs.readFileSync(ARCHIVE_FILE, "utf8");
+    const data = JSON.parse(raw);
+
+    res.json(data);
+  } catch (err) {
+    console.error("Archive read error:", err);
+    res.status(500).json({
+      error: "archive_read_failed",
+    });
+  }
+});
 app.listen(PORT, () => {
   console.log(`LUCY backend aktif: http://localhost:${PORT}`);
   console.log("Ana beyin: DeepSeek | Multimodal kapı: OpenRouter");
