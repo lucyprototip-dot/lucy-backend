@@ -9,13 +9,6 @@ const mammoth = require("mammoth");
 const XLSX = require("xlsx");
 
 dotenv.config();
-const DATA_DIR = process.env.LUCY_DATA_DIR || path.join(__dirname, "data");
-
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
-const ARCHIVE_FILE = path.join(DATA_DIR, "lucy_web_arsiv.json");
 
 function envValue(name) {
   const value = process.env[name];
@@ -53,6 +46,7 @@ const upload = multer({
 const DATA_DIR = process.env.LUCY_DATA_DIR || path.resolve(__dirname, "data");
 const STORE_FILE_NAME = process.env.LUCY_STORE_FILE || "lucy_web_arsiv.json";
 const STORE_PATH = path.join(DATA_DIR, STORE_FILE_NAME);
+const ARCHIVE_FILE = STORE_PATH;
 const LEGACY_STORE_PATH = path.join(DATA_DIR, "lucy-store.json");
 const BACKUP_DIR = path.join(DATA_DIR, "backup");
 const BACKUP_INTERVAL_MS = 5 * 60 * 1000;
