@@ -31,6 +31,18 @@ const upload = multer({
   limits: { fileSize: 80 * 1024 * 1024 },
 });
 
+function numberEnv(name, fallback) {
+  const value = Number(envValue(name));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+// LUCY / ASENA maksimum cevap kapasitesi.
+// Railway Variables içine LUCY_MAX_TOKENS=8192 veya modelin desteklediği daha yüksek değeri verebilirsin.
+const LUCY_MAX_TOKENS = numberEnv("LUCY_MAX_TOKENS", numberEnv("DEEPSEEK_MAX_TOKENS", 16000));
+const LUCY_STREAM_MAX_TOKENS = numberEnv("LUCY_STREAM_MAX_TOKENS", 8000);
+const LUCY_WEB_RESULT_LIMIT = Math.min(numberEnv("LUCY_WEB_RESULT_LIMIT", 8), 10);
+const LUCY_WEB_PAGE_READ_LIMIT = Math.min(numberEnv("LUCY_WEB_PAGE_READ_LIMIT", 2), 5);
+
 // ============================================================
 //  LUCY WEB KALICI DATA STORE
 //  Chrome localStorage temizlense bile gitmeyen ana kayıt dosyası.
@@ -574,6 +586,39 @@ async function fetchPageSummary(url = "") {
   return { title: url, text: "", url, error: lastError || "Sayfa okunamadı" };
 }
 
+async function searchGoogleApi(query = "") {
+  const key = envValue("GOOGLE_SEARCH_API_KEY") || envValue("GOOGLE_API_KEY");
+  const cx = envValue("GOOGLE_SEARCH_ENGINE_ID") || envValue("GOOGLE_CSE_ID") || envValue("GOOGLE_CX");
+
+  // Google Custom Search bilgileri yoksa sessizce fallback aramaya geçilir.
+  if (!key || !cx) return [];
+
+  const url = `https://www.googleapis.com/customsearch/v1?${new URLSearchParams({
+    key,
+    cx,
+    q: query,
+    num: String(Math.min(LUCY_WEB_RESULT_LIMIT, 10)),
+    safe: "off",
+  }).toString()}`;
+
+  const response = await fetch(url, {
+    headers: { Accept: "application/json", "User-Agent": "LUCY-GoogleSearch/1.0" },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error?.message || `Google arama API hatası: ${response.status}`);
+
+  return (data.items || []).map((item) => ({
+    provider: "google",
+    title: item.title || item.htmlTitle || item.link || "Google sonucu",
+    text: item.snippet || item.htmlSnippet || "",
+    url: item.link || "",
+  })).filter((item) => item.text || item.url).slice(0, LUCY_WEB_RESULT_LIMIT);
+}
+
+async function searchGoogle(query = "") {
+  return searchGoogleApi(query);
+}
+
 async function searchDuckDuckGoApi(query = "") {
   const url = `https://api.duckduckgo.com/?${new URLSearchParams({
     q: query,
@@ -633,14 +678,40 @@ async function searchDuckDuckGoHtml(query = "") {
 async function searchDuckDuckGo(query = "") {
   const apiResults = await searchDuckDuckGoApi(query).catch(() => []);
   const htmlResults = apiResults.length ? [] : await searchDuckDuckGoHtml(query).catch(() => []);
-  const all = [...apiResults, ...htmlResults];
+  const all = [...apiResults, ...htmlResults].map((item) => ({ provider: item.provider || "duckduckgo", ...item }));
   const seen = new Set();
   return all.filter((item) => {
     const key = item.url || item.title;
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, 8);
+  }).slice(0, LUCY_WEB_RESULT_LIMIT);
+}
+
+async function searchWeb(query = "") {
+  const googleResults = await searchGoogle(query).catch((error) => [{
+    provider: "google",
+    title: "Google arama hatası",
+    text: error.message,
+    url: "",
+  }]);
+
+  const duckResults = await searchDuckDuckGo(query).catch((error) => [{
+    provider: "duckduckgo",
+    title: "Arama hatası",
+    text: error.message,
+    url: "",
+  }]);
+
+  const all = [...googleResults, ...duckResults];
+  const seen = new Set();
+  return all.filter((item) => {
+    const isError = String(item.title || "").toLowerCase().includes("hatası") && !item.url;
+    const key = item.url || item.title;
+    if (!key || isError || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, LUCY_WEB_RESULT_LIMIT);
 }
 
 async function collectWebContext(query = "") {
@@ -652,10 +723,10 @@ async function collectWebContext(query = "") {
     pages.push(page);
   }
 
-  const searchResults = urls.length ? [] : await searchDuckDuckGo(query).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
+  const searchResults = urls.length ? [] : await searchWeb(query).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
 
-  // Arama sonucu varsa ilk 2 URL'yi de okumayı dene; sadece snippet ile yetinme.
-  for (const item of searchResults.slice(0, 2)) {
+  // Arama sonucu varsa ilk URL'leri de okumayı dene; sonuç yoksa snippet ile yetinme.
+  for (const item of searchResults.slice(0, LUCY_WEB_PAGE_READ_LIMIT)) {
     if (item.url && /^https?:\/\//i.test(item.url)) {
       const page = await fetchPageSummary(item.url);
       if (page.text) pages.push(page);
@@ -667,17 +738,48 @@ async function collectWebContext(query = "") {
   return { urls, pages, usefulPages, searchResults: usefulSearch };
 }
 
+async function buildLiveWebBody(body = {}) {
+  const lastUserText = getLastUserText(body.messages);
+  const web = await collectWebContext(lastUserText);
+  const contextItems = [];
+
+  web.usefulPages.forEach((item) => {
+    contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 9000)}`);
+  });
+
+  web.searchResults.forEach((item) => {
+    contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title}\nURL: ${item.url || "yok"}\nÖzet:\n${item.text || ""}`);
+  });
+
+  if (!contextItems.length) {
+    const tried = web.urls.length ? `\nDenenen URL: ${web.urls.join(", ")}` : "";
+    return {
+      instantAnswer: `Web açık ama bu sorgu için okunabilir kaynak metni bulamadım.${tried}\n\nYanlış bilgi üretmemek için cevap vermiyorum. Daha net bir arama cümlesi veya farklı bir URL gönder.`,
+    };
+  }
+
+  const webContext = contextItems.join("\n\n---\n\n");
+  return {
+    requestBody: {
+      ...body,
+      webSearch: false,
+      max_tokens: Number(body.max_tokens || body.options?.max_tokens || LUCY_STREAM_MAX_TOKENS),
+      messages: [
+        {
+          role: "user",
+          content: `Kullanıcı sorusu: ${lastUserText}\n\nWEB_CONTEXT aşağıda. Sadece bu kaynaklara dayanarak cevap ver. Kaynaklarda olmayan şeyi uydurma. Eğer kaynaklar yetersizse açıkça \"Kaynaklar bunu göstermiyor\" de. Türkçe cevap ver ve sonunda kaynak URL'lerini kısa listele.\n\nWEB_CONTEXT:\n${webContext}`,
+        },
+      ],
+      systemHint: `${body.systemHint || ""}\nWeb modu aktif. Google araması varsa öncelikli kullan. Sadece WEB_CONTEXT kullan. Kaynak dışı tahmin yapma.`,
+    },
+  };
+}
+
 async function answerLiveWebIfNeeded(body = {}) {
   const lastUserText = getLastUserText(body.messages);
   const webMode = isWebMode(body);
 
-  // WEB kapalıysa site/canlı/güncel sorularda uydurma cevabı engelle.
-  if (!webMode) {
-    if (isLikelyWebDependentQuestion(lastUserText)) {
-      return "Web'de ara kapalı olduğu için internetten canlı veri veya site içeriği kontrol etmiyorum. Bu konuda kesin konuşmam için Web'de ara modunu açıp tekrar gönder.";
-    }
-    return null;
-  }
+  if (!webMode) return null;
 
   // Dolar kuru sadece WEB açıkken canlı API'den gelsin.
   if (isUsdTryQuestion(lastUserText)) {
@@ -685,36 +787,9 @@ async function answerLiveWebIfNeeded(body = {}) {
     return `Güncel canlı kur kaynağına göre 1 ${fx.base} ≈ ${formatTry(fx.rate)} TL.\n\nKaynak zamanı: ${fx.updated}${fx.nextUpdate ? `\nSonraki güncelleme: ${fx.nextUpdate}` : ""}\n\nNot: Banka alış/satış makası ve işlem saati nedeniyle uygulamadaki kur birkaç kuruş farklı olabilir.`;
   }
 
-  const web = await collectWebContext(lastUserText);
-  const contextItems = [];
-
-  web.usefulPages.forEach((item, index) => {
-    contextItems.push(`KAYNAK ${contextItems.length + 1}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 7000)}`);
-  });
-
-  web.searchResults.forEach((item) => {
-    contextItems.push(`KAYNAK ${contextItems.length + 1}\nBaşlık: ${item.title}\nURL: ${item.url || "yok"}\nÖzet:\n${item.text || ""}`);
-  });
-
-  if (!contextItems.length) {
-    const tried = web.urls.length ? `\nDenenen URL: ${web.urls.join(", ")}` : "";
-    return `Web açık ama bu sorgu için okunabilir kaynak metni bulamadım.${tried}\n\nYanlış bilgi üretmemek için cevap vermiyorum. Daha net bir arama cümlesi veya farklı bir URL gönder.`;
-  }
-
-  const webContext = contextItems.join("\n\n---\n\n");
-  const answer = await askDeepSeek({
-    ...body,
-    webSearch: false,
-    messages: [
-      {
-        role: "user",
-        content: `Kullanıcı sorusu: ${lastUserText}\n\nWEB_CONTEXT aşağıda. Sadece bu kaynaklara dayanarak cevap ver. Kaynaklarda olmayan şeyi uydurma. Eğer kaynaklar yetersizse açıkça \"Kaynaklar bunu göstermiyor\" de. Türkçe cevap ver ve sonunda kaynak URL'lerini kısa listele.\n\nWEB_CONTEXT:\n${webContext}`,
-      },
-    ],
-    systemHint: `${body.systemHint || ""}\nWeb modu aktif. Sadece WEB_CONTEXT kullan. Kaynak dışı tahmin yapma.`,
-  });
-
-  return answer;
+  const liveWeb = await buildLiveWebBody(body);
+  if (liveWeb.instantAnswer) return liveWeb.instantAnswer;
+  return askDeepSeek(liveWeb.requestBody);
 }
 
 async function askDeepSeek(body = {}) {
@@ -736,7 +811,7 @@ async function askDeepSeek(body = {}) {
   const model = pickDeepSeekModel(body);
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.45));
-  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 4000);
+  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 16000);
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
@@ -820,7 +895,7 @@ async function askDeepSeekStream(body = {}, res) {
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const model = pickDeepSeekModel(body);
   const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.42));
-  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 1800);
+  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 8000);
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
@@ -1006,14 +1081,28 @@ app.post("/api/chat-stream", async (req, res) => {
   res.flushHeaders?.();
 
   try {
-    const liveAnswer = await answerLiveWebIfNeeded(req.body || {});
+    const body = req.body || {};
+
+    if (isWebMode(body)) {
+      const liveWeb = await buildLiveWebBody(body);
+      if (liveWeb.instantAnswer) {
+        writeSse(res, { delta: liveWeb.instantAnswer });
+        writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
+        return res.end();
+      }
+
+      await askDeepSeekStream(liveWeb.requestBody, res);
+      return res.end();
+    }
+
+    const liveAnswer = await answerLiveWebIfNeeded(body);
     if (liveAnswer) {
       writeSse(res, { delta: liveAnswer });
       writeSse(res, { done: true, answer: liveAnswer, provider: "live-web" });
       return res.end();
     }
 
-    await askDeepSeekStream(req.body || {}, res);
+    await askDeepSeekStream(body, res);
     return res.end();
   } catch (error) {
     writeSse(res, { error: error.message || "Stream hatası" });
