@@ -39,9 +39,15 @@ function numberEnv(name, fallback) {
 // LUCY / ASENA maksimum cevap kapasitesi.
 // Railway Variables içine LUCY_MAX_TOKENS=8192 veya modelin desteklediği daha yüksek değeri verebilirsin.
 const LUCY_MAX_TOKENS = numberEnv("LUCY_MAX_TOKENS", numberEnv("DEEPSEEK_MAX_TOKENS", 16000));
+const LUCY_FAST_MAX_TOKENS = numberEnv("LUCY_FAST_MAX_TOKENS", 6000);
+const LUCY_THINK_MAX_TOKENS = numberEnv("LUCY_THINK_MAX_TOKENS", LUCY_MAX_TOKENS);
 const LUCY_STREAM_MAX_TOKENS = numberEnv("LUCY_STREAM_MAX_TOKENS", 8000);
-const LUCY_WEB_RESULT_LIMIT = Math.min(numberEnv("LUCY_WEB_RESULT_LIMIT", 8), 10);
+const LUCY_STREAM_FAST_MAX_TOKENS = numberEnv("LUCY_STREAM_FAST_MAX_TOKENS", 4000);
+const LUCY_STREAM_THINK_MAX_TOKENS = numberEnv("LUCY_STREAM_THINK_MAX_TOKENS", LUCY_STREAM_MAX_TOKENS);
+const LUCY_WEB_RESULT_LIMIT = Math.min(numberEnv("LUCY_WEB_RESULT_LIMIT", 6), 10);
 const LUCY_WEB_PAGE_READ_LIMIT = Math.min(numberEnv("LUCY_WEB_PAGE_READ_LIMIT", 2), 5);
+const LUCY_WEB_CONTEXT_ITEMS = Math.min(numberEnv("LUCY_WEB_CONTEXT_ITEMS", 4), 8);
+const LUCY_WEB_CONTEXT_CHARS = numberEnv("LUCY_WEB_CONTEXT_CHARS", 2200);
 
 // ============================================================
 //  LUCY WEB KALICI DATA STORE
@@ -689,19 +695,20 @@ async function searchDuckDuckGo(query = "") {
 }
 
 async function searchWeb(query = "") {
-  const googleResults = await searchGoogle(query).catch((error) => [{
-    provider: "google",
-    title: "Google arama hatası",
-    text: error.message,
-    url: "",
-  }]);
-
-  const duckResults = await searchDuckDuckGo(query).catch((error) => [{
-    provider: "duckduckgo",
-    title: "Arama hatası",
-    text: error.message,
-    url: "",
-  }]);
+  const [googleResults, duckResults] = await Promise.all([
+    searchGoogle(query).catch((error) => [{
+      provider: "google",
+      title: "Google arama hatası",
+      text: error.message,
+      url: "",
+    }]),
+    searchDuckDuckGo(query).catch((error) => [{
+      provider: "duckduckgo",
+      title: "Arama hatası",
+      text: error.message,
+      url: "",
+    }]),
+  ]);
 
   const all = [...googleResults, ...duckResults];
   const seen = new Set();
@@ -744,7 +751,7 @@ async function buildLiveWebBody(body = {}) {
   const contextItems = [];
 
   web.usefulPages.forEach((item) => {
-    contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 9000)}`);
+    contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, LUCY_WEB_CONTEXT_CHARS)}`);
   });
 
   web.searchResults.forEach((item) => {
@@ -758,12 +765,12 @@ async function buildLiveWebBody(body = {}) {
     };
   }
 
-  const webContext = contextItems.join("\n\n---\n\n");
+  const webContext = contextItems.slice(0, LUCY_WEB_CONTEXT_ITEMS).join("\n\n---\n\n");
   return {
     requestBody: {
       ...body,
       webSearch: false,
-      max_tokens: Number(body.max_tokens || body.options?.max_tokens || LUCY_STREAM_MAX_TOKENS),
+      max_tokens: Number(body.max_tokens || body.options?.max_tokens || (wantsDeepSeekThinking(body) ? LUCY_STREAM_THINK_MAX_TOKENS : LUCY_STREAM_FAST_MAX_TOKENS)),
       messages: [
         {
           role: "user",
@@ -780,12 +787,6 @@ async function answerLiveWebIfNeeded(body = {}) {
   const webMode = isWebMode(body);
 
   if (!webMode) return null;
-
-  // Dolar kuru sadece WEB açıkken canlı API'den gelsin.
-  if (isUsdTryQuestion(lastUserText)) {
-    const fx = await getUsdTryRate();
-    return `Güncel canlı kur kaynağına göre 1 ${fx.base} ≈ ${formatTry(fx.rate)} TL.\n\nKaynak zamanı: ${fx.updated}${fx.nextUpdate ? `\nSonraki güncelleme: ${fx.nextUpdate}` : ""}\n\nNot: Banka alış/satış makası ve işlem saati nedeniyle uygulamadaki kur birkaç kuruş farklı olabilir.`;
-  }
 
   const liveWeb = await buildLiveWebBody(body);
   if (liveWeb.instantAnswer) return liveWeb.instantAnswer;
@@ -811,7 +812,7 @@ async function askDeepSeek(body = {}) {
   const model = pickDeepSeekModel(body);
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.45));
-  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 16000);
+  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || (thinkingEnabled ? LUCY_THINK_MAX_TOKENS : LUCY_FAST_MAX_TOKENS));
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
@@ -895,7 +896,7 @@ async function askDeepSeekStream(body = {}, res) {
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const model = pickDeepSeekModel(body);
   const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.42));
-  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 8000);
+  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || (thinkingEnabled ? LUCY_STREAM_THINK_MAX_TOKENS : LUCY_STREAM_FAST_MAX_TOKENS));
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
