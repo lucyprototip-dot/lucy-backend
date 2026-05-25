@@ -184,21 +184,60 @@ const DEEPSEEK_MODEL_THINKING = process.env.DEEPSEEK_MODEL_THINKING || "deepseek
 const DEEPSEEK_MODEL_PRO = process.env.DEEPSEEK_MODEL_PRO || "deepseek-v4-pro";
 
 const MODE_TO_DEEPSEEK_MODEL = {
+  // Hızlı: v4 Flash / normal cevap
   fast: DEEPSEEK_MODEL_FAST,
   hızlı: DEEPSEEK_MODEL_FAST,
+  hizli: DEEPSEEK_MODEL_FAST,
   chat: DEEPSEEK_MODEL_FAST,
   web: DEEPSEEK_MODEL_FAST,
+
+  // Düşün: v4 Flash / thinking
+  think: DEEPSEEK_MODEL_THINKING,
+  reasoning: DEEPSEEK_MODEL_THINKING,
+  düşün: DEEPSEEK_MODEL_THINKING,
+  dusun: DEEPSEEK_MODEL_THINKING,
+  düşünme: DEEPSEEK_MODEL_THINKING,
+
+  // Pro Hızlı: v4 Pro / normal cevap
+  pro_fast: DEEPSEEK_MODEL_PRO,
+  pro_hizli: DEEPSEEK_MODEL_PRO,
+  pro_hızlı: DEEPSEEK_MODEL_PRO,
+  "pro-hizli": DEEPSEEK_MODEL_PRO,
+  "pro-hızlı": DEEPSEEK_MODEL_PRO,
+  "pro hızlı": DEEPSEEK_MODEL_PRO,
+  "pro hizli": DEEPSEEK_MODEL_PRO,
+
+  // Pro Düşün: v4 Pro / thinking
+  pro_think: DEEPSEEK_MODEL_PRO,
+  pro_dusun: DEEPSEEK_MODEL_PRO,
+  pro_düşün: DEEPSEEK_MODEL_PRO,
+  "pro-dusun": DEEPSEEK_MODEL_PRO,
+  "pro-düşün": DEEPSEEK_MODEL_PRO,
+  "pro düşün": DEEPSEEK_MODEL_PRO,
+  "pro dusun": DEEPSEEK_MODEL_PRO,
+
+  // Eski id gelirse güvenli V4 karşılıklarına düşür.
   ds_v3: DEEPSEEK_MODEL_FAST,
   "ds-v3": DEEPSEEK_MODEL_FAST,
-  reasoning: DEEPSEEK_MODEL_THINKING,
-  think: DEEPSEEK_MODEL_THINKING,
-  düşünme: DEEPSEEK_MODEL_THINKING,
   ds_v4_pro: DEEPSEEK_MODEL_PRO,
   "ds-v4": DEEPSEEK_MODEL_PRO,
   "ds-v4-pro": DEEPSEEK_MODEL_PRO,
 };
 
-const THINKING_MODE_IDS = new Set(["think", "reasoning", "düşünme", "ds_v4_pro", "ds-v4", "ds-v4-pro"]);
+const THINKING_MODE_IDS = new Set([
+  "think",
+  "reasoning",
+  "düşün",
+  "dusun",
+  "düşünme",
+  "pro_think",
+  "pro_dusun",
+  "pro_düşün",
+  "pro-dusun",
+  "pro-düşün",
+  "pro düşün",
+  "pro dusun",
+]);
 
 function safeUnlink(filePath) {
   try {
