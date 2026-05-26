@@ -1,4 +1,5 @@
-const archiver = require("archiver");
+const archiverModule = require("archiver");
+const createArchiver = typeof archiverModule === "function" ? archiverModule : (archiverModule.default || archiverModule.archiver);
 const fs = require("fs");
 const path = require("path");
 
@@ -35,7 +36,11 @@ module.exports = {
     }
 
     const chunks = [];
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    if (typeof createArchiver !== "function") {
+      return { success: false, error: "archiver_unavailable", message: "archiver modülü fonksiyon olarak yüklenemedi." };
+    }
+
+    const archive = createArchiver("zip", { zlib: { level: 9 } });
 
     return await new Promise((resolve) => {
       archive.on("data", (chunk) => chunks.push(chunk));
