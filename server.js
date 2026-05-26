@@ -6,7 +6,7 @@ const fs = require("fs");
 const path = require("path");
 const pdfParseModule = require("pdf-parse");
 const mammoth = require("mammoth");
-const XLSX = require("xlsx");
+const ExcelJS = require("exceljs");
 
 dotenv.config();
 
@@ -409,13 +409,35 @@ async function extractTextFromFile(filePath, originalName) {
     return limitText(result.value);
   }
 
-  if (ext === ".xlsx" || ext === ".xls") {
-    const workbook = XLSX.readFile(filePath);
-    const parts = workbook.SheetNames.map((sheetName) => {
-      const sheet = workbook.Sheets[sheetName];
-      return `## Sheet: ${sheetName}\n${XLSX.utils.sheet_to_csv(sheet)}`;
+  if (ext === ".xlsx") {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+    const parts = [];
+
+    workbook.eachSheet((worksheet) => {
+      const rows = [];
+      worksheet.eachRow({ includeEmpty: true }, (row) => {
+        const values = [];
+        const maxColumn = worksheet.columnCount || row.cellCount || 0;
+        for (let columnIndex = 1; columnIndex <= maxColumn; columnIndex += 1) {
+          const cell = row.getCell(columnIndex);
+          const raw = cell?.text ?? cell?.value ?? "";
+          const clean = String(raw)
+            .replace(/"/g, '""')
+            .replace(/\r?\n/g, " ")
+            .trim();
+          values.push(clean.includes(",") ? `"${clean}"` : clean);
+        }
+        rows.push(values.join(","));
+      });
+      parts.push(`## Sheet: ${worksheet.name}\n${rows.join("\n")}`);
     });
+
     return limitText(parts.join("\n\n"));
+  }
+
+  if (ext === ".xls") {
+    throw new Error("Eski .xls formatı güvenlik nedeniyle kapatıldı. Lütfen dosyayı .xlsx veya .csv olarak yükle.");
   }
 
   throw new Error(`Bu dosya formatı henüz metin olarak okunamıyor: ${ext || "bilinmeyen"}`);
