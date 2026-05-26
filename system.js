@@ -7,7 +7,15 @@ const path = require("path");
 const pdfParseModule = require("pdf-parse");
 const mammoth = require("mammoth");
 const ExcelJS = require("exceljs");
-const { loadTools, getTool, listTools } = require("./tools/toolRegistry");
+
+let toolRegistry = null;
+let lucyTools = {};
+try {
+  toolRegistry = require("./tools/toolRegistry");
+  lucyTools = toolRegistry.loadTools();
+} catch (error) {
+  console.warn("Lucy tool registry yüklenemedi:", error.message);
+}
 
 dotenv.config();
 
@@ -32,11 +40,47 @@ const upload = multer({
   limits: { fileSize: 80 * 1024 * 1024 },
 });
 
-loadTools();
+function listLoadedTools() {
+  if (toolRegistry?.listTools) return toolRegistry.listTools();
+  return Object.values(lucyTools || {}).map((tool) => ({
+    name: tool.name,
+    description: tool.description || "",
+  }));
+}
 
-function normalizeToolInput(input) {
-  if (input && typeof input === "object" && !Array.isArray(input)) return input;
-  return {};
+function getLoadedTool(name) {
+  const cleanName = String(name || "").trim();
+  if (!cleanName) return null;
+  return toolRegistry?.getTool?.(cleanName) || lucyTools?.[cleanName] || null;
+}
+
+function withTimeout(promise, ms = 30000) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Tool timeout: ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function executeLucyTool(toolName, input = {}, timeoutMs = 30000) {
+  const tool = getLoadedTool(toolName);
+  if (!tool || typeof tool.execute !== "function") {
+    return {
+      success: false,
+      error: "tool_not_found",
+      message: `Tool bulunamadı: ${toolName}`,
+    };
+  }
+
+  try {
+    return await withTimeout(Promise.resolve(tool.execute(input || {})), timeoutMs);
+  } catch (error) {
+    return {
+      success: false,
+      error: "tool_execute_failed",
+      message: error.message,
+    };
+  }
 }
 
 function numberEnv(name, fallback) {
@@ -420,32 +464,34 @@ async function extractTextFromFile(filePath, originalName) {
   if (ext === ".xlsx") {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(filePath);
-    const parts = [];
 
-    workbook.eachSheet((worksheet) => {
+    const parts = workbook.worksheets.map((sheet) => {
       const rows = [];
-      worksheet.eachRow({ includeEmpty: true }, (row) => {
-        const values = [];
-        const maxColumn = worksheet.columnCount || row.cellCount || 0;
-        for (let columnIndex = 1; columnIndex <= maxColumn; columnIndex += 1) {
-          const cell = row.getCell(columnIndex);
-          const raw = cell?.text ?? cell?.value ?? "";
-          const clean = String(raw)
-            .replace(/"/g, '""')
-            .replace(/\r?\n/g, " ")
-            .trim();
-          values.push(clean.includes(",") ? `"${clean}"` : clean);
-        }
-        rows.push(values.join(","));
+      sheet.eachRow({ includeEmpty: false }, (row) => {
+        const values = row.values
+          .slice(1)
+          .map((value) => {
+            if (value === null || value === undefined) return "";
+            if (typeof value === "object") {
+              if (value.text) return value.text;
+              if (value.result !== undefined) return value.result;
+              if (value.richText) return value.richText.map((part) => part.text || "").join("");
+              return JSON.stringify(value);
+            }
+            return String(value);
+          })
+          .join(",");
+        rows.push(values);
       });
-      parts.push(`## Sheet: ${worksheet.name}\n${rows.join("\n")}`);
+
+      return `## Sheet: ${sheet.name}\n${rows.join("\n")}`;
     });
 
     return limitText(parts.join("\n\n"));
   }
 
   if (ext === ".xls") {
-    throw new Error("Eski .xls formatı güvenlik nedeniyle kapatıldı. Lütfen dosyayı .xlsx veya .csv olarak yükle.");
+    throw new Error("Eski .xls formatı güvenlik nedeniyle kapalı. Dosyayı .xlsx olarak kaydedip tekrar yükle.");
   }
 
   throw new Error(`Bu dosya formatı henüz metin olarak okunamıyor: ${ext || "bilinmeyen"}`);
@@ -1201,49 +1247,6 @@ async function generateWithOpenRouter({ prompt, kind }) {
   };
 }
 
-
-// ============================================================
-//  LUCY TOOL ENGINE - minimal registry endpoints
-//  Prompt alanına dokunmaz. Sadece backend tool çağırma hattını açar.
-// ============================================================
-
-app.get("/api/tools", (req, res) => {
-  res.json({ success: true, tools: listTools() });
-});
-
-app.post("/api/tool", async (req, res) => {
-  try {
-    const toolName = String(req.body?.name || req.body?.tool || "").trim();
-    if (!toolName) return res.status(400).json({ success: false, error: "Tool adı gerekli" });
-
-    const tool = getTool(toolName);
-    if (!tool || typeof tool.execute !== "function") {
-      return res.status(404).json({ success: false, error: `Tool bulunamadı: ${toolName}` });
-    }
-
-    const result = await tool.execute(normalizeToolInput(req.body?.input));
-    res.json({ success: true, tool: toolName, result });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message || "Tool çalıştırma hatası" });
-  }
-});
-
-app.post("/api/tools/:name", async (req, res) => {
-  try {
-    const toolName = String(req.params.name || "").trim();
-    const tool = getTool(toolName);
-
-    if (!tool || typeof tool.execute !== "function") {
-      return res.status(404).json({ success: false, error: `Tool bulunamadı: ${toolName}` });
-    }
-
-    const result = await tool.execute(normalizeToolInput(req.body?.input || req.body));
-    res.json({ success: true, tool: toolName, result });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message || "Tool çalıştırma hatası" });
-  }
-});
-
 app.get("/api/store", (req, res) => {
   try {
     const store = readLucyStore();
@@ -1268,6 +1271,45 @@ app.post("/api/store", (req, res) => {
 
 app.get("/", (req, res) => {
   res.json({ success: true, message: "LUCY backend çalışıyor", brain: "DeepSeek", port: PORT });
+});
+
+app.get("/api/tools", (req, res) => {
+  res.json({
+    success: true,
+    count: listLoadedTools().length,
+    tools: listLoadedTools(),
+  });
+});
+
+app.post("/api/tools/execute", async (req, res) => {
+  const body = req.body || {};
+  const name = body.name || body.tool || body.toolName;
+  const input = body.input || body.args || body.parameters || {};
+  const timeoutMs = Number(body.timeoutMs || 30000);
+  const result = await executeLucyTool(name, input, timeoutMs);
+  const status = result.success === false && result.error === "tool_not_found" ? 404 : 200;
+  res.status(status).json(result);
+});
+
+app.post("/api/tools/:name", async (req, res) => {
+  const timeoutMs = Number(req.body?.timeoutMs || 30000);
+  const input = req.body?.input || req.body?.args || req.body || {};
+  const result = await executeLucyTool(req.params.name, input, timeoutMs);
+  const status = result.success === false && result.error === "tool_not_found" ? 404 : 200;
+  res.status(status).json(result);
+});
+
+app.get("/api/tools/:name", (req, res) => {
+  const tool = getLoadedTool(req.params.name);
+  if (!tool) {
+    return res.status(404).json({ success: false, error: "tool_not_found" });
+  }
+
+  res.json({
+    success: true,
+    name: tool.name || req.params.name,
+    description: tool.description || "",
+  });
 });
 
 
