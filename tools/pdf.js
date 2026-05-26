@@ -1,4 +1,5 @@
 const PDFDocument = require("pdfkit");
+const fs = require("fs");
 
 module.exports = {
   name: "pdf",
@@ -30,6 +31,15 @@ module.exports = {
           base64: buffer.toString("base64"),
         });
       });
+
+      const fontCandidates = [
+        process.env.LUCY_PDF_FONT,
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+      ].filter(Boolean);
+      const fontPath = fontCandidates.find((candidate) => fs.existsSync(candidate));
+      if (fontPath) doc.font(fontPath);
 
       doc.fontSize(20).text(title, { underline: true });
       doc.moveDown();
