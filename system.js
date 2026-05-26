@@ -445,10 +445,26 @@ function extractMermaidBlocksFromAnswer(answer = "") {
   return blocks;
 }
 
+function isUsableToolCall(call = {}) {
+  const tool = String(call.tool || "").toLowerCase();
+  const input = call.input && typeof call.input === "object" ? call.input : {};
+  if (!tool) return false;
+  if (tool === "mermaid") return Boolean(String(input.code || input.mermaid || input.text || "").trim());
+  if (tool === "chartdata") {
+    const labels = input.labels || input.data?.labels;
+    const values = input.values || input.data?.datasets?.[0]?.data;
+    return Array.isArray(labels) && labels.length > 0 && Array.isArray(values) && values.length > 0;
+  }
+  if (tool === "excel") return Boolean((Array.isArray(input.rows) && input.rows.length) || String(input.text || input.content || input.value || "").trim() || (Array.isArray(input.labels) && input.labels.length));
+  if (tool === "pdf") return Boolean(String(input.text || input.content || input.value || "").trim());
+  if (tool === "qr") return Boolean(String(input.text || input.url || input.value || "").trim());
+  return true;
+}
+
 async function executeToolCallsFromAnswer(answer = "", req) {
   const explicitCalls = extractToolCallsFromAnswer(answer);
   const mermaidCalls = explicitCalls.length ? [] : extractMermaidBlocksFromAnswer(answer);
-  const toolCalls = [...explicitCalls, ...mermaidCalls];
+  const toolCalls = [...explicitCalls, ...mermaidCalls].filter(isUsableToolCall);
 
   if (!toolCalls.length) {
     return { toolCalls: [], toolResults: [], finalAnswer: answer };
@@ -833,8 +849,9 @@ function buildSystemPrompt(body = {}) {
       "PDF için input.text kullan. Excel için input.rows dizisi kullan; rows yoksa input.text içine markdown tablo/metin koyabilirsin. ZIP için input.files yoksa backend son üretilen dosyayı otomatik zincire alır. QR için input.text veya input.url kullan.",
       "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
       "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
-      "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma.",
+      "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma. Mermaid kodu boşsa tool_call üretme.",
       "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
+      "Basit sohbetlerde, selamlaşmada veya normal cevaplarda pdf/zip/excel/mermaid/chart tool_call üretme.",
       "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
     ].join("\n"));
   }
