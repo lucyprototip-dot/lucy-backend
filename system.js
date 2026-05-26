@@ -7,6 +7,7 @@ const path = require("path");
 const pdfParseModule = require("pdf-parse");
 const mammoth = require("mammoth");
 const ExcelJS = require("exceljs");
+const PDFDocument = require("pdfkit");
 
 let toolRegistry = null;
 let lucyTools = {};
@@ -2191,6 +2192,53 @@ function exporterXlsx(title, messages) {
   ]);
 }
 
+
+function findLucyPdfFont() {
+  const candidates = [
+    envValue("LUCY_PDF_FONT"),
+    path.join(__dirname, "fonts", "NotoSans-Regular.ttf"),
+    path.join(__dirname, "fonts", "DejaVuSans.ttf"),
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+  ].filter(Boolean);
+  return candidates.find((candidate) => {
+    try { return fs.existsSync(candidate); } catch { return false; }
+  }) || "";
+}
+
+function stripProblematicPdfEmoji(value = "") {
+  return String(value || "")
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "")
+    .replace(/\s+$/gm, "");
+}
+
+function exporterPdfKit(title, messages) {
+  return new Promise((resolve, reject) => {
+    const fontPath = findLucyPdfFont();
+    const chunks = [];
+    const doc = new PDFDocument({ margin: 48, size: "A4", bufferPages: true });
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+    if (fontPath) doc.font(fontPath);
+    doc.fontSize(18).text(stripProblematicPdfEmoji(title || "LUCY Export"), { underline: true });
+    doc.moveDown(0.55);
+    doc.fontSize(9).fillColor("#666").text(`LUCY Exporter - ${messages.length} mesaj`);
+    doc.moveDown();
+    doc.fillColor("#111").fontSize(11).text(stripProblematicPdfEmoji(exporterPlainText(title, messages)), {
+      align: "left",
+      lineGap: 4,
+    });
+    doc.end();
+  });
+}
+
 function pdfEscape(value = "") {
   return String(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
@@ -2258,7 +2306,7 @@ app.post("/api/export-chat", async (req, res) => {
     else if (format === "xls") { buffer = Buffer.from(exporterOfficeTable(title, messages), "utf8"); mime = "application/vnd.ms-excel;charset=utf-8"; }
     else if (format === "docx") { buffer = exporterDocx(title, messages); mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"; }
     else if (format === "xlsx") { buffer = exporterXlsx(title, messages); mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; }
-    else if (format === "pdf") { buffer = exporterPdf(title, messages); mime = "application/pdf"; }
+    else if (format === "pdf") { buffer = await exporterPdfKit(title, messages); mime = "application/pdf"; }
     else if (format === "image" || format === "resim" || format === "svg") { buffer = Buffer.from(exporterSvg(title, messages), "utf8"); ext = "svg"; mime = "image/svg+xml;charset=utf-8"; }
     else { buffer = Buffer.from(exporterHtml(title, messages), "utf8"); ext = "html"; mime = "text/html;charset=utf-8"; }
 
