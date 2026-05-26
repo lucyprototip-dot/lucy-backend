@@ -9,9 +9,42 @@ function stripMarkdown(text = "") {
     .trim();
 }
 
+
+function restoreCommonTurkish(value = "") {
+  let text = String(value ?? "");
+  const replacements = [
+    [/\bAlisveris\b/g, "Alışveriş"], [/\balisveris\b/g, "alışveriş"],
+    [/\bUrunleri\b/g, "Ürünleri"], [/\burunleri\b/g, "ürünleri"],
+    [/\bUrun\b/g, "Ürün"], [/\burun\b/g, "ürün"],
+    [/\bSut\b/g, "Süt"], [/\bsut\b/g, "süt"],
+    [/\bYogurt\b/g, "Yoğurt"], [/\byogurt\b/g, "yoğurt"],
+    [/\bKasar\b/g, "Kaşar"], [/\bkasar\b/g, "kaşar"],
+    [/\bFirin\b/g, "Fırın"], [/\bfirin\b/g, "fırın"],
+    [/\bSarkuteri\b/g, "Şarküteri"], [/\bsarkuteri\b/g, "şarküteri"],
+    [/\bSalkim\b/g, "Salkım"], [/\bsalkim\b/g, "salkım"],
+    [/\bSalatalik\b/g, "Salatalık"], [/\bsalatalik\b/g, "salatalık"],
+    [/\bCarliston\b/g, "Çarliston"], [/\bcarliston\b/g, "çarliston"],
+    [/\bYesil\b/g, "Yeşil"], [/\byesil\b/g, "yeşil"],
+    [/\bSikmalik\b/g, "Sıkmalık"], [/\bsikmalik\b/g, "sıkmalık"],
+    [/\bBugday\b/g, "Buğday"], [/\bbugday\b/g, "buğday"],
+    [/\bPogaca\b/g, "Poğaça"], [/\bpogaca\b/g, "poğaça"],
+    [/\bgogsu\b/g, "göğsü"], [/\bGogsu\b/g, "Göğsü"],
+    [/\bSise\b/g, "Şişe"], [/\bsise\b/g, "şişe"],
+    [/\bBulasik\b/g, "Bulaşık"], [/\bbulasik\b/g, "bulaşık"],
+    [/\bCamashir\b/g, "Çamaşır"], [/\bcamashir\b/g, "çamaşır"],
+    [/\bCamasir\b/g, "Çamaşır"], [/\bcamasir\b/g, "çamaşır"],
+    [/\bCop\b/g, "Çöp"], [/\bcop\b/g, "çöp"],
+    [/\bposeti\b/g, "poşeti"], [/\bPoseti\b/g, "Poşeti"],
+    [/\byagli\b/g, "yağlı"], [/\bYagli\b/g, "Yağlı"],
+    [/\bDeterjani\b/g, "Deterjanı"], [/\bdeterjani\b/g, "deterjanı"],
+  ];
+  for (const [pattern, replacement] of replacements) text = text.replace(pattern, replacement);
+  return text;
+}
+
 function sanitizeSheetName(name = "LUCY") {
   const safe = String(name || "LUCY").replace(/[\\/?*\[\]:]/g, " ").trim().slice(0, 31);
-  return safe || "LUCY";
+  return restoreCommonTurkish(safe || "LUCY");
 }
 
 function sanitizeFileName(name = "lucy.xlsx") {
@@ -64,7 +97,7 @@ function parseMarkdownTables(text = "") {
       if (!cells.length) break;
       const row = {};
       headers.forEach((header, index) => {
-        row[header] = cells[index] || "";
+        row[restoreCommonTurkish(header)] = restoreCommonTurkish(cells[index] || "");
       });
       if (Object.values(row).some((value) => String(value || "").trim())) rows.push(row);
     }
@@ -86,11 +119,11 @@ function rowsFromArrayRows(rows = []) {
   const arrayRows = rows.map((row) => Array.isArray(row) ? row : Object.keys(row || {}).sort((a, b) => Number(a) - Number(b)).map((key) => row[key]));
   const first = arrayRows[0] || [];
   const hasHeader = first.some((cell) => /[A-Za-zÇĞİÖŞÜçğıöşü]/.test(String(cell || "")));
-  const headers = hasHeader ? first.map((cell, index) => stripMarkdown(cell) || `Sütun ${index + 1}`) : first.map((_, index) => `Sütun ${index + 1}`);
+  const headers = hasHeader ? first.map((cell, index) => restoreCommonTurkish(stripMarkdown(cell)) || `Sütun ${index + 1}`) : first.map((_, index) => `Sütun ${index + 1}`);
   const dataRows = hasHeader ? arrayRows.slice(1) : arrayRows;
   return dataRows.map((cells) => {
     const row = {};
-    headers.forEach((header, index) => { row[header] = cells[index] ?? ""; });
+    headers.forEach((header, index) => { row[header] = restoreCommonTurkish(cells[index] ?? ""); });
     return row;
   }).filter((row) => Object.values(row).some((value) => String(value || "").trim()));
 }
@@ -100,7 +133,7 @@ function normalizeRows(inputRows = []) {
   if (inputRows.some((row) => Array.isArray(row) || looksNumericKeyObject(row))) return rowsFromArrayRows(inputRows);
   return inputRows
     .filter((row) => row && typeof row === "object")
-    .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [stripMarkdown(key) || "Sütun", value ?? ""])))
+    .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [restoreCommonTurkish(stripMarkdown(key) || "Sütun"), restoreCommonTurkish(value ?? "")])))
     .filter((row) => Object.keys(row).length && Object.values(row).some((value) => String(value || "").trim()));
 }
 
@@ -136,7 +169,7 @@ function buildWorkbookRows(input = {}) {
 
   if (Array.isArray(input.labels) && Array.isArray(input.values) && input.labels.length) {
     return {
-      rows: input.labels.map((label, index) => ({ Etiket: label, Değer: input.values[index] ?? "" })),
+      rows: input.labels.map((label, index) => ({ Etiket: restoreCommonTurkish(label), Değer: input.values[index] ?? "" })),
       source: "labels",
     };
   }
@@ -150,7 +183,7 @@ function buildWorkbookRows(input = {}) {
       for (const row of table.rows) {
         const normalized = { ...row };
         if (table.title && !Object.keys(normalized).some((key) => /kategori|category/i.test(key))) {
-          normalized.Kategori = table.title;
+          normalized.Kategori = restoreCommonTurkish(table.title);
         }
         merged.push(normalized);
       }
@@ -178,7 +211,7 @@ function normalizeCellValue(value) {
   const text = String(value).trim();
   const currencyLike = text.replace(/[₺$€%]/g, "").replace(/\s/g, "").replace(/,/g, ".");
   if (/^-?\d+(\.\d+)?$/.test(currencyLike) && /[₺$€%]|^\d+[,.]?\d*$/.test(text)) return Number(currencyLike);
-  return text;
+  return restoreCommonTurkish(text);
 }
 
 function columnWidthFor(key, rows) {
@@ -293,7 +326,7 @@ module.exports = {
       };
     }
 
-    const title = input.title || built.title || "LUCY Excel Tablosu";
+    const title = restoreCommonTurkish(input.title || built.title || "LUCY Excel Tablosu");
     const filename = sanitizeFileName(input.filename || input.name || title || "lucy.xlsx");
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet(sanitizeSheetName(input.sheetName || "LUCY"));

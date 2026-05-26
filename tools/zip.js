@@ -81,15 +81,17 @@ module.exports = {
   description: "Metin/base64/generate edilmiş dosyalardan ZIP arşivi oluşturur",
 
   async execute(input = {}) {
-    const files = Array.isArray(input.files) ? input.files : [];
+    const files = Array.isArray(input.files) ? input.files : (input.file ? [input.file] : []);
     if (!files.length) {
       return { success: false, error: "files_required", message: "ZIP oluşturmak için files dizisi gerekli." };
     }
 
     const entries = [];
     files.forEach((file, index) => {
-      if (!file || typeof file !== "object") return;
-      const filename = safeName(file.filename || file.name || `lucy-file-${index + 1}.txt`);
+      if (!file) return;
+      if (typeof file === "string") file = { storedFilename: file, filename: file };
+      if (typeof file !== "object") return;
+      const filename = safeName(file.filename || file.name || file.storedFilename || file.generatedFile || `lucy-file-${index + 1}.txt`);
 
       if (file.storedFilename || file.generatedFile) {
         const full = safeResolveGenerated(file.storedFilename || file.generatedFile);
