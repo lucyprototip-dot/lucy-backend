@@ -382,15 +382,22 @@ function latestGeneratedFileFromDisk() {
 function extractGeneratedFileRefsFromText(text = "") {
   const source = String(text || "");
   const refs = [];
+  const pushRef = (storedFilename, filename = storedFilename) => {
+    const stored = String(storedFilename || "").trim().replace(/[.,;]+$/g, "");
+    const file = String(filename || stored || "").trim().replace(/[.,;]+$/g, "");
+    if (!stored && !file) return;
+    refs.push({ storedFilename: stored || file, filename: file || stored });
+  };
+
+  for (const match of source.matchAll(/LUCY_FILE_REF\s+([^\n]+)/gi)) {
+    const chunk = match[1] || "";
+    const stored = chunk.match(/storedFilename=([^\s]+)/i)?.[1] || "";
+    const filename = chunk.match(/filename=([^\s]+)/i)?.[1] || stored;
+    pushRef(stored, filename);
+  }
 
   for (const match of source.matchAll(/\/generated\/([^\s"')]+)(?:[\s"')]|$)/gi)) {
-    try {
-      const storedFilename = decodeURIComponent(match[1].replace(/[.,;]+$/g, ""));
-      if (storedFilename) refs.push({ storedFilename, filename: storedFilename });
-    } catch {
-      const storedFilename = match[1].replace(/[.,;]+$/g, "");
-      if (storedFilename) refs.push({ storedFilename, filename: storedFilename });
-    }
+    try { pushRef(decodeURIComponent(match[1])); } catch { pushRef(match[1]); }
   }
 
   for (const match of source.matchAll(/```lucy-widget\s*([\s\S]*?)```/gi)) {
@@ -398,7 +405,11 @@ function extractGeneratedFileRefsFromText(text = "") {
     if (!widget || typeof widget !== "object") continue;
     const storedFilename = widget.storedFilename || widget.raw?.storedFilename;
     const filename = widget.filename || widget.raw?.filename || storedFilename;
-    if (storedFilename || filename) refs.push({ storedFilename: storedFilename || filename, filename: filename || storedFilename });
+    pushRef(storedFilename || filename, filename || storedFilename);
+  }
+
+  for (const match of source.matchAll(/\b([\wğüşöçıİĞÜŞÖÇ ._-]{2,120}\.(?:xlsx|xls|pdf|zip|docx|txt|csv|png|jpg|jpeg))\b/gi)) {
+    pushRef(match[1], match[1]);
   }
 
   return refs;
@@ -414,6 +425,71 @@ function collectConversationGeneratedFileRefs(req) {
   return refs;
 }
 
+function generatedFileExists(storedFilename = "") {
+  const full = path.join(GENERATED_DIR, path.basename(String(storedFilename || "")));
+  try { return fs.existsSync(full) && fs.statSync(full).isFile(); } catch { return false; }
+}
+
+function resolveStoredGeneratedFileName(ref = {}) {
+  const wanted = path.basename(String(ref.storedFilename || ref.filename || "").trim());
+  if (!wanted) return "";
+  if (generatedFileExists(wanted)) return wanted;
+  try {
+    ensureGeneratedDir();
+    const files = fs.readdirSync(GENERATED_DIR).filter((name) => !name.startsWith("."));
+    const exact = files.find((name) => name === wanted);
+    if (exact) return exact;
+    const suffix = files
+      .filter((name) => name.endsWith(wanted))
+      .map((name) => ({ name, mtimeMs: fs.statSync(path.join(GENERATED_DIR, name)).mtimeMs }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
+    if (suffix?.name) return suffix.name;
+  } catch {}
+  return wanted;
+}
+
+function latestGeneratedFileByIntent(req, extensions = []) {
+  const normalizedExt = extensions.map((ext) => String(ext).replace(/^\./, "").toLowerCase()).filter(Boolean);
+  const intent = normalizeIntentText(latestUserIntentText(req));
+  const keywordHints = [
+    /pazar|alisveris|market/.test(intent) ? ["pazar", "alisveris", "alışveriş", "market"] : [],
+    /siir|şiir/.test(intent) ? ["siir", "şiir"] : [],
+    /sohbet|konusma|konuşma/.test(intent) ? ["sohbet", "konusma", "konuşma"] : [],
+  ].flat();
+  try {
+    ensureGeneratedDir();
+    const files = fs.readdirSync(GENERATED_DIR)
+      .filter((name) => !name.startsWith("."))
+      .map((name) => {
+        const full = path.join(GENERATED_DIR, name);
+        const stat = fs.statSync(full);
+        if (!stat.isFile()) return null;
+        const ext = path.extname(name).replace(/^\./, "").toLowerCase();
+        if (normalizedExt.length && !normalizedExt.includes(ext)) return null;
+        const score = keywordHints.some((hint) => normalizeIntentText(name).includes(normalizeIntentText(hint))) ? 1000000000000 : 0;
+        return { name, full, mtimeMs: stat.mtimeMs + score };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return files[0] || null;
+  } catch { return null; }
+}
+
+function pickLastGeneratedRefForIntent(req, extensions = []) {
+  const refs = collectConversationGeneratedFileRefs(req);
+  const normalizedExt = extensions.map((ext) => String(ext).replace(/^\./, "").toLowerCase()).filter(Boolean);
+  for (let i = refs.length - 1; i >= 0; i -= 1) {
+    const ref = refs[i];
+    const name = ref.storedFilename || ref.filename || "";
+    const ext = path.extname(name).replace(/^\./, "").toLowerCase();
+    if (normalizedExt.length && !normalizedExt.includes(ext)) continue;
+    const stored = resolveStoredGeneratedFileName(ref);
+    if (stored) return { storedFilename: stored, filename: ref.filename || stored };
+  }
+  const disk = latestGeneratedFileByIntent(req, normalizedExt);
+  return disk?.name ? { storedFilename: disk.name, filename: disk.name } : null;
+}
+
 function enrichToolCallInput(call, req) {
   if (!call || typeof call !== "object") return call;
   const toolName = String(call.tool || "").toLowerCase();
@@ -422,19 +498,23 @@ function enrichToolCallInput(call, req) {
   if (toolName === "zip") {
     const hasFiles = Array.isArray(input.files) && input.files.length > 0;
     if (!hasFiles) {
-      const refs = collectConversationGeneratedFileRefs(req);
-      const lastRef = refs[refs.length - 1];
-      if (lastRef?.storedFilename) {
-        input.files = [{
-          storedFilename: lastRef.storedFilename,
-          filename: lastRef.filename || lastRef.storedFilename,
-        }];
+      const intent = normalizeIntentText(latestUserIntentText(req));
+      const preferredExts = /excel|excell|xlsx|xls|tablo|pazar|alisveris/.test(intent)
+        ? ["xlsx", "xls"]
+        : (/pdf/.test(intent) ? ["pdf"] : []);
+      const ref = pickLastGeneratedRefForIntent(req, preferredExts);
+      if (ref?.storedFilename) {
+        input.files = [{ storedFilename: ref.storedFilename, filename: ref.filename || ref.storedFilename }];
       } else {
         const latest = latestGeneratedFileFromDisk();
         if (latest?.name) input.files = [{ storedFilename: latest.name, filename: latest.name }];
       }
     }
-    if (!input.filename) input.filename = "lucy-dosyalari.zip";
+    if (!input.filename) {
+      const first = input.files?.[0]?.filename || input.files?.[0]?.storedFilename || "lucy-dosyalari";
+      const base = path.basename(String(first), path.extname(String(first))).replace(/^[0-9]+-/, "") || "lucy-dosyalari";
+      input.filename = `${base}.zip`;
+    }
   }
 
   return { ...call, input };
@@ -563,7 +643,7 @@ function detectForcedToolIntent(req) {
 
   if (/\b(qr|karekod)\b|qr kod|qr olustur|qr yap/.test(text)) return { tool: "qr", raw, text };
   if (/\b(zip|sikistir|arsiv)\b|zip olarak|zip yap|zip hazirla/.test(text)) return { tool: "zip", raw, text };
-  if (/\b(excel|xlsx|xls)\b|excel dosyasi|xls dosyasi|tabloyu excel/.test(text)) return { tool: "excel", raw, text };
+  if (/\b(excel|excell|xlsx|xls)\b|excel dosyasi|excell dosyasi|xls dosyasi|xlsx dosyasi|tabloyu excel|tabloyu excell/.test(text)) return { tool: "excel", raw, text };
   if (/\b(chartdata|chart data)\b|grafik|pasta grafik|pasta gorsel|bar grafik|cizgi grafik|sutun grafik/.test(text)) return { tool: "chartData", raw, text };
   if (/\b(mermaid)\b|diyagram|akis semasi|akis|sema|gorsel sema|mermaid gorsel/.test(text)) return { tool: "mermaid", raw, text };
   if (/\b(pdf)\b|pdf yap|pdf yaz|pdf olarak|konusmalari pdf|sohbeti pdf/.test(text)) return { tool: "pdf", raw, text };
@@ -821,14 +901,23 @@ function buildForcedToolCall(intent, answer = "", req = null) {
   }
 
   if (tool === "zip") {
-    return { tool: "zip", input: { filename: "lucy-dosyalari.zip" } };
+    const intent = userText;
+    const preferredExts = /excel|excell|xlsx|xls|tablo|pazar|alisveris/.test(intent) ? ["xlsx", "xls"] : (/pdf/.test(intent) ? ["pdf"] : []);
+    const ref = pickLastGeneratedRefForIntent(req, preferredExts);
+    const files = ref?.storedFilename ? [{ storedFilename: ref.storedFilename, filename: ref.filename || ref.storedFilename }] : [];
+    return { tool: "zip", input: { filename: files[0]?.filename ? `${path.basename(files[0].filename, path.extname(files[0].filename))}.zip` : "lucy-dosyalari.zip", files } };
   }
 
   if (tool === "pdf") {
     const allConversation = /butun|bütün|tum|tüm|konusma|konuşma|sohbet/.test(userText);
-    const text = allConversation ? conversationToPlainText(req, { skipLatestUser: true }) : (lastAssistant || cleanedAnswer || sourceText);
+    const tableSource = latestAssistantExcelSource(req, answer);
+    const text = allConversation
+      ? conversationToPlainText(req, { skipLatestUser: true })
+      : (/pazar|alisveris|alışveriş|tablo|ekrandaki|göründüğü|gorundugu/.test(userText) && tableSource ? tableSource : (lastAssistant || cleanedAnswer || sourceText));
     if (!String(text || "").trim()) return null;
-    return { tool: "pdf", input: { title: allConversation ? "LUCY Sohbet Dökümü" : "LUCY PDF", text, filename: allConversation ? "lucy-sohbet-dokumu.pdf" : "lucy.pdf" } };
+    const title = allConversation ? "LUCY Sohbet Dökümü" : (excelTitleFromIntent(userText, text) || "LUCY PDF");
+    const filename = allConversation ? "lucy-sohbet-dokumu.pdf" : `${excelFilenameFromTitle(title).replace(/\.xlsx$/i, "")}.pdf`;
+    return { tool: "pdf", input: { title, text, filename } };
   }
 
   if (tool === "calculator") {
