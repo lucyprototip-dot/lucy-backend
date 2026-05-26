@@ -2,8 +2,9 @@
   "name": "backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "system.js",
   "scripts": {
+    "start": "node system.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -17,6 +18,17 @@
     "mammoth": "^1.12.0",
     "multer": "^2.1.1",
     "pdf-parse": "^2.4.5",
-    "xlsx": "^0.18.5"
+    "exceljs": "^4.4.0",
+    "mermaid": "^11.12.2",
+    "puppeteer": "^24.31.0",
+    "chart.js": "^4.5.1",
+    "sharp": "^0.34.5",
+    "d3": "^7.9.0",
+    "pdfkit": "^0.17.2",
+    "mathjs": "^15.1.0",
+    "axios": "^1.13.2",
+    "cheerio": "^1.1.2",
+    "openai": "^6.9.1",
+    "tesseract.js": "^6.0.1"
   }
 }
