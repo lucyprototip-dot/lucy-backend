@@ -336,7 +336,13 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     text: normalized.text || normalized.message || "",
     files: Array.isArray(normalized.files) ? normalized.files : undefined,
     count: normalized.count,
-    raw: normalized,
+    raw: {
+      success: normalized.success !== false,
+      message: normalized.message || normalized.text || "",
+      error: normalized.error || "",
+      storedFilename: normalized.storedFilename || "",
+      filename: normalized.filename || "",
+    },
   };
 }
 
@@ -354,72 +360,6 @@ function summarizeToolResultLine(toolName, ui) {
   return `✅ ${toolName}: İşlem tamamlandı.`;
 }
 
-
-
-function sanitizeLucyWidgetFences(text = "") {
-  return String(text || "")
-    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
-    .replace(/``lucy-widget\s*[\s\S]*?``/gi, "")
-    .replace(/`{1,3}lucy-widget\s*[\s\S]*?$/gi, "")
-    .replace(/\n\s*\}\s*\n?/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function parseMarkdownTableFromText(text = "") {
-  const lines = String(text || "").split(/\r?\n/);
-  for (let i = lines.length - 2; i >= 0; i -= 1) {
-    const header = lines[i];
-    const sep = lines[i + 1];
-    if (!header?.includes("|") || !/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(sep || "")) continue;
-    const toCells = (line) => String(line || "").trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim()).filter((_, idx, arr) => !(arr.length === 1 && arr[0] === ""));
-    const columns = toCells(header);
-    const rows = [];
-    for (let j = i + 2; j < lines.length; j += 1) {
-      const rowLine = lines[j];
-      if (!rowLine || !rowLine.includes("|")) break;
-      const cells = toCells(rowLine);
-      if (!cells.length) continue;
-      const row = {};
-      columns.forEach((col, idx) => { row[col || `Sütun ${idx + 1}`] = cells[idx] || ""; });
-      rows.push(row);
-    }
-    if (columns.length && rows.length) return { columns, rows };
-  }
-  return null;
-}
-
-function findLastMarkdownTableInRequest(req) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const content = messages[i]?.content || messages[i]?.text || "";
-    const table = parseMarkdownTableFromText(content);
-    if (table) return table;
-  }
-  return null;
-}
-
-function inferSimpleTableFromLastAssistant(req) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  const lastAssistant = [...messages].reverse().find((m) => m?.role === "assistant" && String(m?.content || m?.text || "").trim());
-  const text = String(lastAssistant?.content || lastAssistant?.text || "").trim();
-  if (!text) return null;
-  const rows = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 40).map((line, index) => ({ No: index + 1, İçerik: line }));
-  return rows.length ? { columns: ["No", "İçerik"], rows } : null;
-}
-
-function ensureTableInputForTool(input = {}, req, preferTitle = "Lucy Tablosu") {
-  const next = input && typeof input === "object" ? { ...input } : {};
-  if (Array.isArray(next.rows) && next.rows.length) return next;
-  const table = findLastMarkdownTableInRequest(req) || inferSimpleTableFromLastAssistant(req);
-  if (table?.rows?.length) {
-    next.columns = Array.isArray(next.columns) && next.columns.length ? next.columns : table.columns;
-    next.rows = table.rows;
-    next.title = next.title || preferTitle;
-    next.sheetName = next.sheetName || "Lucy Tablosu";
-  }
-  return next;
-}
 
 function latestGeneratedFileFromDisk() {
   try {
@@ -474,23 +414,77 @@ function collectConversationGeneratedFileRefs(req) {
   return refs;
 }
 
+function parseMarkdownTableFromText(text = "") {
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    if (!lines[i].includes("|") || !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(lines[i + 1])) continue;
+    const cells = (line) => line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim().replace(/\*\*/g, ""));
+    const columns = cells(lines[i]);
+    const rows = [];
+    for (let j = i + 2; j < lines.length && lines[j].includes("|"); j += 1) {
+      const values = cells(lines[j]);
+      const row = {};
+      columns.forEach((column, index) => { row[column] = values[index] || ""; });
+      rows.push(row);
+    }
+    if (columns.length && rows.length) return { columns, rows, markdown: [lines[i], lines[i + 1], ...rows.map((row) => `| ${columns.map((c) => row[c] || "").join(" | ")} |`)].join("\n") };
+  }
+  return null;
+}
+
+function latestConversationTable(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const content = typeof messages[i]?.content === "string" ? messages[i].content : (messages[i]?.text || "");
+    const table = parseMarkdownTableFromText(content);
+    if (table) return table;
+  }
+  return null;
+}
+
+function latestAssistantText(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const role = String(messages[i]?.role || "").toLowerCase();
+    const content = typeof messages[i]?.content === "string" ? messages[i].content : (messages[i]?.text || "");
+    if (role === "assistant" && String(content || "").trim()) return content;
+  }
+  return "";
+}
+
 function enrichToolCallInput(call, req) {
   if (!call || typeof call !== "object") return call;
   const toolName = String(call.tool || "").toLowerCase();
   const input = call.input && typeof call.input === "object" ? { ...call.input } : {};
 
   if (toolName === "excel") {
-    Object.assign(input, ensureTableInputForTool(input, req, input.title || "Profesyonel Tablo"));
-    if (!input.filename) input.filename = "Lucy_Profesyonel_Tablo.xlsx";
-    if (/\.xls$/i.test(input.filename)) input.filename = input.filename.replace(/\.xls$/i, ".xlsx");
+    const hasRows = Array.isArray(input.rows) && input.rows.length > 0;
+    const hasText = Boolean(input.text || input.markdown || input.content);
+    if (!hasRows && !hasText) {
+      const table = latestConversationTable(req);
+      if (table) {
+        input.rows = table.rows;
+        input.columns = input.columns || table.columns;
+        input.markdown = table.markdown;
+        input.title = input.title || "Lucy Tablosu";
+      }
+    }
+    if (input.filename && /\.xls$/i.test(String(input.filename))) input.filename = String(input.filename).replace(/\.xls$/i, ".xlsx");
   }
 
   if (toolName === "pdf") {
-    const lowerPrompt = String(req?.body?.messages?.slice?.(-1)?.[0]?.content || "").toLowerCase();
-    if ((lowerPrompt.includes("tablo") || lowerPrompt.includes("excel")) && !input.text) {
-      Object.assign(input, ensureTableInputForTool(input, req, input.title || "Profesyonel Tablo"));
+    const hasContent = Boolean(input.text || input.markdown || input.content || (Array.isArray(input.rows) && input.rows.length));
+    if (!hasContent) {
+      const table = latestConversationTable(req);
+      if (table) {
+        input.rows = table.rows;
+        input.columns = input.columns || table.columns;
+        input.title = input.title || "Lucy Tablosu";
+      } else {
+        const previous = latestAssistantText(req);
+        if (previous) input.text = previous;
+      }
     }
-    if (!input.filename) input.filename = "Lucy_Belge.pdf";
   }
 
   if (toolName === "zip") {
@@ -541,15 +535,19 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     widgets.push(widgetFence(ui));
   }
 
-  const cleanAnswer = sanitizeLucyWidgetFences(String(answer || "")
+  const cleanAnswer = String(answer || "")
+    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
     .replace(/```json\s*[\s\S]*?```/gi, "")
     .replace(/```\s*\{[\s\S]*?\}\s*```/g, "")
     .replace(/\{\s*"tool_call"[\s\S]*?\}\s*$/i, "")
-    .trim());
+    .trim();
 
-  const finalAnswer = cleanAnswer;
+  const finalAnswer = [
+    cleanAnswer,
+    widgets.join(""),
+  ].filter(Boolean).join("\n\n");
 
-  return { toolCalls, toolResults, finalAnswer, widgets };
+  return { toolCalls, toolResults, finalAnswer };
 }
 
 
@@ -907,12 +905,12 @@ function buildSystemPrompt(body = {}) {
       "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text veya tablo PDF istendiyse input.rows + input.columns kullan. Excel için input.rows + input.columns kullan; profesyonel başlık için input.title, sayfa adı için input.sheetName, dosya adı için input.filename ver. Kullanıcı “bu tabloyu Excel/PDF olarak gönder” derse önceki mesajdaki tabloyu rows/columns olarak çıkar ve ilgili tool_call üret. QR için input.text veya input.url kullan.",
+      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan.",
       "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
       "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
       "Mermaid istenirse mermaid tool_call üret veya doğrudan ```mermaid kod bloğu yaz.",
       "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
-      "Excel/PDF tablo üretirken satır ve sütunları boş bırakma; tablo yoksa konuşmadaki son tabloyu veya son yapılandırılmış veriyi kullan. Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
+      "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
     ].join("\n"));
   }
 
