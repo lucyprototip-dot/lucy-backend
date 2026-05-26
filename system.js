@@ -435,15 +435,26 @@ function enrichToolCallInput(call, req) {
   return { ...call, input };
 }
 
+function extractMermaidBlocksFromAnswer(answer = "") {
+  const blocks = [];
+  const source = String(answer || "");
+  for (const match of source.matchAll(/```mermaid\s*([\s\S]*?)```/gi)) {
+    const code = String(match[1] || "").trim();
+    if (code) blocks.push({ tool: "mermaid", input: { code, title: "Mermaid diyagram" } });
+  }
+  return blocks;
+}
+
 async function executeToolCallsFromAnswer(answer = "", req) {
-  const toolCalls = extractToolCallsFromAnswer(answer);
+  const explicitCalls = extractToolCallsFromAnswer(answer);
+  const mermaidCalls = explicitCalls.length ? [] : extractMermaidBlocksFromAnswer(answer);
+  const toolCalls = [...explicitCalls, ...mermaidCalls];
+
   if (!toolCalls.length) {
     return { toolCalls: [], toolResults: [], finalAnswer: answer };
   }
 
   const toolResults = [];
-  const resultLines = [];
-  const widgets = [];
 
   for (const rawCall of toolCalls) {
     const call = enrichToolCallInput(rawCall, req);
@@ -457,23 +468,11 @@ async function executeToolCallsFromAnswer(answer = "", req) {
       result: persistedResult,
       ui,
     });
-
-    resultLines.push(summarizeToolResultLine(call.tool, ui));
-    widgets.push(widgetFence(ui));
   }
 
-  const cleanAnswer = String(answer || "")
-    .replace(/```json\s*[\s\S]*?```/gi, "")
-    .replace(/```\s*\{[\s\S]*?\}\s*```/g, "")
-    .replace(/\{\s*"tool_call"[\s\S]*?\}\s*$/i, "")
-    .trim();
-
-  const finalAnswer = [
-    cleanAnswer,
-    widgets.join(""),
-  ].filter(Boolean).join("\n\n");
-
-  return { toolCalls, toolResults, finalAnswer };
+  // Tool çalışırken kullanıcıya ham JSON, lucy-widget, Mermaid kodu veya roleplay metni gösterme.
+  // Frontend yalnızca `toolResults` kartlarını/grafikleri/dosyaları gösterecek.
+  return { toolCalls, toolResults, finalAnswer: "" };
 }
 
 
@@ -831,10 +830,10 @@ function buildSystemPrompt(body = {}) {
       "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan.",
+      "PDF için input.text kullan. Excel için input.rows dizisi kullan; rows yoksa input.text içine markdown tablo/metin koyabilirsin. ZIP için input.files yoksa backend son üretilen dosyayı otomatik zincire alır. QR için input.text veya input.url kullan.",
       "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
       "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
-      "Mermaid istenirse mermaid tool_call üret veya doğrudan ```mermaid kod bloğu yaz.",
+      "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma.",
       "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
       "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
     ].join("\n"));
@@ -2193,49 +2192,30 @@ function exporterXlsx(title, messages) {
 }
 
 
-function findLucyPdfFont() {
+function cleanUnicodePdfText(value = "") {
+  return String(value || "")
+    .normalize("NFC")
+    .replace(/[\u200d\ufe0f]/g, "")
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, "")
+    .replace(/\r\n/g, "\n");
+}
+
+function findUnicodePdfFont() {
   const candidates = [
-    envValue("LUCY_PDF_FONT"),
-    path.join(__dirname, "fonts", "NotoSans-Regular.ttf"),
-    path.join(__dirname, "fonts", "DejaVuSans.ttf"),
+    process.env.LUCY_PDF_FONT,
+    path.resolve(__dirname, "fonts", "DejaVuSans.ttf"),
+    path.resolve(__dirname, "fonts", "NotoSans-Regular.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/calibri.ttf",
     "C:/Windows/Fonts/segoeui.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
   ].filter(Boolean);
   return candidates.find((candidate) => {
-    try { return fs.existsSync(candidate); } catch { return false; }
-  }) || "";
-}
-
-function stripProblematicPdfEmoji(value = "") {
-  return String(value || "")
-    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "")
-    .replace(/\s+$/gm, "");
-}
-
-function exporterPdfKit(title, messages) {
-  return new Promise((resolve, reject) => {
-    const fontPath = findLucyPdfFont();
-    const chunks = [];
-    const doc = new PDFDocument({ margin: 48, size: "A4", bufferPages: true });
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
-    if (fontPath) doc.font(fontPath);
-    doc.fontSize(18).text(stripProblematicPdfEmoji(title || "LUCY Export"), { underline: true });
-    doc.moveDown(0.55);
-    doc.fontSize(9).fillColor("#666").text(`LUCY Exporter - ${messages.length} mesaj`);
-    doc.moveDown();
-    doc.fillColor("#111").fontSize(11).text(stripProblematicPdfEmoji(exporterPlainText(title, messages)), {
-      align: "left",
-      lineGap: 4,
-    });
-    doc.end();
+    try { return fs.existsSync(candidate) && fs.statSync(candidate).isFile(); } catch { return false; }
   });
 }
 
@@ -2243,49 +2223,33 @@ function pdfEscape(value = "") {
   return String(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
 
-function exporterPdf(title, messages) {
-  const lines = [title, `LUCY Exporter - ${messages.length} mesaj`, ""].concat(exporterPlainText(title, messages).split("\n"));
-  const wrapped = [];
-  lines.forEach((line) => {
-    const clean = line.slice(0, 260);
-    if (!clean) wrapped.push("");
-    else for (let i = 0; i < clean.length; i += 92) wrapped.push(clean.slice(i, i + 92));
+async function exporterPdf(title, messages) {
+  const chunks = [];
+  const safeTitle = cleanUnicodePdfText(title || "Lucy sohbet").trim() || "Lucy sohbet";
+  const text = cleanUnicodePdfText(exporterPlainText(safeTitle, messages));
+  const doc = new PDFDocument({ margin: 50, size: "A4", info: { Title: safeTitle, Creator: "LUCY Exporter" } });
+
+  return await new Promise((resolve) => {
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+
+    const fontPath = findUnicodePdfFont();
+    if (fontPath) {
+      doc.registerFont("LucyUnicode", fontPath);
+      doc.font("LucyUnicode");
+    } else {
+      doc.font("Helvetica");
+    }
+
+    doc.fontSize(20).text(safeTitle, { underline: true });
+    doc.moveDown(0.6);
+    doc.fontSize(10).fillColor("#555").text(`LUCY Exporter - ${messages.length} mesaj`);
+    doc.moveDown(1);
+    doc.fillColor("#111").fontSize(10).text(text, { align: "left", lineGap: 3 });
+    doc.end();
   });
-  const pageHeight = 842;
-  const lineHeight = 15;
-  const linesPerPage = 48;
-  const pages = [];
-  for (let i = 0; i < wrapped.length; i += linesPerPage) pages.push(wrapped.slice(i, i + linesPerPage));
-  const objects = [];
-  function add(obj) { objects.push(obj); return objects.length; }
-  const fontId = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
-  const pageIds = [];
-  const contentIds = [];
-  pages.forEach((pageLines) => {
-    const content = pageLines.map((line, index) => `BT /F1 10 Tf 50 ${pageHeight - 55 - index * lineHeight} Td (${pdfEscape(line)}) Tj ET`).join("\n");
-    const cid = add(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`);
-    contentIds.push(cid);
-    const pid = add(null);
-    pageIds.push(pid);
-  });
-  const pagesId = add(null);
-  pageIds.forEach((pid, idx) => {
-    objects[pid - 1] = `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentIds[idx]} 0 R >>`;
-  });
-  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
-  const catalogId = add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
-  let pdf = "%PDF-1.4\n";
-  const offsets = [0];
-  objects.forEach((obj, idx) => {
-    offsets.push(Buffer.byteLength(pdf));
-    pdf += `${idx + 1} 0 obj\n${obj}\nendobj\n`;
-  });
-  const xref = Buffer.byteLength(pdf);
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  offsets.slice(1).forEach((offset) => { pdf += `${String(offset).padStart(10, "0")} 00000 n \n`; });
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  return Buffer.from(pdf, "binary");
 }
+
 
 app.post("/api/export-chat", async (req, res) => {
   try {
@@ -2306,7 +2270,7 @@ app.post("/api/export-chat", async (req, res) => {
     else if (format === "xls") { buffer = Buffer.from(exporterOfficeTable(title, messages), "utf8"); mime = "application/vnd.ms-excel;charset=utf-8"; }
     else if (format === "docx") { buffer = exporterDocx(title, messages); mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"; }
     else if (format === "xlsx") { buffer = exporterXlsx(title, messages); mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; }
-    else if (format === "pdf") { buffer = await exporterPdfKit(title, messages); mime = "application/pdf"; }
+    else if (format === "pdf") { buffer = await exporterPdf(title, messages); mime = "application/pdf"; }
     else if (format === "image" || format === "resim" || format === "svg") { buffer = Buffer.from(exporterSvg(title, messages), "utf8"); ext = "svg"; mime = "image/svg+xml;charset=utf-8"; }
     else { buffer = Buffer.from(exporterHtml(title, messages), "utf8"); ext = "html"; mime = "text/html;charset=utf-8"; }
 
