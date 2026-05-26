@@ -333,6 +333,11 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     mimeType: normalized.mimeType || normalized.contentType || "",
     chartType: normalized.chartType || input.chartType || "bar",
     data: normalized.data || normalized.chartData || null,
+    headers: normalized.headers || normalized.columnsList || [],
+    previewRows: normalized.previewRows || normalized.preview || [],
+    rows: normalized.rows,
+    columns: normalized.columns,
+    note: normalized.note || "",
     code: normalized.code || normalized.mermaid || "",
     text: normalized.text || normalized.message || "",
     files: Array.isArray(normalized.files) ? normalized.files : undefined,
@@ -450,7 +455,7 @@ function latestUserIntentText(req) {
 
 function requestedToolWork(req) {
   const text = latestUserIntentText(req).toLowerCase();
-  return /\b(pdf|zip|excel|xlsx|word|docx|csv|json|qr|ocr|webfetch|hesap|calculator)\b|grafik|chart|pasta|diyagram|mermaid|akış|akis|çiz|ciz|dosya|indir|tablo oluştur|rapor oluştur/.test(text);
+  return /\b(pdf|zip|excel|excell|xlsx|xls|word|docx|csv|json|qr|ocr|webfetch|hesap|calculator)\b|grafik|chart|pasta|diyagram|mermaid|akış|akis|çiz|ciz|dosya|indir|tablo oluştur|rapor oluştur/.test(text);
 }
 
 function requestedMermaidWork(req) {
@@ -579,6 +584,102 @@ function extractFirstMarkdownTable(text = "") {
   return table.join("\n");
 }
 
+function extractMarkdownTablesWithContext(text = "") {
+  const lines = String(text || "").split(/\r?\n/);
+  const tables = [];
+
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const isHeader = lines[i].includes("|") && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(String(lines[i + 1] || "").trim());
+    if (!isHeader) continue;
+
+    let title = "";
+    for (let back = i - 1; back >= 0; back -= 1) {
+      const candidate = String(lines[back] || "").replace(/^#{1,6}\s*/, "").replace(/[*_`]/g, "").trim();
+      if (!candidate) continue;
+      if (candidate.includes("|")) break;
+      title = candidate;
+      break;
+    }
+
+    const table = [];
+    let j = i;
+    for (; j < lines.length; j += 1) {
+      if (!lines[j].includes("|")) break;
+      table.push(lines[j]);
+    }
+    if (table.length >= 3) tables.push({ title, table: table.join("\n") });
+    i = Math.max(i, j - 1);
+  }
+
+  return tables;
+}
+
+function latestAssistantTableText(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || message.sender || "").toLowerCase();
+    if (role && !/assistant|lucy|bot|ai/.test(role)) continue;
+    const text = String(message.content || message.text || message.message || "").trim();
+    const tables = extractMarkdownTablesWithContext(text);
+    if (tables.length) return tables.map((item) => `${item.title ? `### ${item.title}\n` : ""}${item.table}`).join("\n\n");
+  }
+  return "";
+}
+
+function latestAssistantExcelSource(req, answer = "") {
+  const cleanedAnswer = stripEmptyCodeBlocks(answer);
+  const answerTables = extractMarkdownTablesWithContext(cleanedAnswer);
+  if (answerTables.length) return answerTables.map((item) => `${item.title ? `### ${item.title}\n` : ""}${item.table}`).join("\n\n");
+
+  const recentTable = latestAssistantTableText(req);
+  if (recentTable) return recentTable;
+
+  const lastAssistant = latestAssistantText(req);
+  if (extractFirstMarkdownTable(lastAssistant)) return lastAssistant;
+  return cleanedAnswer || lastAssistant || "";
+}
+
+function excelTitleFromIntent(userText = "", sourceText = "") {
+  if (/pazar|alışveriş|alisveris|market/.test(userText) || /pazar|alışveriş|alisveris|market/i.test(sourceText)) return "Pazar Alışveriş Listesi";
+  if (/bütçe|butce|harcama/.test(userText)) return "Harcama Tablosu";
+  if (/tool|araç|arac/.test(userText)) return "LUCY Tool Listesi";
+  return "LUCY Excel Tablosu";
+}
+
+function excelFilenameFromTitle(title = "lucy") {
+  return `${String(title || "lucy")
+    .toLocaleLowerCase("tr-TR")
+    .replace(/ğ/g, "g").replace(/ü/g, "u").replace(/ş/g, "s").replace(/ı/g, "i").replace(/ö/g, "o").replace(/ç/g, "c")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "") || "lucy"}.xlsx`;
+}
+
+function excelFallbackTable(userText = "") {
+  if (/pazar|alışveriş|alisveris|market/.test(userText)) {
+    return [
+      "| Kategori | Ürün | Miktar |",
+      "|---|---|---|",
+      "| Süt Ürünleri | Süt | 2 litre |",
+      "| Süt Ürünleri | Beyaz peynir | 500 gr |",
+      "| Süt Ürünleri | Kaşar peyniri | 300 gr |",
+      "| Temel Gıdalar | Ekmek | 2 adet |",
+      "| Temel Gıdalar | Pirinç | 1 kg |",
+      "| Sebze & Meyve | Domates | 1 kg |",
+      "| Sebze & Meyve | Patates | 2 kg |",
+      "| Et & Şarküteri | Tavuk göğsü | 1 kg |",
+      "| Diğer | Kağıt havlu | 2 paket |",
+    ].join("\n");
+  }
+
+  return [
+    "| Etiket | Değer |",
+    "|---|---|",
+    "| Örnek 1 | 10 |",
+    "| Örnek 2 | 20 |",
+  ].join("\n");
+}
+
 function parseLabelValuePairs(text = "") {
   const source = String(text || "");
   const pairs = [];
@@ -703,13 +804,20 @@ function buildForcedToolCall(intent, answer = "", req = null) {
   }
 
   if (tool === "excel") {
-    const text = sourceText && sourceText !== userRaw ? sourceText : [
-      "| Etiket | Değer |",
-      "|---|---|",
-      "| Örnek 1 | 10 |",
-      "| Örnek 2 | 20 |",
-    ].join("\n");
-    return { tool: "excel", input: { title: "LUCY Excel", text, filename: "lucy.xlsx" } };
+    const excelSource = latestAssistantExcelSource(req, answer);
+    const text = extractFirstMarkdownTable(excelSource) ? excelSource : (excelSource && excelSource !== userRaw ? excelSource : excelFallbackTable(userText));
+    const title = excelTitleFromIntent(userText, text);
+    const filename = excelFilenameFromTitle(title);
+    return {
+      tool: "excel",
+      input: {
+        title,
+        text,
+        filename,
+        sheetName: title,
+        subtitle: "LUCY tarafından profesyonel Excel tablosu olarak hazırlandı.",
+      },
+    };
   }
 
   if (tool === "zip") {
