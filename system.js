@@ -409,6 +409,128 @@ function collectConversationGeneratedFileRefs(req) {
   return refs;
 }
 
+
+function isPdfIntentText(text = "") {
+  const q = String(text || "").toLowerCase();
+  return /\bpdf\b|pdf[’'` ]?(e|ye|ya|i|ı| olarak)/i.test(q);
+}
+
+function isPdfOnlyCommand(text = "") {
+  const q = normalizeText(text).toLowerCase();
+  if (!isPdfIntentText(q)) return false;
+  const compact = q
+    .replace(/[.,!?;:]+/g, " ")
+    .replace(/\b(lütfen|lutfen|aşkım|askim|bunu|şunu|sunu|onu|son|sonuncu|cevabı|cevabi|çıktıyı|ciktiyi|olarak|hemen|sadece)\b/g, " ")
+    .replace(/\b(pdf|yap|hazırla|hazirla|oluştur|olustur|çevir|cevir|gönder|gonder|at|ver|indir|kaydet|dosya|yolla)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return compact.length === 0;
+}
+
+function stripPdfNoise(text = "") {
+  return normalizeText(text)
+    .replace(/```json\s*[\s\S]*?```/gi, "")
+    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
+    .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
+    .replace(/^\s*(tabii|tamam|elbette|olur)[^\n]{0,120}(pdf|dosya|hazırl|gönder)[^\n]*$/gim, "")
+    .replace(/^\s*(şimdi|hemen)[^\n]{0,120}(pdf|dosya|hazırl|gönder)[^\n]*$/gim, "")
+    .replace(/^\s*pdf\s+(hazırlandı|hazır|oluşturuldu|gönderiyorum|yapıyorum)[^\n]*$/gim, "")
+    .trim();
+}
+
+function serializeToolResultsForPdf(results = []) {
+  if (!Array.isArray(results) || !results.length) return "";
+  const parts = [];
+
+  for (const item of results) {
+    const ui = item?.ui || item;
+    if (!ui || typeof ui !== "object") continue;
+    const type = String(ui.type || ui.tool || "").toLowerCase();
+    const title = normalizeText(ui.title || ui.filename || ui.tool || "Lucy çıktısı");
+
+    if (type === "chart" && ui.data?.labels) {
+      const labels = ui.data.labels || [];
+      const values = ui.data.datasets?.[0]?.data || [];
+      const rows = labels.map((label, index) => `| ${label} | ${values[index] ?? ""} |`).join("\n");
+      parts.push(`## ${title}\n\n| Etiket | Değer |\n|---|---|\n${rows}`);
+      continue;
+    }
+
+    if (type === "mermaid" && (ui.code || ui.raw?.code || ui.raw?.mermaid)) {
+      parts.push(`## ${title}\n\nMermaid diyagram kodu\n\n${ui.code || ui.raw?.code || ui.raw?.mermaid}`);
+      continue;
+    }
+
+    if (ui.text || ui.raw?.message) {
+      parts.push(`## ${title}\n\n${ui.text || ui.raw?.message}`);
+    }
+  }
+
+  return parts.join("\n\n").trim();
+}
+
+function latestPdfSourceFromConversation(req, { includeLastUser = false } = {}) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  const latestUserTextValue = latestUserIntentText(req);
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || message.sender || "").toLowerCase();
+    const rawContent = typeof message.content === "string" ? message.content : (message.text || "");
+
+    if (!includeLastUser && role !== "assistant") continue;
+    if (!includeLastUser && normalizeText(rawContent) === normalizeText(latestUserTextValue)) continue;
+
+    const toolText = serializeToolResultsForPdf(message.toolResults || message.tools || []);
+    const content = stripPdfNoise([rawContent, toolText].filter(Boolean).join("\n\n"));
+    if (content.length >= 3) return content;
+  }
+
+  return "";
+}
+
+function titleFromPdfText(text = "", fallback = "Lucy PDF") {
+  const firstUseful = normalizeText(text)
+    .split(/\n+/)
+    .map((line) => line.replace(/^#{1,6}\s+/, "").replace(/^[-*•]\s+/, "").trim())
+    .find((line) => line && !/^\|/.test(line));
+  return (firstUseful || fallback).slice(0, 80);
+}
+
+function pdfFileNameFromTitle(title = "Lucy PDF") {
+  const ascii = String(title || "Lucy PDF")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[ığüşöçİĞÜŞÖÇ]/g, (ch) => ({ "ı": "i", "ğ": "g", "ü": "u", "ş": "s", "ö": "o", "ç": "c", "İ": "I", "Ğ": "G", "Ü": "U", "Ş": "S", "Ö": "O", "Ç": "C" }[ch] || ch))
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64) || "Lucy_PDF";
+  return `${ascii}.pdf`;
+}
+
+function buildPdfFallbackToolCall(answer = "", req = null) {
+  const latest = latestUserIntentText(req);
+  if (!isPdfIntentText(latest)) return null;
+
+  const answerText = stripPdfNoise(answer);
+  const previousText = latestPdfSourceFromConversation(req);
+  const commandOnly = isPdfOnlyCommand(latest);
+  const text = commandOnly ? (previousText || answerText) : (answerText || previousText);
+
+  if (!text) return null;
+
+  const title = titleFromPdfText(text, "Lucy PDF");
+  return {
+    tool: "pdf",
+    input: {
+      title,
+      text,
+      filename: pdfFileNameFromTitle(title),
+    },
+  };
+}
+
 function enrichToolCallInput(call, req) {
   if (!call || typeof call !== "object") return call;
   const toolName = String(call.tool || "").toLowerCase();
@@ -519,7 +641,14 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const allowMermaid = requestedMermaidWork(req);
   const allowAnyTool = requestedToolWork(req);
   const mermaidCalls = explicitCalls.length || !allowMermaid ? [] : extractMermaidBlocksFromAnswer(answer);
-  const toolCalls = [...explicitCalls, ...mermaidCalls].filter(isUsableToolCall);
+  let toolCalls = [...explicitCalls, ...mermaidCalls].filter(isUsableToolCall);
+
+  if (!toolCalls.length) {
+    const fallbackPdfCall = buildPdfFallbackToolCall(answer, req);
+    if (fallbackPdfCall && isUsableToolCall(fallbackPdfCall)) {
+      toolCalls = [fallbackPdfCall];
+    }
+  }
 
   if (!toolCalls.length) {
     const cleaned = sanitizeNormalAnswer(answer, req);
@@ -549,6 +678,21 @@ async function executeToolCallsFromAnswer(answer = "", req) {
       result: persistedResult,
       ui,
     });
+  }
+
+  const latestIntent = latestUserIntentText(req);
+  const alreadyHasPdf = toolCalls.some((call) => String(call.tool || "").toLowerCase() === "pdf");
+  if (isPdfIntentText(latestIntent) && !alreadyHasPdf) {
+    const pdfText = serializeToolResultsForPdf(toolResults) || latestPdfSourceFromConversation(req) || stripPdfNoise(answer);
+    if (pdfText) {
+      const pdfTitle = titleFromPdfText(pdfText, "Lucy PDF");
+      const pdfInput = { title: pdfTitle, text: pdfText, filename: pdfFileNameFromTitle(pdfTitle) };
+      const rawPdfResult = await executeLucyTool("pdf", pdfInput, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
+      const persistedPdfResult = persistToolFileResult(rawPdfResult, req);
+      const pdfUi = normalizeToolResultForUI("pdf", persistedPdfResult, pdfInput);
+      toolCalls.push({ tool: "pdf", input: pdfInput });
+      toolResults.push({ tool: "pdf", input: pdfInput, result: persistedPdfResult, ui: pdfUi });
+    }
   }
 
   // Tool çalışırken kullanıcıya ham JSON, lucy-widget, Mermaid kodu veya roleplay metni gösterme.
