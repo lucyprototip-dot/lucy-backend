@@ -1,201 +1,103 @@
 const ExcelJS = require("exceljs");
 
-function cleanText(value) {
-  if (value === null || value === undefined) return "";
-  return String(value)
-    .replace(/\r\n/g, "\n")
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
-    .trim();
-}
-
-function safeFileName(name, ext = ".xlsx") {
-  const raw = cleanText(name || "lucy-profesyonel-tablo")
-    .replace(/[\\/:*?"<>|]/g, "-")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "") || "lucy-profesyonel-tablo";
-  return raw.toLowerCase().endsWith(ext) ? raw : `${raw}${ext}`;
-}
-
 function parseMarkdownTable(text = "") {
-  const lines = cleanText(text)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.includes("|"));
-
-  if (lines.length < 2) return [];
-
-  const splitRow = (line) => line
-    .replace(/^\|/, "")
-    .replace(/\|$/, "")
-    .split("|")
-    .map((cell) => cleanText(cell));
-
-  const headerIndex = lines.findIndex((line, index) => {
-    const next = lines[index + 1] || "";
-    return /\|/.test(line) && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(next);
-  });
-
-  if (headerIndex < 0) return [];
-
-  const headers = splitRow(lines[headerIndex]).map((h, i) => h || `Sütun ${i + 1}`);
-  const bodyLines = lines.slice(headerIndex + 2);
-
-  return bodyLines
-    .map(splitRow)
-    .filter((cells) => cells.some(Boolean))
-    .map((cells) => {
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    if (!lines[i].includes("|") || !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(lines[i + 1])) continue;
+    const cells = (line) => line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim().replace(/\*\*/g, ""));
+    const columns = cells(lines[i]);
+    const rows = [];
+    for (let j = i + 2; j < lines.length && lines[j].includes("|"); j += 1) {
+      const values = cells(lines[j]);
       const row = {};
-      headers.forEach((header, index) => {
-        row[header] = cells[index] || "";
-      });
-      return row;
-    });
-}
-
-function normalizeRows(input = {}) {
-  if (Array.isArray(input.rows)) return input.rows;
-  if (Array.isArray(input.data)) return input.data;
-  if (Array.isArray(input.table)) return input.table;
-  if (Array.isArray(input.values) && Array.isArray(input.columns)) {
-    return input.values.map((cells) => {
-      const row = {};
-      input.columns.forEach((column, index) => {
-        row[cleanText(column) || `Sütun ${index + 1}`] = Array.isArray(cells) ? cells[index] : "";
-      });
-      return row;
-    });
+      columns.forEach((column, index) => { row[column] = values[index] || ""; });
+      rows.push(row);
+    }
+    if (columns.length && rows.length) return { columns, rows };
   }
-
-  const text = input.markdown || input.tableMarkdown || input.text || input.raw || "";
-  const parsed = parseMarkdownTable(text);
-  if (parsed.length) return parsed;
-
-  const clean = cleanText(text);
-  if (clean) {
-    return clean.split("\n").filter(Boolean).map((line, index) => ({
-      No: index + 1,
-      İçerik: line,
-    }));
-  }
-
-  return [];
+  return { columns: [], rows: [] };
 }
 
-function normalizeColumns(rows = [], input = {}) {
-  const explicit = Array.isArray(input.columns) ? input.columns.map(cleanText).filter(Boolean) : [];
-  const keys = explicit.length ? explicit : Array.from(new Set(rows.flatMap((row) => Object.keys(row || {}))));
-  return keys.length ? keys : ["No", "İçerik"];
-}
-
-function columnWidth(rows, key) {
-  const max = Math.max(
-    cleanText(key).length,
-    ...rows.slice(0, 150).map((row) => cleanText(row?.[key]).length)
-  );
-  return Math.min(48, Math.max(14, max + 4));
+function safeSheetName(name = "LUCY") {
+  return String(name || "LUCY").replace(/[\\/*?:[\]]/g, " ").slice(0, 31) || "LUCY";
 }
 
 module.exports = {
   name: "excel",
-  description: "Profesyonel biçimli Excel çalışma kitabı oluşturur",
+  description: "JSON/markdown satırlarından profesyonel Excel çalışma kitabı oluşturur",
 
   async execute(input = {}) {
-    const rows = normalizeRows(input);
-
+    let rows = Array.isArray(input.rows) ? input.rows : [];
+    let columns = Array.isArray(input.columns) ? input.columns : [];
     if (!rows.length) {
-      return {
-        success: false,
-        error: "rows_required",
-        message: "Excel oluşturmak için rows, markdown tablo veya text gerekli.",
-      };
+      const parsed = parseMarkdownTable(input.markdown || input.text || input.content || "");
+      rows = parsed.rows;
+      columns = columns.length ? columns : parsed.columns;
     }
 
-    const title = cleanText(input.title || input.name || "LUCY Profesyonel Tablo");
-    const sheetName = cleanText(input.sheetName || "LUCY Tablo").slice(0, 31) || "LUCY Tablo";
-    const columns = normalizeColumns(rows, input);
+    if (!rows.length) {
+      return { success: false, error: "rows_required", message: "Excel oluşturmak için rows, markdown tablo veya text gerekli." };
+    }
 
+    columns = columns.length ? columns : Object.keys(rows[0]);
     const workbook = new ExcelJS.Workbook();
     workbook.creator = "LUCY";
     workbook.created = new Date();
-    workbook.modified = new Date();
-
-    const sheet = workbook.addWorksheet(sheetName, {
-      views: [{ state: "frozen", ySplit: 2 }],
-      pageSetup: { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+    const sheet = workbook.addWorksheet(safeSheetName(input.sheetName || "LUCY"), {
+      views: [{ state: "frozen", ySplit: input.title ? 2 : 1 }],
     });
 
-    sheet.addRow([title]);
-    sheet.mergeCells(1, 1, 1, columns.length);
-    const titleCell = sheet.getCell(1, 1);
-    titleCell.font = { name: "Arial", size: 16, bold: true, color: { argb: "FFFFFFFF" } };
-    titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111827" } };
-    titleCell.alignment = { vertical: "middle", horizontal: "center" };
-    sheet.getRow(1).height = 28;
+    if (input.title) {
+      sheet.mergeCells(1, 1, 1, columns.length);
+      const titleCell = sheet.getCell(1, 1);
+      titleCell.value = input.title;
+      titleCell.font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
+      titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F2937" } };
+      titleCell.alignment = { vertical: "middle", horizontal: "center" };
+      sheet.getRow(1).height = 28;
+    }
 
-    sheet.addRow(columns);
-    const headerRow = sheet.getRow(2);
-    headerRow.height = 24;
-    headerRow.eachCell((cell) => {
-      cell.font = { name: "Arial", size: 11, bold: true, color: { argb: "FFFFFFFF" } };
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF374151" } };
+    const headerRowIndex = input.title ? 2 : 1;
+    const headerRow = sheet.getRow(headerRowIndex);
+    columns.forEach((key, index) => {
+      const cell = headerRow.getCell(index + 1);
+      cell.value = key;
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111827" } };
       cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-      cell.border = {
-        top: { style: "thin", color: { argb: "FF9CA3AF" } },
-        left: { style: "thin", color: { argb: "FF9CA3AF" } },
-        bottom: { style: "thin", color: { argb: "FF9CA3AF" } },
-        right: { style: "thin", color: { argb: "FF9CA3AF" } },
-      };
+      cell.border = { bottom: { style: "thin", color: { argb: "FF9CA3AF" } } };
     });
 
     rows.forEach((row, rowIndex) => {
-      const excelRow = sheet.addRow(columns.map((key) => row?.[key] ?? ""));
-      excelRow.height = 22;
+      const excelRow = sheet.addRow(columns.map((key) => row[key] ?? ""));
       excelRow.eachCell((cell) => {
-        cell.font = { name: "Arial", size: 10, color: { argb: "FF111827" } };
-        cell.alignment = { vertical: "top", horizontal: "left", wrapText: true };
-        cell.fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: rowIndex % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB" },
-        };
+        cell.alignment = { vertical: "middle", wrapText: true };
         cell.border = {
           top: { style: "thin", color: { argb: "FFE5E7EB" } },
-          left: { style: "thin", color: { argb: "FFE5E7EB" } },
           bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
-          right: { style: "thin", color: { argb: "FFE5E7EB" } },
+          left: { style: "thin", color: { argb: "FFF3F4F6" } },
+          right: { style: "thin", color: { argb: "FFF3F4F6" } },
         };
+        if (rowIndex % 2 === 1) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF9FAFB" } };
       });
     });
 
-    sheet.columns = columns.map((key, index) => ({
-      key: `col_${index}`,
-      width: columnWidth(rows, key),
-    }));
-
-    sheet.autoFilter = {
-      from: { row: 2, column: 1 },
-      to: { row: 2, column: columns.length },
-    };
-
-    sheet.eachRow((row) => {
-      row.eachCell((cell) => {
-        if (typeof cell.value === "string" && /^\d+(\.\d+)?%?$/.test(cell.value.trim())) {
-          cell.alignment = { ...cell.alignment, horizontal: "center" };
-        }
-      });
+    columns.forEach((key, index) => {
+      const values = [key, ...rows.map((row) => String(row[key] ?? ""))];
+      sheet.getColumn(index + 1).width = Math.min(42, Math.max(14, ...values.map((v) => v.length + 3)));
     });
+    sheet.autoFilter = { from: { row: headerRowIndex, column: 1 }, to: { row: headerRowIndex, column: columns.length } };
 
     const buffer = await workbook.xlsx.writeBuffer();
-
+    const requestedName = input.filename || "lucy.xlsx";
+    const filename = String(requestedName).replace(/\.xls$/i, ".xlsx");
     return {
       success: true,
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      filename: safeFileName(input.filename || title),
-      title,
+      filename,
+      title: input.title || filename,
       rows: rows.length,
       columns: columns.length,
-      text: "Profesyonel Excel dosyası hazır.",
       base64: Buffer.from(buffer).toString("base64"),
     };
   },
