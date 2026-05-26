@@ -354,6 +354,86 @@ function summarizeToolResultLine(toolName, ui) {
   return `✅ ${toolName}: İşlem tamamlandı.`;
 }
 
+
+function latestGeneratedFileFromDisk() {
+  try {
+    ensureGeneratedDir();
+    const files = fs.readdirSync(GENERATED_DIR)
+      .filter((name) => !name.startsWith("."))
+      .map((name) => {
+        const full = path.join(GENERATED_DIR, name);
+        const stat = fs.statSync(full);
+        return stat.isFile() ? { name, full, mtimeMs: stat.mtimeMs } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return files[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+function extractGeneratedFileRefsFromText(text = "") {
+  const source = String(text || "");
+  const refs = [];
+
+  for (const match of source.matchAll(/\/generated\/([^\s"')]+)(?:[\s"')]|$)/gi)) {
+    try {
+      const storedFilename = decodeURIComponent(match[1].replace(/[.,;]+$/g, ""));
+      if (storedFilename) refs.push({ storedFilename, filename: storedFilename });
+    } catch {
+      const storedFilename = match[1].replace(/[.,;]+$/g, "");
+      if (storedFilename) refs.push({ storedFilename, filename: storedFilename });
+    }
+  }
+
+  for (const match of source.matchAll(/```lucy-widget\s*([\s\S]*?)```/gi)) {
+    const widget = safeJsonParse(String(match[1] || "").trim());
+    if (!widget || typeof widget !== "object") continue;
+    const storedFilename = widget.storedFilename || widget.raw?.storedFilename;
+    const filename = widget.filename || widget.raw?.filename || storedFilename;
+    if (storedFilename || filename) refs.push({ storedFilename: storedFilename || filename, filename: filename || storedFilename });
+  }
+
+  return refs;
+}
+
+function collectConversationGeneratedFileRefs(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  const refs = [];
+  for (const message of messages) {
+    const content = typeof message?.content === "string" ? message.content : (message?.text || "");
+    refs.push(...extractGeneratedFileRefsFromText(content));
+  }
+  return refs;
+}
+
+function enrichToolCallInput(call, req) {
+  if (!call || typeof call !== "object") return call;
+  const toolName = String(call.tool || "").toLowerCase();
+  const input = call.input && typeof call.input === "object" ? { ...call.input } : {};
+
+  if (toolName === "zip") {
+    const hasFiles = Array.isArray(input.files) && input.files.length > 0;
+    if (!hasFiles) {
+      const refs = collectConversationGeneratedFileRefs(req);
+      const lastRef = refs[refs.length - 1];
+      if (lastRef?.storedFilename) {
+        input.files = [{
+          storedFilename: lastRef.storedFilename,
+          filename: lastRef.filename || lastRef.storedFilename,
+        }];
+      } else {
+        const latest = latestGeneratedFileFromDisk();
+        if (latest?.name) input.files = [{ storedFilename: latest.name, filename: latest.name }];
+      }
+    }
+    if (!input.filename) input.filename = "lucy-dosyalari.zip";
+  }
+
+  return { ...call, input };
+}
+
 async function executeToolCallsFromAnswer(answer = "", req) {
   const toolCalls = extractToolCallsFromAnswer(answer);
   if (!toolCalls.length) {
@@ -364,7 +444,8 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const resultLines = [];
   const widgets = [];
 
-  for (const call of toolCalls) {
+  for (const rawCall of toolCalls) {
+    const call = enrichToolCallInput(rawCall, req);
     const rawResult = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
     const persistedResult = persistToolFileResult(rawResult, req);
     const ui = normalizeToolResultForUI(call.tool, persistedResult, call.input);
@@ -388,7 +469,6 @@ async function executeToolCallsFromAnswer(answer = "", req) {
 
   const finalAnswer = [
     cleanAnswer,
-    resultLines.length ? `🔧 Gerçek tool çalıştırıldı.\n${resultLines.join("\n")}` : "",
     widgets.join(""),
   ].filter(Boolean).join("\n\n");
 
@@ -1489,11 +1569,8 @@ async function askDeepSeekStream(body = {}, res, req = null) {
       const payloadText = line.replace(/^data:\s*/, "");
       if (payloadText === "[DONE]") {
         const toolPayload = await executeToolCallsFromAnswer(fullAnswer, req);
-        if (toolPayload.toolResults.length && toolPayload.finalAnswer !== fullAnswer) {
-          const extra = toolPayload.finalAnswer.replace(fullAnswer, "").trim();
-          if (extra) writeSse(res, { delta: `
-
-${extra}` });
+        if (toolPayload.finalAnswer) {
+          writeSse(res, { delta: toolPayload.finalAnswer });
         }
         writeSse(res, {
           done: true,
@@ -1509,7 +1586,7 @@ ${extra}` });
         const delta = extractDeepSeekStreamDelta(json);
         if (delta) {
           fullAnswer += delta;
-          writeSse(res, { delta });
+          // Final cevap ve tool/widget çıktıları tamamlanmadan kullanıcıya ham ara çıktı basma.
         }
       } catch {
         // DeepSeek bazen keep-alive/boş satır gönderebilir; sessiz geç.
@@ -1518,11 +1595,8 @@ ${extra}` });
   }
 
   const toolPayload = await executeToolCallsFromAnswer(fullAnswer, req);
-  if (toolPayload.toolResults.length && toolPayload.finalAnswer !== fullAnswer) {
-    const extra = toolPayload.finalAnswer.replace(fullAnswer, "").trim();
-    if (extra) writeSse(res, { delta: `
-
-${extra}` });
+  if (toolPayload.finalAnswer) {
+    writeSse(res, { delta: toolPayload.finalAnswer });
   }
   writeSse(res, {
     done: true,
