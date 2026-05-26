@@ -336,13 +336,7 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     text: normalized.text || normalized.message || "",
     files: Array.isArray(normalized.files) ? normalized.files : undefined,
     count: normalized.count,
-    raw: {
-      success: normalized.success !== false,
-      message: normalized.message || normalized.text || "",
-      error: normalized.error || "",
-      storedFilename: normalized.storedFilename || "",
-      filename: normalized.filename || "",
-    },
+    raw: normalized,
   };
 }
 
@@ -414,78 +408,123 @@ function collectConversationGeneratedFileRefs(req) {
   return refs;
 }
 
-function parseMarkdownTableFromText(text = "") {
-  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  for (let i = 0; i < lines.length - 1; i += 1) {
-    if (!lines[i].includes("|") || !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(lines[i + 1])) continue;
-    const cells = (line) => line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim().replace(/\*\*/g, ""));
-    const columns = cells(lines[i]);
-    const rows = [];
-    for (let j = i + 2; j < lines.length && lines[j].includes("|"); j += 1) {
-      const values = cells(lines[j]);
-      const row = {};
-      columns.forEach((column, index) => { row[column] = values[index] || ""; });
-      rows.push(row);
-    }
-    if (columns.length && rows.length) return { columns, rows, markdown: [lines[i], lines[i + 1], ...rows.map((row) => `| ${columns.map((c) => row[c] || "").join(" | ")} |`)].join("\n") };
-  }
-  return null;
+
+
+// ============================================================
+// LUCY INTENT ROUTER v18
+// Kullanıcının isteğini tablo / grafik / diyagram / dosya / normal sohbet
+// olarak ayırır. Amaç: Mermaid/grafik/tool takılı kalmasını engellemek.
+// ============================================================
+function normalizeIntentText(value = "") {
+  return String(value || "")
+    .toLocaleLowerCase("tr-TR")
+    .replace(/[âÂ]/g, "a")
+    .replace(/[îÎ]/g, "i")
+    .replace(/[ûÛ]/g, "u")
+    .replace(/ı/g, "i")
+    .replace(/İ/g, "i")
+    .replace(/ğ/g, "g")
+    .replace(/ü/g, "u")
+    .replace(/ş/g, "s")
+    .replace(/ö/g, "o")
+    .replace(/ç/g, "c")
+    .replace(/[^a-z0-9%.$€₺\s_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function latestConversationTable(req) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const content = typeof messages[i]?.content === "string" ? messages[i].content : (messages[i]?.text || "");
-    const table = parseMarkdownTableFromText(content);
-    if (table) return table;
-  }
-  return null;
+function hasAnyIntent(text, patterns = []) {
+  const q = normalizeIntentText(text);
+  return patterns.some((pattern) => {
+    if (pattern instanceof RegExp) return pattern.test(q);
+    return q.includes(normalizeIntentText(pattern));
+  });
 }
 
-function latestAssistantText(req) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const role = String(messages[i]?.role || "").toLowerCase();
-    const content = typeof messages[i]?.content === "string" ? messages[i].content : (messages[i]?.text || "");
-    if (role === "assistant" && String(content || "").trim()) return content;
-  }
-  return "";
+const LUCY_INTENT_PATTERNS = {
+  chart: [
+    "grafik", "chart", "pasta grafik", "pie chart", "bar chart", "cizgi grafik", "line chart",
+    "donut", "dashboard", "istatistik", "oranlari goster", "yuzde dagilimi", "veriyi gorsellestir",
+    "gorsellestir", "grafik olarak", "grafik ciz", "grafik yap", "kalp grafigi", "dagilim"
+  ],
+  table: [
+    "tablo", "excel", "xlsx", "spreadsheet", "csv", "satir", "sutun", "hucre", "grid",
+    "liste cikar", "veri tablosu", "rapor tablosu", "profesyonel tablo", "excel tablosu",
+    "tablo olarak", "tablo yap", "excel yap", "excel olustur"
+  ],
+  mermaid: [
+    "mermaid", "diyagram", "diagram", "akis semasi", "akis diyagrami", "flowchart", "sequence diagram",
+    "sistem semasi", "mimari ciz", "mimari goster", "workflow", "pipeline", "baglantilari goster",
+    "node yapisi", "surec diyagrami", "sistem mimarisi", "sematik", "zihin haritasi"
+  ],
+  pdf: [
+    "pdf", "pdf yap", "pdf olarak", "pdf olarak gonder", "pdf olustur", "rapor olustur",
+    "belge olustur", "dokuman hazirla", "cikti al", "export pdf"
+  ],
+  zip: [
+    "zip", "zip yap", "zip olarak", "zip olarak gonder", "sikistir", "arsivle", "paketle"
+  ],
+  qr: ["qr", "qr kod", "karekod", "qr olustur"],
+  calculator: ["hesapla", "calculator", "islem yap", "topla", "carp", "bol", "cikar"],
+  textStats: ["metin analizi", "kelime say", "karakter say", "text stats", "istatistik cikar"],
+  webFetch: ["webfetch", "web cek", "linki oku", "siteyi oku", "url oku"],
+  ocr: ["ocr", "gorselden yazi", "resimden yazi", "fotograftan yazi"],
+};
+
+function classifyLucyUserIntent(text = "") {
+  const q = normalizeIntentText(text);
+  if (!q) return { kind: "normal", allowedTools: [] };
+
+  // Öncelik dosya dönüşümünde: “bu tabloyu pdf yap”, “grafiği zip yap” gibi komutlar.
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.zip)) return { kind: "zip", allowedTools: ["zip"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.pdf)) return { kind: "pdf", allowedTools: ["pdf"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.table)) return { kind: "table", allowedTools: ["excel", "document", "pdf"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.chart)) return { kind: "chart", allowedTools: ["chartData"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.mermaid)) return { kind: "mermaid", allowedTools: ["mermaid"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.qr)) return { kind: "qr", allowedTools: ["qr"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.calculator)) return { kind: "calculator", allowedTools: ["calculator"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.textStats)) return { kind: "textStats", allowedTools: ["textStats"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.ocr)) return { kind: "ocr", allowedTools: ["ocr"] };
+  if (hasAnyIntent(q, LUCY_INTENT_PATTERNS.webFetch)) return { kind: "webFetch", allowedTools: ["webFetch"] };
+
+  return { kind: "normal", allowedTools: [] };
+}
+
+function getLucyIntentFromRequest(req) {
+  const lastUserText = getLastUserText(Array.isArray(req?.body?.messages) ? req.body.messages : []);
+  return classifyLucyUserIntent(lastUserText);
+}
+
+function filterToolCallsByLucyIntent(toolCalls = [], req) {
+  const intent = getLucyIntentFromRequest(req);
+  if (!Array.isArray(toolCalls) || !toolCalls.length) return [];
+
+  // Normal sohbetlerde model yanlışlıkla eski grafik/mermaid/tool alışkanlığına takılırsa tamamını kes.
+  if (intent.kind === "normal") return [];
+
+  const allowed = new Set((intent.allowedTools || []).map((name) => String(name).toLowerCase()));
+  return toolCalls.filter((call) => allowed.has(String(call?.tool || "").toLowerCase()));
+}
+
+function lucyIntentInstructionBlock() {
+  return [
+    "LUCY INTENT ROUTER KURALI:",
+    "Önce kullanıcının niyetini ayır; sonra gerekirse tool_call üret.",
+    "Normal sohbet örnekleri: aşkım, nasılsın, teşekkür ederim, tamam, devam, evet, hayır. Bunlarda asla grafik, Mermaid, Excel, PDF veya ZIP üretme.",
+    "TABLO/EXCEL niyeti: tablo, excel, spreadsheet, satır, sütun, hücre, veri tablosu, profesyonel tablo, liste çıkar. Çıktı tablo/Excel mantığıdır; Mermaid değildir.",
+    "GRAFİK niyeti: grafik, chart, pasta grafik, bar chart, çizgi grafik, oran, yüzde dağılımı, dashboard, veriyi görselleştir. Çıktı chartData’dır; Mermaid değildir.",
+    "DİYAGRAM niyeti: Mermaid, diyagram, akış şeması, flowchart, sistem şeması, mimari, workflow, pipeline, bağlantılar, node yapısı. Çıktı Mermaid’dir; grafik değildir.",
+    "PDF niyeti: pdf yap, pdf olarak gönder, rapor, belge, doküman, çıktı al. Çıktı pdf tool_call’dur.",
+    "ZIP niyeti: zip yap, sıkıştır, arşivle, paketle, zip olarak gönder. Çıktı zip tool_call’dur.",
+    "Kullanıcı sadece 'grafik' dediyse Mermaid üretme. Kullanıcı sadece 'tablo' dediyse Mermaid veya chart üretme. Kullanıcı sadece 'diyagram/şema/akış' dediyse Mermaid üret.",
+    "Önceki mesajda grafik/diyagram yapılmış olsa bile yeni kullanıcı mesajı normal sohbetse eski tool sonucunu tekrar etme."
+  ].join("\n");
 }
 
 function enrichToolCallInput(call, req) {
   if (!call || typeof call !== "object") return call;
   const toolName = String(call.tool || "").toLowerCase();
   const input = call.input && typeof call.input === "object" ? { ...call.input } : {};
-
-  if (toolName === "excel") {
-    const hasRows = Array.isArray(input.rows) && input.rows.length > 0;
-    const hasText = Boolean(input.text || input.markdown || input.content);
-    if (!hasRows && !hasText) {
-      const table = latestConversationTable(req);
-      if (table) {
-        input.rows = table.rows;
-        input.columns = input.columns || table.columns;
-        input.markdown = table.markdown;
-        input.title = input.title || "Lucy Tablosu";
-      }
-    }
-    if (input.filename && /\.xls$/i.test(String(input.filename))) input.filename = String(input.filename).replace(/\.xls$/i, ".xlsx");
-  }
-
-  if (toolName === "pdf") {
-    const hasContent = Boolean(input.text || input.markdown || input.content || (Array.isArray(input.rows) && input.rows.length));
-    if (!hasContent) {
-      const table = latestConversationTable(req);
-      if (table) {
-        input.rows = table.rows;
-        input.columns = input.columns || table.columns;
-        input.title = input.title || "Lucy Tablosu";
-      } else {
-        const previous = latestAssistantText(req);
-        if (previous) input.text = previous;
-      }
-    }
-  }
 
   if (toolName === "zip") {
     const hasFiles = Array.isArray(input.files) && input.files.length > 0;
@@ -509,9 +548,15 @@ function enrichToolCallInput(call, req) {
 }
 
 async function executeToolCallsFromAnswer(answer = "", req) {
-  const toolCalls = extractToolCallsFromAnswer(answer);
+  const extractedToolCalls = extractToolCallsFromAnswer(answer);
+  const toolCalls = filterToolCallsByLucyIntent(extractedToolCalls, req);
   if (!toolCalls.length) {
-    return { toolCalls: [], toolResults: [], finalAnswer: answer };
+    const finalAnswer = String(answer || "")
+      .replace(/```json\s*[\s\S]*?```/gi, "")
+      .replace(/```\s*\{[\s\S]*?\}\s*```/g, "")
+      .replace(/\{\s*"tool_call"[\s\S]*?\}\s*$/i, "")
+      .trim();
+    return { toolCalls: [], toolResults: [], finalAnswer: finalAnswer || answer };
   }
 
   const toolResults = [];
@@ -536,7 +581,6 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   }
 
   const cleanAnswer = String(answer || "")
-    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
     .replace(/```json\s*[\s\S]*?```/gi, "")
     .replace(/```\s*\{[\s\S]*?\}\s*```/g, "")
     .replace(/\{\s*"tool_call"[\s\S]*?\}\s*$/i, "")
@@ -898,6 +942,7 @@ function buildSystemPrompt(body = {}) {
     if (listLoadedTools().length) {
     parts.push([
       "LUCY TOOL ENGINE AKTIF:",
+      lucyIntentInstructionBlock(),
       "Gerçek dosya, PDF, Excel, QR, hesap, grafik, Mermaid, OCR, webFetch veya textStats gerektiğinde normal cevapta roleplay yapma.",
       "Bunun yerine cevabın içinde yalnızca geçerli JSON tool_call üret.",
       "Format:",
@@ -905,12 +950,12 @@ function buildSystemPrompt(body = {}) {
       "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan.",
+      "PDF için input.text veya tablo PDF istendiyse input.rows + input.columns kullan. Excel için input.rows + input.columns kullan; profesyonel başlık için input.title, sayfa adı için input.sheetName, dosya adı için input.filename ver. Kullanıcı “bu tabloyu Excel/PDF olarak gönder” derse önceki mesajdaki tabloyu rows/columns olarak çıkar ve ilgili tool_call üret. QR için input.text veya input.url kullan.",
       "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
       "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
       "Mermaid istenirse mermaid tool_call üret veya doğrudan ```mermaid kod bloğu yaz.",
       "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
-      "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
+      "Excel/PDF tablo üretirken satır ve sütunları boş bırakma; tablo yoksa konuşmadaki son tabloyu veya son yapılandırılmış veriyi kullan. Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
     ].join("\n"));
   }
 
