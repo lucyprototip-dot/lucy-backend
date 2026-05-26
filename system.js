@@ -467,6 +467,27 @@ function stripToolOnlyBlocks(answer = "") {
     .trim();
 }
 
+
+function sanitizeNormalAnswer(answer = "", req = null) {
+  let text = String(answer || "");
+
+  // Normal sohbetlerde model bazen önceki tool JSON'undan kalan kapanış parantezlerini veya
+  // yarım tool bloklarını döndürebiliyor. Kullanıcıya asla ham JSON/parantez göstermeyelim.
+  text = text
+    .replace(/```json\s*[\s\S]*?```/gi, "")
+    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
+    .replace(/```mermaid\s*[\s\S]*?```/gi, requestedMermaidWork(req) ? "$&" : "")
+    .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
+    .replace(/"tool_call"\s*:\s*\{[\s\S]*?\}/gi, "")
+    .replace(/^\s*[}\]]+\s*$/gm, "")
+    .replace(/^\s*[,;]+\s*$/gm, "")
+    .trim();
+
+  // Sadece sembol/parantez kaldıysa normal cevap sayma.
+  if (!/[A-Za-zÇĞİÖŞÜçğıöşü0-9]/.test(text)) return "";
+  return text;
+}
+
 function extractMermaidBlocksFromAnswer(answer = "") {
   const blocks = [];
   const source = String(answer || "");
@@ -501,8 +522,8 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const toolCalls = [...explicitCalls, ...mermaidCalls].filter(isUsableToolCall);
 
   if (!toolCalls.length) {
-    const strippedMermaid = allowMermaid ? answer : String(answer || "").replace(/```mermaid\s*[\s\S]*?```/gi, "").trim();
-    return { toolCalls: [], toolResults: [], finalAnswer: strippedMermaid || answer };
+    const cleaned = sanitizeNormalAnswer(answer, req);
+    return { toolCalls: [], toolResults: [], finalAnswer: cleaned || (allowAnyTool ? "" : "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙") };
   }
 
   if (!allowAnyTool) {
@@ -895,7 +916,7 @@ function buildSystemPrompt(body = {}) {
       "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
       "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma. Mermaid kodu boşsa tool_call üretme.",
       "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
-      "Basit sohbetlerde, selamlaşmada, teşekkürde, hal-hatırda veya normal cevaplarda kesinlikle pdf/zip/excel/mermaid/chart tool_call üretme.",
+      "Basit sohbetlerde, selamlaşmada, teşekkürde, hal-hatırda veya normal cevaplarda kesinlikle pdf/zip/excel/mermaid/chart tool_call üretme. Önceki tool isteğine takılı kalma.",
       "Ömer açıkça grafik/diyagram/Mermaid/PDF/ZIP/Excel istemediyse önceki tool isteğini hatırlayıp yeniden tool üretme; normal sohbet cevabı ver.",
       "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
     ].join("\n"));
