@@ -95,18 +95,25 @@ module.exports = {
 
       if (file.storedFilename || file.generatedFile) {
         const full = safeResolveGenerated(file.storedFilename || file.generatedFile);
-        if (full && fs.existsSync(full) && fs.statSync(full).isFile()) {
-          entries.push({ name: filename || path.basename(full), data: fs.readFileSync(full) });
+        if (full && fs.existsSync(full)) {
+          const stat = fs.statSync(full);
+          const ext = path.extname(full).toLowerCase();
+          const explicitZipAllowed = Boolean(file.allowZipInput || input.allowZipInput);
+          if (stat.isFile() && stat.size > 0 && (explicitZipAllowed || ext !== ".zip")) {
+            entries.push({ name: filename || path.basename(full), data: fs.readFileSync(full) });
+          }
         }
         return;
       }
 
       if (file.base64) {
-        entries.push({ name: filename, data: Buffer.from(String(file.base64), "base64") });
+        const data = Buffer.from(String(file.base64), "base64");
+        if (data.length > 0) entries.push({ name: filename, data });
         return;
       }
 
-      entries.push({ name: filename, data: String(file.content || file.text || "") });
+      const textData = String(file.content || file.text || "");
+      if (textData.length > 0) entries.push({ name: filename, data: textData });
     });
 
     if (!entries.length) {

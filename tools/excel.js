@@ -137,29 +137,16 @@ function normalizeRows(inputRows = []) {
     .filter((row) => Object.keys(row).length && Object.values(row).some((value) => String(value || "").trim()));
 }
 
-function fallbackShoppingRows() {
-  return [
-    ["Kategori", "Ürün", "Miktar"],
-    ["Süt Ürünleri", "Süt", "2 litre"],
-    ["Süt Ürünleri", "Beyaz peynir", "500 gr"],
-    ["Süt Ürünleri", "Kaşar peyniri", "300 gr"],
-    ["Süt Ürünleri", "Yumurta", "1 koli"],
-    ["Temel Gıdalar", "Ekmek", "2 adet"],
-    ["Temel Gıdalar", "Pirinç", "1 kg"],
-    ["Sebze & Meyve", "Domates", "1 kg"],
-    ["Sebze & Meyve", "Patates", "2 kg"],
-    ["Et & Şarküteri", "Tavuk göğsü", "1 kg"],
-    ["Diğer", "Kağıt havlu", "2 paket"],
-  ];
-}
-
 function rowsFromLooseText(text = "") {
   const source = String(text || "").trim();
   if (!source) return [];
-  if (/pazar|alışveriş|alisveris|market|liste/i.test(source)) return rowsFromArrayRows(fallbackShoppingRows());
+
+  // Generic fallback: do not invent domain-specific rows.
+  // If no markdown table/rows are present, preserve the actual content as a simple text table.
   return source.split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
+    .filter((line) => !/^LUCY_FILE_REF\b/i.test(line))
     .map((line, index) => ({ No: index + 1, İçerik: stripMarkdown(line) }));
 }
 
