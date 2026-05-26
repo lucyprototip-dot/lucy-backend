@@ -1,177 +1,129 @@
 const PDFDocument = require("pdfkit");
 const fs = require("fs");
+const path = require("path");
 
-function cleanText(value) {
-  if (value === null || value === undefined) return "";
-  return String(value)
+function normalizePdfText(value = "") {
+  return String(value || "")
+    .normalize("NFC")
     .replace(/\r\n/g, "\n")
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
     .trim();
 }
 
-function safeFileName(name, ext = ".pdf") {
-  const raw = cleanText(name || "lucy-profesyonel-rapor")
-    .replace(/[\\/:*?"<>|]/g, "-")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "") || "lucy-profesyonel-rapor";
-  return raw.toLowerCase().endsWith(ext) ? raw : `${raw}${ext}`;
+function degradeEmojiForPdfKit(value = "") {
+  return normalizePdfText(value)
+    .replace(/❤️‍🔥|❤‍🔥/g, "♥")
+    .replace(/[❤♥]/g, "♥")
+    .replace(/[🔥]/g, "◆")
+    .replace(/[📄📝📃]/g, "[Belge]")
+    .replace(/[📊📈📉]/g, "[Grafik]")
+    .replace(/[🗜️]/g, "[ZIP]")
+    .replace(/[💙💎]/g, "♦")
+    .replace(/[✅]/g, "✓")
+    .replace(/[❌]/g, "×")
+    .replace(/[⚙️]/g, "•")
+    .replace(/[\u200d\ufe0f]/g, "")
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, "•");
 }
 
-function parseMarkdownTable(text = "") {
-  const lines = cleanText(text)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.includes("|"));
-  if (lines.length < 2) return { columns: [], rows: [] };
-
-  const splitRow = (line) => line.replace(/^\|/, "").replace(/\|$/, "").split("|").map(cleanText);
-  const headerIndex = lines.findIndex((line, index) => {
-    const next = lines[index + 1] || "";
-    return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(next);
-  });
-  if (headerIndex < 0) return { columns: [], rows: [] };
-
-  const columns = splitRow(lines[headerIndex]).map((h, i) => h || `Sütun ${i + 1}`);
-  const rows = lines.slice(headerIndex + 2).map(splitRow).filter((cells) => cells.some(Boolean)).map((cells) => {
-    const row = {};
-    columns.forEach((column, index) => { row[column] = cells[index] || ""; });
-    return row;
-  });
-  return { columns, rows };
-}
-
-function normalizeTable(input = {}) {
-  const rows = Array.isArray(input.rows) ? input.rows : Array.isArray(input.data) ? input.data : Array.isArray(input.table) ? input.table : [];
-  if (rows.length) {
-    const columns = Array.isArray(input.columns) && input.columns.length
-      ? input.columns.map(cleanText).filter(Boolean)
-      : Array.from(new Set(rows.flatMap((row) => Object.keys(row || {}))));
-    return { columns, rows };
-  }
-  return parseMarkdownTable(input.markdown || input.tableMarkdown || input.text || input.raw || "");
-}
-
-function loadFont(doc) {
-  const fontCandidates = [
+function findFont() {
+  const candidates = [
     process.env.LUCY_PDF_FONT,
+    path.resolve(__dirname, "..", "fonts", "DejaVuSans.ttf"),
+    path.resolve(__dirname, "..", "fonts", "NotoSans-Regular.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     "C:/Windows/Fonts/arial.ttf",
     "C:/Windows/Fonts/calibri.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
   ].filter(Boolean);
-  const fontPath = fontCandidates.find((candidate) => fs.existsSync(candidate));
-  if (fontPath) doc.font(fontPath);
-}
-
-function drawText(doc, text) {
-  cleanText(text).split("\n").forEach((line) => {
-    if (!line.trim()) doc.moveDown(0.6);
-    else doc.fontSize(11).fillColor("#111827").text(line, { align: "left", lineGap: 4 });
+  return candidates.find((candidate) => {
+    try { return fs.existsSync(candidate) && fs.statSync(candidate).isFile(); } catch { return false; }
   });
 }
 
-function drawTable(doc, columns, rows) {
-  if (!columns.length || !rows.length) return;
+function renderMarkdownLine(line = "") {
+  return String(line || "")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/_([^_]+)_/g, "$1")
+    .replace(/^[-*•]\s+/, "• ");
+}
 
-  const startX = doc.page.margins.left;
-  const tableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-  const colWidth = tableWidth / columns.length;
-  const rowPadding = 6;
-  const minRowHeight = 25;
+async function puppeteerPdf({ title, text }) {
+  let puppeteer;
+  try { puppeteer = require("puppeteer"); } catch { return null; }
+  let browser = null;
+  try {
+    browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    const page = await browser.newPage();
+    const escape = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    const lines = normalizePdfText(text).split(/\n/).map(renderMarkdownLine).join("\n");
+    const html = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><style>
+      body{font-family:'DejaVu Sans','Noto Sans','Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',Arial,sans-serif;margin:56px;color:#111;font-size:15px;line-height:1.58}
+      h1{font-size:26px;margin:0 0 28px;text-decoration:underline;font-weight:800}
+      .content{white-space:pre-wrap}
+      table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px}td,th{border:1px solid #bbb;padding:7px 8px;text-align:left;vertical-align:top}th{background:#f1f1f1}
+    </style></head><body><h1>${escape(normalizePdfText(title))}</h1><div class="content">${escape(lines)}</div></body></html>`;
+    await page.setContent(html, { waitUntil: "networkidle0" });
+    return await page.pdf({ format: "A4", printBackground: true, margin: { top: "48px", right: "48px", bottom: "48px", left: "48px" } });
+  } catch {
+    return null;
+  } finally {
+    try { await browser?.close(); } catch {}
+  }
+}
 
-  const drawHeader = () => {
-    const y = doc.y;
-    doc.rect(startX, y, tableWidth, minRowHeight).fill("#111827");
-    columns.forEach((column, index) => {
-      const x = startX + index * colWidth;
-      doc.fillColor("#ffffff").fontSize(9).text(column, x + rowPadding, y + 7, {
-        width: colWidth - rowPadding * 2,
-        align: "left",
-      });
-      doc.strokeColor("#6b7280").rect(x, y, colWidth, minRowHeight).stroke();
-    });
-    doc.y = y + minRowHeight;
-  };
+function pdfkitPdf({ title, text }) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    const doc = new PDFDocument({ margin: 50, size: "A4", info: { Title: title, Creator: "LUCY" } });
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
 
-  drawHeader();
-
-  rows.forEach((row, rowIndex) => {
-    const values = columns.map((column) => cleanText(row?.[column]));
-    const heights = values.map((value) => doc.heightOfString(value || " ", { width: colWidth - rowPadding * 2 }) + rowPadding * 2);
-    const rowHeight = Math.max(minRowHeight, ...heights);
-
-    if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
-      doc.addPage();
-      drawHeader();
+    const fontPath = findFont();
+    if (fontPath) {
+      doc.registerFont("LucyUnicode", fontPath);
+      doc.font("LucyUnicode");
+    } else {
+      doc.font("Helvetica");
     }
 
-    const y = doc.y;
-    doc.rect(startX, y, tableWidth, rowHeight).fill(rowIndex % 2 === 0 ? "#ffffff" : "#f9fafb");
+    const safeTitle = degradeEmojiForPdfKit(title);
+    const safeText = degradeEmojiForPdfKit(text).split(/\n/).map(renderMarkdownLine).join("\n");
 
-    values.forEach((value, index) => {
-      const x = startX + index * colWidth;
-      doc.strokeColor("#e5e7eb").rect(x, y, colWidth, rowHeight).stroke();
-      doc.fillColor("#111827").fontSize(9).text(value || "", x + rowPadding, y + rowPadding, {
-        width: colWidth - rowPadding * 2,
-        align: "left",
-      });
-    });
-
-    doc.y = y + rowHeight;
+    doc.fontSize(20).text(safeTitle, { underline: true });
+    doc.moveDown(1.2);
+    doc.fontSize(12).text(safeText, { align: "left", lineGap: 4 });
+    doc.end();
   });
 }
 
 module.exports = {
   name: "pdf",
-  description: "Metinden veya tablo verisinden profesyonel PDF raporu üretir",
+  description: "Metinden Türkçe karakter destekli PDF raporu üretir",
 
   async execute(input = {}) {
-    const title = cleanText(input.title || input.name || "LUCY Rapor");
-    const text = cleanText(input.text || input.content || "");
-    const { columns, rows } = normalizeTable(input);
+    const title = normalizePdfText(input.title || "LUCY Rapor");
+    const text = normalizePdfText(input.text || input.content || input.value || "");
 
-    if (!text && !rows.length) {
-      return {
-        success: false,
-        error: "content_required",
-        message: "PDF üretmek için text veya tablo verisi gerekli.",
-      };
+    if (!text) {
+      return { success: false, error: "text_required", message: "PDF üretmek için text gerekli." };
     }
 
-    const chunks = [];
-    const doc = new PDFDocument({ margin: 50, size: "A4", bufferPages: true });
-    loadFont(doc);
+    const htmlPdf = await puppeteerPdf({ title, text });
+    const buffer = htmlPdf || await pdfkitPdf({ title, text });
 
-    return await new Promise((resolve) => {
-      doc.on("data", (chunk) => chunks.push(chunk));
-      doc.on("end", () => {
-        const buffer = Buffer.concat(chunks);
-        resolve({
-          success: true,
-          mimeType: "application/pdf",
-          filename: safeFileName(input.filename || title),
-          title,
-          rows: rows.length || undefined,
-          columns: columns.length || undefined,
-          text: rows.length ? "Profesyonel PDF tablo dosyası hazır." : "PDF dosyası hazır.",
-          base64: buffer.toString("base64"),
-        });
-      });
-
-      doc.fontSize(20).fillColor("#111827").text(title, { underline: true });
-      doc.moveDown(1.2);
-
-      if (text && !rows.length) drawText(doc, text);
-      if (rows.length) {
-        if (text && !text.includes("|")) {
-          drawText(doc, text);
-          doc.moveDown(1);
-        }
-        drawTable(doc, columns, rows);
-      }
-
-      doc.end();
-    });
+    return {
+      success: true,
+      mimeType: "application/pdf",
+      filename: input.filename || "lucy-report.pdf",
+      base64: Buffer.from(buffer).toString("base64"),
+      engine: htmlPdf ? "puppeteer-html-unicode" : "pdfkit-unicode-safe-emoji",
+      font: findFont() || "browser/system",
+    };
   },
 };
