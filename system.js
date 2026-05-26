@@ -435,6 +435,59 @@ function enrichToolCallInput(call, req) {
   return { ...call, input };
 }
 
+
+function latestUserIntentText(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || message.sender || "").toLowerCase();
+    if (role && role !== "user") continue;
+    const text = String(message.content || message.text || message.message || "").trim();
+    if (text) return text;
+  }
+  return String(req?.body?.prompt || req?.body?.message || req?.body?.text || "").trim();
+}
+
+function requestedToolWork(req) {
+  const text = latestUserIntentText(req).toLowerCase();
+  return /\b(pdf|zip|excel|xlsx|word|docx|csv|json|qr|ocr|webfetch|hesap|calculator)\b|grafik|chart|pasta|diyagram|mermaid|akış|akis|çiz|ciz|dosya|indir|tablo oluştur|rapor oluştur/.test(text);
+}
+
+function requestedMermaidWork(req) {
+  const text = latestUserIntentText(req).toLowerCase();
+  return /mermaid|diyagram|flowchart|akış|akis|şema|sema/.test(text);
+}
+
+function stripToolOnlyBlocks(answer = "") {
+  return String(answer || "")
+    .replace(/```json\s*[\s\S]*?```/gi, "")
+    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
+    .replace(/```mermaid\s*[\s\S]*?```/gi, "")
+    .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
+    .trim();
+}
+
+
+function sanitizeNormalAnswer(answer = "", req = null) {
+  let text = String(answer || "");
+
+  // Normal sohbetlerde model bazen önceki tool JSON'undan kalan kapanış parantezlerini veya
+  // yarım tool bloklarını döndürebiliyor. Kullanıcıya asla ham JSON/parantez göstermeyelim.
+  text = text
+    .replace(/```json\s*[\s\S]*?```/gi, "")
+    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
+    .replace(/```mermaid\s*[\s\S]*?```/gi, requestedMermaidWork(req) ? "$&" : "")
+    .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
+    .replace(/"tool_call"\s*:\s*\{[\s\S]*?\}/gi, "")
+    .replace(/^\s*[}\]]+\s*$/gm, "")
+    .replace(/^\s*[,;]+\s*$/gm, "")
+    .trim();
+
+  // Sadece sembol/parantez kaldıysa normal cevap sayma.
+  if (!/[A-Za-zÇĞİÖŞÜçğıöşü0-9]/.test(text)) return "";
+  return text;
+}
+
 function extractMermaidBlocksFromAnswer(answer = "") {
   const blocks = [];
   const source = String(answer || "");
@@ -445,13 +498,41 @@ function extractMermaidBlocksFromAnswer(answer = "") {
   return blocks;
 }
 
+function isUsableToolCall(call = {}) {
+  const tool = String(call.tool || "").toLowerCase();
+  const input = call.input && typeof call.input === "object" ? call.input : {};
+  if (!tool) return false;
+  if (tool === "mermaid") return Boolean(String(input.code || input.mermaid || input.text || "").trim());
+  if (tool === "chartdata") {
+    const labels = input.labels || input.data?.labels;
+    const values = input.values || input.data?.datasets?.[0]?.data;
+    return Array.isArray(labels) && labels.length > 0 && Array.isArray(values) && values.length > 0;
+  }
+  if (tool === "excel") return Boolean((Array.isArray(input.rows) && input.rows.length) || String(input.text || input.content || input.value || "").trim() || (Array.isArray(input.labels) && input.labels.length));
+  if (tool === "pdf") return Boolean(String(input.text || input.content || input.value || "").trim());
+  if (tool === "qr") return Boolean(String(input.text || input.url || input.value || "").trim());
+  return true;
+}
+
 async function executeToolCallsFromAnswer(answer = "", req) {
   const explicitCalls = extractToolCallsFromAnswer(answer);
-  const mermaidCalls = explicitCalls.length ? [] : extractMermaidBlocksFromAnswer(answer);
-  const toolCalls = [...explicitCalls, ...mermaidCalls];
+  const allowMermaid = requestedMermaidWork(req);
+  const allowAnyTool = requestedToolWork(req);
+  const mermaidCalls = explicitCalls.length || !allowMermaid ? [] : extractMermaidBlocksFromAnswer(answer);
+  const toolCalls = [...explicitCalls, ...mermaidCalls].filter(isUsableToolCall);
 
   if (!toolCalls.length) {
-    return { toolCalls: [], toolResults: [], finalAnswer: answer };
+    const cleaned = sanitizeNormalAnswer(answer, req);
+    return { toolCalls: [], toolResults: [], finalAnswer: cleaned || (allowAnyTool ? "" : "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙") };
+  }
+
+  if (!allowAnyTool) {
+    const cleaned = stripToolOnlyBlocks(answer);
+    return {
+      toolCalls: [],
+      toolResults: [],
+      finalAnswer: cleaned || "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙",
+    };
   }
 
   const toolResults = [];
@@ -833,8 +914,10 @@ function buildSystemPrompt(body = {}) {
       "PDF için input.text kullan. Excel için input.rows dizisi kullan; rows yoksa input.text içine markdown tablo/metin koyabilirsin. ZIP için input.files yoksa backend son üretilen dosyayı otomatik zincire alır. QR için input.text veya input.url kullan.",
       "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
       "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
-      "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma.",
+      "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma. Mermaid kodu boşsa tool_call üretme.",
       "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
+      "Basit sohbetlerde, selamlaşmada, teşekkürde, hal-hatırda veya normal cevaplarda kesinlikle pdf/zip/excel/mermaid/chart tool_call üretme. Önceki tool isteğine takılı kalma.",
+      "Ömer açıkça grafik/diyagram/Mermaid/PDF/ZIP/Excel istemediyse önceki tool isteğini hatırlayıp yeniden tool üretme; normal sohbet cevabı ver.",
       "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
     ].join("\n"));
   }
