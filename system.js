@@ -7,7 +7,6 @@ const path = require("path");
 const pdfParseModule = require("pdf-parse");
 const mammoth = require("mammoth");
 const ExcelJS = require("exceljs");
-const PDFDocument = require("pdfkit");
 
 let toolRegistry = null;
 let lucyTools = {};
@@ -337,7 +336,13 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     text: normalized.text || normalized.message || "",
     files: Array.isArray(normalized.files) ? normalized.files : undefined,
     count: normalized.count,
-    raw: normalized,
+    raw: {
+      success: normalized.success !== false,
+      message: normalized.message || normalized.text || "",
+      error: normalized.error || "",
+      storedFilename: normalized.storedFilename || "",
+      filename: normalized.filename || "",
+    },
   };
 }
 
@@ -409,10 +414,78 @@ function collectConversationGeneratedFileRefs(req) {
   return refs;
 }
 
+function parseMarkdownTableFromText(text = "") {
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    if (!lines[i].includes("|") || !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(lines[i + 1])) continue;
+    const cells = (line) => line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim().replace(/\*\*/g, ""));
+    const columns = cells(lines[i]);
+    const rows = [];
+    for (let j = i + 2; j < lines.length && lines[j].includes("|"); j += 1) {
+      const values = cells(lines[j]);
+      const row = {};
+      columns.forEach((column, index) => { row[column] = values[index] || ""; });
+      rows.push(row);
+    }
+    if (columns.length && rows.length) return { columns, rows, markdown: [lines[i], lines[i + 1], ...rows.map((row) => `| ${columns.map((c) => row[c] || "").join(" | ")} |`)].join("\n") };
+  }
+  return null;
+}
+
+function latestConversationTable(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const content = typeof messages[i]?.content === "string" ? messages[i].content : (messages[i]?.text || "");
+    const table = parseMarkdownTableFromText(content);
+    if (table) return table;
+  }
+  return null;
+}
+
+function latestAssistantText(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const role = String(messages[i]?.role || "").toLowerCase();
+    const content = typeof messages[i]?.content === "string" ? messages[i].content : (messages[i]?.text || "");
+    if (role === "assistant" && String(content || "").trim()) return content;
+  }
+  return "";
+}
+
 function enrichToolCallInput(call, req) {
   if (!call || typeof call !== "object") return call;
   const toolName = String(call.tool || "").toLowerCase();
   const input = call.input && typeof call.input === "object" ? { ...call.input } : {};
+
+  if (toolName === "excel") {
+    const hasRows = Array.isArray(input.rows) && input.rows.length > 0;
+    const hasText = Boolean(input.text || input.markdown || input.content);
+    if (!hasRows && !hasText) {
+      const table = latestConversationTable(req);
+      if (table) {
+        input.rows = table.rows;
+        input.columns = input.columns || table.columns;
+        input.markdown = table.markdown;
+        input.title = input.title || "Lucy Tablosu";
+      }
+    }
+    if (input.filename && /\.xls$/i.test(String(input.filename))) input.filename = String(input.filename).replace(/\.xls$/i, ".xlsx");
+  }
+
+  if (toolName === "pdf") {
+    const hasContent = Boolean(input.text || input.markdown || input.content || (Array.isArray(input.rows) && input.rows.length));
+    if (!hasContent) {
+      const table = latestConversationTable(req);
+      if (table) {
+        input.rows = table.rows;
+        input.columns = input.columns || table.columns;
+        input.title = input.title || "Lucy Tablosu";
+      } else {
+        const previous = latestAssistantText(req);
+        if (previous) input.text = previous;
+      }
+    }
+  }
 
   if (toolName === "zip") {
     const hasFiles = Array.isArray(input.files) && input.files.length > 0;
@@ -435,107 +508,15 @@ function enrichToolCallInput(call, req) {
   return { ...call, input };
 }
 
-
-function latestUserIntentText(req) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] || {};
-    const role = String(message.role || message.sender || "").toLowerCase();
-    if (role && role !== "user") continue;
-    const text = String(message.content || message.text || message.message || "").trim();
-    if (text) return text;
-  }
-  return String(req?.body?.prompt || req?.body?.message || req?.body?.text || "").trim();
-}
-
-function requestedToolWork(req) {
-  const text = latestUserIntentText(req).toLowerCase();
-  return /\b(pdf|zip|excel|xlsx|word|docx|csv|json|qr|ocr|webfetch|hesap|calculator)\b|grafik|chart|pasta|diyagram|mermaid|akış|akis|çiz|ciz|dosya|indir|tablo oluştur|rapor oluştur/.test(text);
-}
-
-function requestedMermaidWork(req) {
-  const text = latestUserIntentText(req).toLowerCase();
-  return /mermaid|diyagram|flowchart|akış|akis|şema|sema/.test(text);
-}
-
-function stripToolOnlyBlocks(answer = "") {
-  return String(answer || "")
-    .replace(/```json\s*[\s\S]*?```/gi, "")
-    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
-    .replace(/```mermaid\s*[\s\S]*?```/gi, "")
-    .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
-    .trim();
-}
-
-
-function sanitizeNormalAnswer(answer = "", req = null) {
-  let text = String(answer || "");
-
-  // Normal sohbetlerde model bazen önceki tool JSON'undan kalan kapanış parantezlerini veya
-  // yarım tool bloklarını döndürebiliyor. Kullanıcıya asla ham JSON/parantez göstermeyelim.
-  text = text
-    .replace(/```json\s*[\s\S]*?```/gi, "")
-    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
-    .replace(/```mermaid\s*[\s\S]*?```/gi, requestedMermaidWork(req) ? "$&" : "")
-    .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
-    .replace(/"tool_call"\s*:\s*\{[\s\S]*?\}/gi, "")
-    .replace(/^\s*[}\]]+\s*$/gm, "")
-    .replace(/^\s*[,;]+\s*$/gm, "")
-    .trim();
-
-  // Sadece sembol/parantez kaldıysa normal cevap sayma.
-  if (!/[A-Za-zÇĞİÖŞÜçğıöşü0-9]/.test(text)) return "";
-  return text;
-}
-
-function extractMermaidBlocksFromAnswer(answer = "") {
-  const blocks = [];
-  const source = String(answer || "");
-  for (const match of source.matchAll(/```mermaid\s*([\s\S]*?)```/gi)) {
-    const code = String(match[1] || "").trim();
-    if (code) blocks.push({ tool: "mermaid", input: { code, title: "Mermaid diyagram" } });
-  }
-  return blocks;
-}
-
-function isUsableToolCall(call = {}) {
-  const tool = String(call.tool || "").toLowerCase();
-  const input = call.input && typeof call.input === "object" ? call.input : {};
-  if (!tool) return false;
-  if (tool === "mermaid") return Boolean(String(input.code || input.mermaid || input.text || "").trim());
-  if (tool === "chartdata") {
-    const labels = input.labels || input.data?.labels;
-    const values = input.values || input.data?.datasets?.[0]?.data;
-    return Array.isArray(labels) && labels.length > 0 && Array.isArray(values) && values.length > 0;
-  }
-  if (tool === "excel") return Boolean((Array.isArray(input.rows) && input.rows.length) || String(input.text || input.content || input.value || "").trim() || (Array.isArray(input.labels) && input.labels.length));
-  if (tool === "pdf") return Boolean(String(input.text || input.content || input.value || "").trim());
-  if (tool === "qr") return Boolean(String(input.text || input.url || input.value || "").trim());
-  return true;
-}
-
 async function executeToolCallsFromAnswer(answer = "", req) {
-  const explicitCalls = extractToolCallsFromAnswer(answer);
-  const allowMermaid = requestedMermaidWork(req);
-  const allowAnyTool = requestedToolWork(req);
-  const mermaidCalls = explicitCalls.length || !allowMermaid ? [] : extractMermaidBlocksFromAnswer(answer);
-  const toolCalls = [...explicitCalls, ...mermaidCalls].filter(isUsableToolCall);
-
+  const toolCalls = extractToolCallsFromAnswer(answer);
   if (!toolCalls.length) {
-    const cleaned = sanitizeNormalAnswer(answer, req);
-    return { toolCalls: [], toolResults: [], finalAnswer: cleaned || (allowAnyTool ? "" : "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙") };
-  }
-
-  if (!allowAnyTool) {
-    const cleaned = stripToolOnlyBlocks(answer);
-    return {
-      toolCalls: [],
-      toolResults: [],
-      finalAnswer: cleaned || "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙",
-    };
+    return { toolCalls: [], toolResults: [], finalAnswer: answer };
   }
 
   const toolResults = [];
+  const resultLines = [];
+  const widgets = [];
 
   for (const rawCall of toolCalls) {
     const call = enrichToolCallInput(rawCall, req);
@@ -549,11 +530,24 @@ async function executeToolCallsFromAnswer(answer = "", req) {
       result: persistedResult,
       ui,
     });
+
+    resultLines.push(summarizeToolResultLine(call.tool, ui));
+    widgets.push(widgetFence(ui));
   }
 
-  // Tool çalışırken kullanıcıya ham JSON, lucy-widget, Mermaid kodu veya roleplay metni gösterme.
-  // Frontend yalnızca `toolResults` kartlarını/grafikleri/dosyaları gösterecek.
-  return { toolCalls, toolResults, finalAnswer: "" };
+  const cleanAnswer = String(answer || "")
+    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
+    .replace(/```json\s*[\s\S]*?```/gi, "")
+    .replace(/```\s*\{[\s\S]*?\}\s*```/g, "")
+    .replace(/\{\s*"tool_call"[\s\S]*?\}\s*$/i, "")
+    .trim();
+
+  const finalAnswer = [
+    cleanAnswer,
+    widgets.join(""),
+  ].filter(Boolean).join("\n\n");
+
+  return { toolCalls, toolResults, finalAnswer };
 }
 
 
@@ -911,13 +905,11 @@ function buildSystemPrompt(body = {}) {
       "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text kullan. Excel için input.rows dizisi kullan; rows yoksa input.text içine markdown tablo/metin koyabilirsin. ZIP için input.files yoksa backend son üretilen dosyayı otomatik zincire alır. QR için input.text veya input.url kullan.",
+      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan.",
       "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
       "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
-      "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma. Mermaid kodu boşsa tool_call üretme.",
+      "Mermaid istenirse mermaid tool_call üret veya doğrudan ```mermaid kod bloğu yaz.",
       "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
-      "Basit sohbetlerde, selamlaşmada, teşekkürde, hal-hatırda veya normal cevaplarda kesinlikle pdf/zip/excel/mermaid/chart tool_call üretme. Önceki tool isteğine takılı kalma.",
-      "Ömer açıkça grafik/diyagram/Mermaid/PDF/ZIP/Excel istemediyse önceki tool isteğini hatırlayıp yeniden tool üretme; normal sohbet cevabı ver.",
       "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
     ].join("\n"));
   }
@@ -2274,65 +2266,53 @@ function exporterXlsx(title, messages) {
   ]);
 }
 
-
-function cleanUnicodePdfText(value = "") {
-  return String(value || "")
-    .normalize("NFC")
-    .replace(/[\u200d\ufe0f]/g, "")
-    .replace(/[\u{1F300}-\u{1FAFF}]/gu, "")
-    .replace(/\r\n/g, "\n");
-}
-
-function findUnicodePdfFont() {
-  const candidates = [
-    process.env.LUCY_PDF_FONT,
-    path.resolve(__dirname, "fonts", "DejaVuSans.ttf"),
-    path.resolve(__dirname, "fonts", "NotoSans-Regular.ttf"),
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-    "C:/Windows/Fonts/calibri.ttf",
-    "C:/Windows/Fonts/segoeui.ttf",
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-  ].filter(Boolean);
-  return candidates.find((candidate) => {
-    try { return fs.existsSync(candidate) && fs.statSync(candidate).isFile(); } catch { return false; }
-  });
-}
-
 function pdfEscape(value = "") {
   return String(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
 
-async function exporterPdf(title, messages) {
-  const chunks = [];
-  const safeTitle = cleanUnicodePdfText(title || "Lucy sohbet").trim() || "Lucy sohbet";
-  const text = cleanUnicodePdfText(exporterPlainText(safeTitle, messages));
-  const doc = new PDFDocument({ margin: 50, size: "A4", info: { Title: safeTitle, Creator: "LUCY Exporter" } });
-
-  return await new Promise((resolve) => {
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-
-    const fontPath = findUnicodePdfFont();
-    if (fontPath) {
-      doc.registerFont("LucyUnicode", fontPath);
-      doc.font("LucyUnicode");
-    } else {
-      doc.font("Helvetica");
-    }
-
-    doc.fontSize(20).text(safeTitle, { underline: true });
-    doc.moveDown(0.6);
-    doc.fontSize(10).fillColor("#555").text(`LUCY Exporter - ${messages.length} mesaj`);
-    doc.moveDown(1);
-    doc.fillColor("#111").fontSize(10).text(text, { align: "left", lineGap: 3 });
-    doc.end();
+function exporterPdf(title, messages) {
+  const lines = [title, `LUCY Exporter - ${messages.length} mesaj`, ""].concat(exporterPlainText(title, messages).split("\n"));
+  const wrapped = [];
+  lines.forEach((line) => {
+    const clean = line.slice(0, 260);
+    if (!clean) wrapped.push("");
+    else for (let i = 0; i < clean.length; i += 92) wrapped.push(clean.slice(i, i + 92));
   });
+  const pageHeight = 842;
+  const lineHeight = 15;
+  const linesPerPage = 48;
+  const pages = [];
+  for (let i = 0; i < wrapped.length; i += linesPerPage) pages.push(wrapped.slice(i, i + linesPerPage));
+  const objects = [];
+  function add(obj) { objects.push(obj); return objects.length; }
+  const fontId = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const pageIds = [];
+  const contentIds = [];
+  pages.forEach((pageLines) => {
+    const content = pageLines.map((line, index) => `BT /F1 10 Tf 50 ${pageHeight - 55 - index * lineHeight} Td (${pdfEscape(line)}) Tj ET`).join("\n");
+    const cid = add(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`);
+    contentIds.push(cid);
+    const pid = add(null);
+    pageIds.push(pid);
+  });
+  const pagesId = add(null);
+  pageIds.forEach((pid, idx) => {
+    objects[pid - 1] = `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentIds[idx]} 0 R >>`;
+  });
+  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
+  const catalogId = add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((obj, idx) => {
+    offsets.push(Buffer.byteLength(pdf));
+    pdf += `${idx + 1} 0 obj\n${obj}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  offsets.slice(1).forEach((offset) => { pdf += `${String(offset).padStart(10, "0")} 00000 n \n`; });
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return Buffer.from(pdf, "binary");
 }
-
 
 app.post("/api/export-chat", async (req, res) => {
   try {
@@ -2353,7 +2333,7 @@ app.post("/api/export-chat", async (req, res) => {
     else if (format === "xls") { buffer = Buffer.from(exporterOfficeTable(title, messages), "utf8"); mime = "application/vnd.ms-excel;charset=utf-8"; }
     else if (format === "docx") { buffer = exporterDocx(title, messages); mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"; }
     else if (format === "xlsx") { buffer = exporterXlsx(title, messages); mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; }
-    else if (format === "pdf") { buffer = await exporterPdf(title, messages); mime = "application/pdf"; }
+    else if (format === "pdf") { buffer = exporterPdf(title, messages); mime = "application/pdf"; }
     else if (format === "image" || format === "resim" || format === "svg") { buffer = Buffer.from(exporterSvg(title, messages), "utf8"); ext = "svg"; mime = "image/svg+xml;charset=utf-8"; }
     else { buffer = Buffer.from(exporterHtml(title, messages), "utf8"); ext = "html"; mime = "text/html;charset=utf-8"; }
 
