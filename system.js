@@ -7,6 +7,7 @@ const path = require("path");
 const pdfParseModule = require("pdf-parse");
 const mammoth = require("mammoth");
 const ExcelJS = require("exceljs");
+const unzipper = require("unzipper");
 
 let toolRegistry = null;
 let lucyTools = {};
@@ -647,21 +648,109 @@ function buildSystemPrompt(body = {}) {
       "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan.",
-      "ZIP için tool=zip kullan; input.files dizisine {filename, content} veya {storedFilename} ver.",
-      "Dosya listesini görmek gerekiyorsa tool=fileManager ve input.action=list kullan.",
-      "Mail göndermek gerekiyorsa tool=mail kullan; ama SMTP ayarı yoksa gönderildi deme, tool sonucundaki hatayı aynen bildir.",
-      "Tool çalıştırmadan PDF/Excel/ZIP/Mail/QR oluşturdum veya gönderdim deme. Sadece gerçek tool sonucu varsa tamamlandı de."
+      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan. ZIP yüklendiğinde içindeki desteklenen metin/kod dosyalarını oku, listele ve analiz et.",
+      "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla."
     ].join("\n"));
   }
 
   return parts.join("\n\n");
 }
 
+
+function shouldSkipZipEntry(entryPath = "") {
+  const clean = String(entryPath || "").replace(/\\/g, "/");
+  const lower = clean.toLowerCase();
+  if (!clean || clean.endsWith("/")) return true;
+  if (lower.includes("/node_modules/") || lower.startsWith("node_modules/")) return true;
+  if (lower.includes("/.git/") || lower.startsWith(".git/")) return true;
+  if (lower.includes("/dist/") || lower.startsWith("dist/")) return true;
+  if (lower.includes("/build/") || lower.startsWith("build/")) return true;
+  if (lower.includes("/generated/") || lower.startsWith("generated/")) return true;
+  if (lower.includes("/uploads/") || lower.startsWith("uploads/")) return true;
+  if (lower.endsWith("package-lock.json")) return false;
+  return false;
+}
+
+function isReadableZipEntry(entryPath = "") {
+  const ext = path.extname(entryPath).toLowerCase();
+  return TEXT_EXTENSIONS.has(ext);
+}
+
+async function extractZipTextFromFile(filePath, originalName) {
+  const MAX_FILES_TO_READ = 80;
+  const MAX_ENTRY_CHARS = 6000;
+  const MAX_TOTAL_CHARS = 120000;
+
+  const directory = await unzipper.Open.file(filePath);
+  const files = directory.files.filter((entry) => entry.type === "File");
+  const readable = [];
+  const skipped = [];
+  let totalChars = 0;
+
+  for (const entry of files) {
+    const entryName = entry.path || entry.props?.path || "dosya";
+    const normalizedName = String(entryName).replace(/\\/g, "/");
+
+    if (shouldSkipZipEntry(normalizedName)) {
+      skipped.push(normalizedName);
+      continue;
+    }
+
+    if (!isReadableZipEntry(normalizedName)) {
+      skipped.push(normalizedName);
+      continue;
+    }
+
+    if (readable.length >= MAX_FILES_TO_READ || totalChars >= MAX_TOTAL_CHARS) {
+      skipped.push(normalizedName);
+      continue;
+    }
+
+    try {
+      const buffer = await entry.buffer();
+      const raw = buffer.toString("utf8");
+      const clean = limitText(raw, MAX_ENTRY_CHARS);
+      totalChars += clean.length;
+      readable.push({ name: normalizedName, text: clean });
+    } catch (error) {
+      skipped.push(`${normalizedName} (okunamadı: ${error.message})`);
+    }
+  }
+
+  const parts = [];
+  parts.push(`ZIP DOSYA ANALİZİ: ${originalName}`);
+  parts.push(`Toplam dosya: ${files.length}`);
+  parts.push(`Okunan metin/kod dosyası: ${readable.length}`);
+  parts.push(`Atlanan/listelenen dosya: ${skipped.length}`);
+
+  if (readable.length) {
+    parts.push("\n# Okunan dosyalar");
+    for (const item of readable) {
+      parts.push(`\n## ${item.name}\n\`\`\`\n${item.text}\n\`\`\``);
+    }
+  }
+
+  if (skipped.length) {
+    parts.push("\n# Okunmayan / atlanan dosyalar");
+    parts.push(skipped.slice(0, 120).map((name) => `- ${name}`).join("\n"));
+    if (skipped.length > 120) parts.push(`- ... ${skipped.length - 120} dosya daha`);
+  }
+
+  if (!readable.length) {
+    parts.push("\nBu ZIP açıldı ve listelendi; fakat içinde desteklenen metin/kod dosyası bulunamadı. PDF/DOCX/XLSX gibi dosyalar ZIP dışından tek tek yüklenirse okunur.");
+  }
+
+  return limitText(parts.join("\n"), MAX_TOTAL_CHARS);
+}
+
 async function extractTextFromFile(filePath, originalName) {
   const ext = path.extname(originalName).toLowerCase();
 
   if (TEXT_EXTENSIONS.has(ext)) return limitText(fs.readFileSync(filePath, "utf8"));
+
+  if (ext === ".zip") {
+    return await extractZipTextFromFile(filePath, originalName);
+  }
 
   if (ext === ".pdf") {
     const buffer = fs.readFileSync(filePath);
@@ -1534,31 +1623,6 @@ app.get("/", (req, res) => {
   res.json({ success: true, message: "LUCY backend çalışıyor", brain: "DeepSeek", port: PORT });
 });
 
-
-app.get("/api/generated", (req, res) => {
-  try {
-    ensureGeneratedDir();
-    const base = publicBaseUrl(req);
-    const files = fs.readdirSync(GENERATED_DIR)
-      .map((name) => {
-        const fullPath = path.join(GENERATED_DIR, name);
-        const stat = fs.statSync(fullPath);
-        return {
-          name,
-          size: stat.size,
-          createdAt: stat.birthtime?.toISOString?.() || stat.mtime.toISOString(),
-          updatedAt: stat.mtime.toISOString(),
-          url: `${base}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`,
-          downloadUrl: `${base}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`,
-        };
-      })
-      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-    res.json({ success: true, count: files.length, files });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 app.get("/api/tools", (req, res) => {
   res.json({
     success: true,
@@ -1580,7 +1644,7 @@ app.post("/api/tools/execute", async (req, res) => {
 app.post("/api/tools/:name", async (req, res) => {
   const timeoutMs = Number(req.body?.timeoutMs || 30000);
   const input = req.body?.input || req.body?.args || req.body || {};
-  const result = persistToolFileResult(await executeLucyTool(req.params.name, input, timeoutMs), req);
+  const result = await executeLucyTool(req.params.name, input, timeoutMs);
   const status = result.success === false && result.error === "tool_not_found" ? 404 : 200;
   res.status(status).json(result);
 });
