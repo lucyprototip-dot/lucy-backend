@@ -35,6 +35,18 @@ app.use(express.json({ limit: "80mb" }));
 
 const PORT = process.env.PORT || 5050;
 
+const GENERATED_DIR = process.env.LUCY_GENERATED_DIR || path.resolve(__dirname, "generated");
+const GENERATED_PUBLIC_PATH = "/generated";
+
+function ensureGeneratedDir() {
+  if (!fs.existsSync(GENERATED_DIR)) {
+    fs.mkdirSync(GENERATED_DIR, { recursive: true });
+  }
+}
+
+ensureGeneratedDir();
+app.use(GENERATED_PUBLIC_PATH, express.static(GENERATED_DIR));
+
 const upload = multer({
   dest: "uploads/",
   limits: { fileSize: 80 * 1024 * 1024 },
@@ -81,6 +93,212 @@ async function executeLucyTool(toolName, input = {}, timeoutMs = 30000) {
       message: error.message,
     };
   }
+}
+
+
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function stripCodeFence(text = "") {
+  return String(text)
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+
+function extractBalancedJsonBlocks(text = "") {
+  const source = String(text || "");
+  const blocks = [];
+
+  for (let i = 0; i < source.length; i += 1) {
+    const startChar = source[i];
+    if (startChar !== "{" && startChar !== "[") continue;
+
+    const closeChar = startChar === "{" ? "}" : "]";
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let j = i; j < source.length; j += 1) {
+      const char = source[j];
+
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) continue;
+
+      if (char === startChar) depth += 1;
+      if (char === closeChar) depth -= 1;
+
+      if (depth === 0) {
+        blocks.push(source.slice(i, j + 1));
+        i = j;
+        break;
+      }
+    }
+  }
+
+  return blocks;
+}
+
+function normalizeToolCallShape(rawCall) {
+  if (!rawCall || typeof rawCall !== "object") return null;
+
+  const inner = rawCall.tool_call || rawCall.toolCall || rawCall.call || rawCall;
+  if (!inner || typeof inner !== "object") return null;
+
+  const tool = inner.tool || inner.name || inner.toolName;
+  const input = inner.input || inner.args || inner.arguments || inner.parameters || {};
+
+  if (!tool || typeof tool !== "string") return null;
+  return { tool: tool.trim(), input: input && typeof input === "object" ? input : { value: input } };
+}
+
+function extractToolCallsFromAnswer(answer = "") {
+  const text = String(answer || "");
+  const candidates = [];
+
+  const fencedJson = [...text.matchAll(/```json\s*([\s\S]*?)```/gi)].map((m) => m[1]);
+  const genericFences = [...text.matchAll(/```\s*([\s\S]*?)```/g)].map((m) => m[1]);
+  candidates.push(...fencedJson, ...genericFences, ...extractBalancedJsonBlocks(text));
+
+  const calls = [];
+  for (const candidate of candidates) {
+    const parsed = safeJsonParse(stripCodeFence(candidate));
+    if (!parsed) continue;
+
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    for (const item of list) {
+      if (item?.tool_calls && Array.isArray(item.tool_calls)) {
+        item.tool_calls.forEach((entry) => {
+          const call = normalizeToolCallShape(entry);
+          if (call) calls.push(call);
+        });
+        continue;
+      }
+
+      if (item?.toolCalls && Array.isArray(item.toolCalls)) {
+        item.toolCalls.forEach((entry) => {
+          const call = normalizeToolCallShape(entry);
+          if (call) calls.push(call);
+        });
+        continue;
+      }
+
+      const call = normalizeToolCallShape(item);
+      if (call) calls.push(call);
+    }
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for (const call of calls) {
+    const key = `${call.tool}:${JSON.stringify(call.input)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(call);
+  }
+
+  return unique.slice(0, 5);
+}
+
+function publicBaseUrl(req) {
+  const configured = envValue("LUCY_PUBLIC_BASE_URL") || envValue("PUBLIC_BASE_URL") || envValue("RAILWAY_PUBLIC_DOMAIN");
+  if (configured) {
+    const withProtocol = /^https?:\/\//i.test(configured) ? configured : `https://${configured}`;
+    return withProtocol.replace(/\/$/, "");
+  }
+
+  const protocol = req.get?.("x-forwarded-proto") || req.protocol || "http";
+  const host = req.get?.("host") || `localhost:${PORT}`;
+  return `${protocol}://${host}`;
+}
+
+function safeFileName(name = "lucy-output.bin") {
+  const parsed = path.parse(String(name || "lucy-output.bin"));
+  const base = (parsed.name || "lucy-output")
+    .replace(/[^a-zA-Z0-9ğüşöçıİĞÜŞÖÇ._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 80) || "lucy-output";
+  const ext = (parsed.ext || ".bin").replace(/[^a-zA-Z0-9.]/g, "").slice(0, 12) || ".bin";
+  return `${Date.now()}-${base}${ext}`;
+}
+
+function persistToolFileResult(result = {}, req) {
+  if (!result || !result.base64) return result;
+
+  ensureGeneratedDir();
+  const filename = safeFileName(result.filename || "lucy-output.bin");
+  const filePath = path.join(GENERATED_DIR, filename);
+  fs.writeFileSync(filePath, Buffer.from(String(result.base64), "base64"));
+
+  const url = `${publicBaseUrl(req)}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(filename)}`;
+  const publicResult = {
+    ...result,
+    filename: result.filename || filename,
+    storedFilename: filename,
+    url,
+    downloadUrl: url,
+  };
+
+  delete publicResult.base64;
+  return publicResult;
+}
+
+async function executeToolCallsFromAnswer(answer = "", req) {
+  const toolCalls = extractToolCallsFromAnswer(answer);
+  if (!toolCalls.length) {
+    return { toolCalls: [], toolResults: [], finalAnswer: answer };
+  }
+
+  const toolResults = [];
+  for (const call of toolCalls) {
+    const result = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
+    toolResults.push({
+      tool: call.tool,
+      input: call.input,
+      result: persistToolFileResult(result, req),
+    });
+  }
+
+  const successfulFiles = toolResults
+    .filter((item) => item.result?.success !== false && (item.result?.downloadUrl || item.result?.url))
+    .map((item) => `✅ ${item.tool}: ${item.result.downloadUrl || item.result.url}`);
+
+  const failed = toolResults
+    .filter((item) => item.result?.success === false)
+    .map((item) => `❌ ${item.tool}: ${item.result.message || item.result.error || "Tool çalışmadı"}`);
+
+  const cleanAnswer = String(answer || "")
+    .replace(/```json\s*[\s\S]*?```/gi, "")
+    .replace(/```\s*\{[\s\S]*?\}\s*```/g, "")
+    .replace(/\{\s*"tool_call"[\s\S]*?\}\s*$/i, "")
+    .trim();
+
+  const resultLines = [...successfulFiles, ...failed];
+  const finalAnswer = resultLines.length
+    ? `${cleanAnswer ? `${cleanAnswer}\n\n` : ""}🔧 Gerçek tool çalıştırıldı.\n${resultLines.join("\n")}`
+    : cleanAnswer;
+
+  return { toolCalls, toolResults, finalAnswer };
 }
 
 function numberEnv(name, fallback) {
@@ -416,6 +634,22 @@ function buildSystemPrompt(body = {}) {
 
   if (voiceMode === "normal") {
     parts.push("Ses modu: Normal. Konuşma tarzın doğal, dengeli, net ve günlük konuşmaya yakın olsun.");
+  }
+
+
+  if (listLoadedTools().length) {
+    parts.push([
+      "LUCY TOOL ENGINE AKTIF:",
+      "Gerçek dosya, PDF, Excel, QR, hesap, grafik, Mermaid, OCR, webFetch veya textStats gerektiğinde normal cevapta roleplay yapma.",
+      "Bunun yerine cevabın içinde yalnızca geçerli JSON tool_call üret.",
+      "Format:",
+      "```json",
+      "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
+      "```",
+      `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
+      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan.",
+      "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla."
+    ].join("\n"));
   }
 
   return parts.join("\n\n");
@@ -1070,7 +1304,7 @@ async function streamVisibleReasoning({ body = {}, cleanMessages = [], res, deep
   return visibleText;
 }
 
-async function askDeepSeekStream(body = {}, res) {
+async function askDeepSeekStream(body = {}, res, req = null) {
   const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
   if (!deepSeekKey) {
     throw new Error("DEEPSEEK_API_KEY Railway Variables içinde yok.");
@@ -1147,8 +1381,20 @@ async function askDeepSeekStream(body = {}, res) {
 
       const payloadText = line.replace(/^data:\s*/, "");
       if (payloadText === "[DONE]") {
-        writeSse(res, { done: true, answer: fullAnswer });
-        return fullAnswer;
+        const toolPayload = await executeToolCallsFromAnswer(fullAnswer, req);
+        if (toolPayload.toolResults.length && toolPayload.finalAnswer !== fullAnswer) {
+          const extra = toolPayload.finalAnswer.replace(fullAnswer, "").trim();
+          if (extra) writeSse(res, { delta: `
+
+${extra}` });
+        }
+        writeSse(res, {
+          done: true,
+          answer: toolPayload.finalAnswer,
+          toolCalls: toolPayload.toolCalls,
+          toolResults: toolPayload.toolResults,
+        });
+        return toolPayload.finalAnswer;
       }
 
       try {
@@ -1164,8 +1410,20 @@ async function askDeepSeekStream(body = {}, res) {
     }
   }
 
-  writeSse(res, { done: true, answer: fullAnswer });
-  return fullAnswer;
+  const toolPayload = await executeToolCallsFromAnswer(fullAnswer, req);
+  if (toolPayload.toolResults.length && toolPayload.finalAnswer !== fullAnswer) {
+    const extra = toolPayload.finalAnswer.replace(fullAnswer, "").trim();
+    if (extra) writeSse(res, { delta: `
+
+${extra}` });
+  }
+  writeSse(res, {
+    done: true,
+    answer: toolPayload.finalAnswer,
+    toolCalls: toolPayload.toolCalls,
+    toolResults: toolPayload.toolResults,
+  });
+  return toolPayload.finalAnswer;
 }
 
 async function askOpenRouterVision({ prompt, filePath, mimeType, originalName }) {
@@ -1286,7 +1544,7 @@ app.post("/api/tools/execute", async (req, res) => {
   const name = body.name || body.tool || body.toolName;
   const input = body.input || body.args || body.parameters || {};
   const timeoutMs = Number(body.timeoutMs || 30000);
-  const result = await executeLucyTool(name, input, timeoutMs);
+  const result = persistToolFileResult(await executeLucyTool(name, input, timeoutMs), req);
   const status = result.success === false && result.error === "tool_not_found" ? 404 : 200;
   res.status(status).json(result);
 });
@@ -1331,7 +1589,7 @@ app.post("/api/chat-stream", async (req, res) => {
         return res.end();
       }
 
-      await askDeepSeekStream(liveWeb.requestBody, res);
+      const streamedAnswer = await askDeepSeekStream(liveWeb.requestBody, res, req);
       return res.end();
     }
 
@@ -1342,7 +1600,7 @@ app.post("/api/chat-stream", async (req, res) => {
       return res.end();
     }
 
-    await askDeepSeekStream(body, res);
+    const streamedAnswer = await askDeepSeekStream(body, res, req);
     return res.end();
   } catch (error) {
     writeSse(res, { error: error.message || "Stream hatası" });
@@ -1358,7 +1616,15 @@ app.post("/api/chat", async (req, res) => {
     }
 
     const answer = await askDeepSeek(req.body || {});
-    res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(req.body || {}), answer });
+    const toolPayload = await executeToolCallsFromAnswer(answer, req);
+    res.json({
+      success: true,
+      provider: "deepseek",
+      model: pickDeepSeekModel(req.body || {}),
+      answer: toolPayload.finalAnswer,
+      toolCalls: toolPayload.toolCalls,
+      toolResults: toolPayload.toolResults,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
