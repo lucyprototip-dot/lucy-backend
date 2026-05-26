@@ -264,6 +264,78 @@ function persistToolFileResult(result = {}, req) {
   return publicResult;
 }
 
+function compactJson(value, max = 6000) {
+  try {
+    const text = JSON.stringify(value, null, 2);
+    return text.length > max ? `${text.slice(0, max)}\n...` : text;
+  } catch {
+    return String(value || "").slice(0, max);
+  }
+}
+
+function normalizeToolResultForClient(tool, raw = {}, req) {
+  const result = persistToolFileResult(raw, req);
+  if (!result || typeof result !== "object") return { success: true, tool, value: result };
+
+  const url = result.downloadUrl || result.url;
+  const type = result.type || (url ? "file" : tool);
+  return {
+    ...result,
+    type,
+    tool: result.tool || tool,
+    title: result.title || result.label || undefined,
+    url,
+    downloadUrl: url,
+  };
+}
+
+function renderToolResultForAnswer(item) {
+  const tool = item.tool;
+  const result = item.result || {};
+
+  if (result.success === false) {
+    const draft = result.draft ? `\n\n**Taslak:**\n\n${result.draft.text || result.draft.html || ""}` : "";
+    return `❌ ${tool}: ${result.message || result.error || "Tool çalışmadı"}${draft}`;
+  }
+
+  const url = result.downloadUrl || result.url;
+  if (url) return `✅ ${tool}: ${url}`;
+
+  if (tool === "calculator" && result.result !== undefined) return `✅ calculator: **${result.expression || "sonuç"} = ${result.result}**`;
+  if (tool === "time" && result.time) return `✅ time: **${result.time}** (${result.timeZone || ""})`;
+
+  if (tool === "mermaid" && result.code) {
+    return `✅ mermaid: Diyagram hazır\n\n\`\`\`mermaid\n${result.code}\n\`\`\``;
+  }
+
+  if (tool === "chartData" && result.data) {
+    return `✅ chartData: Grafik hazır\n\n\`\`\`lucy-chart-json\n${compactJson({ chartType: result.chartType || "bar", data: result.data })}\n\`\`\``;
+  }
+
+  if (tool === "textStats") {
+    return [
+      "✅ textStats: Metin analizi hazır",
+      "",
+      "| Ölçüm | Değer |",
+      "|---|---:|",
+      `| Karakter | ${result.characters ?? 0} |`,
+      `| Kelime | ${result.words ?? 0} |`,
+      `| Satır | ${result.lines ?? 0} |`,
+    ].join("\n");
+  }
+
+  if (tool === "fileManager" && Array.isArray(result.files)) {
+    const rows = result.files.slice(0, 12).map((file) => `| ${file.name} | ${file.size} | [Aç](${file.url || file.downloadUrl}) |`);
+    return ["✅ fileManager: Dosya listesi", "", "| Dosya | Boyut | Link |", "|---|---:|---|", ...rows].join("\n");
+  }
+
+  if (tool === "mail") return `✅ mail: ${result.messageId ? `Mail gönderildi (**${result.subject || "Başlıksız"}**)` : "Mail işlemi tamamlandı"}`;
+  if (tool === "telegram") return `✅ telegram: ${result.messageId ? `Telegram mesajı gönderildi (#${result.messageId})` : "Telegram işlemi tamamlandı"}`;
+  if (tool === "whatsapp") return `✅ whatsapp: ${result.messageId ? `WhatsApp mesajı gönderildi (#${result.messageId})` : "WhatsApp işlemi tamamlandı"}`;
+
+  return `✅ ${tool}: ${compactJson(result, 1200)}`;
+}
+
 async function executeToolCallsFromAnswer(answer = "", req) {
   const toolCalls = extractToolCallsFromAnswer(answer);
   if (!toolCalls.length) {
@@ -272,21 +344,13 @@ async function executeToolCallsFromAnswer(answer = "", req) {
 
   const toolResults = [];
   for (const call of toolCalls) {
-    const result = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
+    const raw = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
     toolResults.push({
       tool: call.tool,
       input: call.input,
-      result: persistToolFileResult(result, req),
+      result: normalizeToolResultForClient(call.tool, raw, req),
     });
   }
-
-  const successfulFiles = toolResults
-    .filter((item) => item.result?.success !== false && (item.result?.downloadUrl || item.result?.url))
-    .map((item) => `✅ ${item.tool}: ${item.result.downloadUrl || item.result.url}`);
-
-  const failed = toolResults
-    .filter((item) => item.result?.success === false)
-    .map((item) => `❌ ${item.tool}: ${item.result.message || item.result.error || "Tool çalışmadı"}`);
 
   const cleanAnswer = String(answer || "")
     .replace(/```json\s*[\s\S]*?```/gi, "")
@@ -294,9 +358,9 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     .replace(/\{\s*"tool_call"[\s\S]*?\}\s*$/i, "")
     .trim();
 
-  const resultLines = [...successfulFiles, ...failed];
+  const resultLines = toolResults.map(renderToolResultForAnswer).filter(Boolean);
   const finalAnswer = resultLines.length
-    ? `${cleanAnswer ? `${cleanAnswer}\n\n` : ""}🔧 Gerçek tool çalıştırıldı.\n${resultLines.join("\n")}`
+    ? `${cleanAnswer ? `${cleanAnswer}\n\n` : ""}🔧 Gerçek tool çalıştırıldı.\n${resultLines.join("\n\n")}`
     : cleanAnswer;
 
   return { toolCalls, toolResults, finalAnswer };
@@ -641,15 +705,16 @@ function buildSystemPrompt(body = {}) {
   if (listLoadedTools().length) {
     parts.push([
       "LUCY TOOL ENGINE AKTIF:",
-      "Gerçek dosya, PDF, Excel, QR, hesap, grafik, Mermaid, OCR, webFetch veya textStats gerektiğinde normal cevapta roleplay yapma.",
-      "Bunun yerine cevabın içinde yalnızca geçerli JSON tool_call üret.",
+      "Gerçek dosya, PDF, Excel, QR, hesap, grafik, Mermaid, OCR, webFetch, textStats, zip, mail, telegram, whatsapp veya document gerektiğinde normal cevapta roleplay yapma.",
+      "Bunun yerine cevabın içinde yalnızca geçerli JSON tool_call üret. Tool çalışmadan 'gönderdim/oluşturdum' deme.",
       "Format:",
       "```json",
       "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan. ZIP yüklendiğinde içindeki desteklenen metin/kod dosyalarını oku, listele ve analiz et.",
-      "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla."
+      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan. ZIP için input.files kullan. Document için input.format ve input.content kullan.",
+      "Grafik gerekiyorsa chartData tool_call üret; Mermaid gerekiyorsa mermaid tool_call üret. Son kullanıcıya markdown tablo, başlık, kalın/italik ve temiz şablonla cevap ver.",
+      "Mail/Telegram/WhatsApp tool config yoksa gerçek gönderildi deme; tool zaten ayar eksikliği döndürür."
     ].join("\n"));
   }
 
@@ -1623,6 +1688,32 @@ app.get("/", (req, res) => {
   res.json({ success: true, message: "LUCY backend çalışıyor", brain: "DeepSeek", port: PORT });
 });
 
+
+app.get("/api/generated", (req, res) => {
+  try {
+    ensureGeneratedDir();
+    const base = publicBaseUrl(req);
+    const files = fs.readdirSync(GENERATED_DIR)
+      .map((name) => {
+        const fullPath = path.join(GENERATED_DIR, name);
+        const stat = fs.statSync(fullPath);
+        return {
+          name,
+          storedFilename: name,
+          size: stat.size,
+          createdAt: stat.birthtime?.toISOString?.() || stat.mtime.toISOString(),
+          updatedAt: stat.mtime.toISOString(),
+          url: `${base}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`,
+          downloadUrl: `${base}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`,
+        };
+      })
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    res.json({ success: true, count: files.length, files });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/api/tools", (req, res) => {
   res.json({
     success: true,
@@ -1644,7 +1735,7 @@ app.post("/api/tools/execute", async (req, res) => {
 app.post("/api/tools/:name", async (req, res) => {
   const timeoutMs = Number(req.body?.timeoutMs || 30000);
   const input = req.body?.input || req.body?.args || req.body || {};
-  const result = await executeLucyTool(req.params.name, input, timeoutMs);
+  const result = normalizeToolResultForClient(req.params.name, await executeLucyTool(req.params.name, input, timeoutMs), req);
   const status = result.success === false && result.error === "tool_not_found" ? 404 : 200;
   res.status(status).json(result);
 });
