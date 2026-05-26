@@ -7,7 +7,6 @@ const path = require("path");
 const pdfParseModule = require("pdf-parse");
 const mammoth = require("mammoth");
 const ExcelJS = require("exceljs");
-const unzipper = require("unzipper");
 
 let toolRegistry = null;
 let lucyTools = {};
@@ -47,6 +46,33 @@ function ensureGeneratedDir() {
 
 ensureGeneratedDir();
 app.use(GENERATED_PUBLIC_PATH, express.static(GENERATED_DIR));
+
+app.get("/api/generated", (req, res) => {
+  try {
+    ensureGeneratedDir();
+    const files = fs.readdirSync(GENERATED_DIR)
+      .filter((name) => !name.startsWith("."))
+      .map((name) => {
+        const filePath = path.join(GENERATED_DIR, name);
+        const stat = fs.statSync(filePath);
+        const url = `${publicBaseUrl(req)}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`;
+        return {
+          name,
+          storedFilename: name,
+          size: stat.size,
+          createdAt: stat.birthtime?.toISOString?.() || stat.mtime.toISOString(),
+          updatedAt: stat.mtime.toISOString(),
+          url,
+          downloadUrl: url,
+        };
+      })
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    res.json({ success: true, count: files.length, files });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
 const upload = multer({
   dest: "uploads/",
@@ -264,76 +290,68 @@ function persistToolFileResult(result = {}, req) {
   return publicResult;
 }
 
-function compactJson(value, max = 6000) {
-  try {
-    const text = JSON.stringify(value, null, 2);
-    return text.length > max ? `${text.slice(0, max)}\n...` : text;
-  } catch {
-    return String(value || "").slice(0, max);
+
+function guessToolResultType(toolName, result = {}) {
+  const tool = String(toolName || result.tool || "").toLowerCase();
+  const mime = String(result.mimeType || result.contentType || "").toLowerCase();
+
+  if (result.downloadUrl || result.url || result.storedFilename || result.filename || result.base64) {
+    if (mime.includes("pdf") || String(result.filename || "").toLowerCase().endsWith(".pdf")) return "file-pdf";
+    if (mime.includes("spreadsheet") || String(result.filename || "").match(/\.xlsx?$/i)) return "file-excel";
+    if (mime.includes("zip") || String(result.filename || "").match(/\.zip$/i)) return "file-zip";
+    if (mime.startsWith("image/") || String(result.filename || "").match(/\.(png|jpe?g|webp|gif|svg)$/i)) return "image";
+    return "file";
   }
+
+  if (tool === "chartdata" || result.chartType || result.data?.labels) return "chart";
+  if (tool === "mermaid" || result.type === "mermaid" || result.code) return "mermaid";
+  if (tool === "qr" || result.qr || result.svg || result.png) return "qr";
+  if (tool === "filemanager" || result.type === "file-list" || Array.isArray(result.files)) return "file-list";
+  if (tool === "calculator") return "calculation";
+  if (tool === "textstats") return "text-stats";
+  if (tool === "webfetch") return "web-fetch";
+  if (tool === "time") return "time";
+  if (tool === "mail") return "mail";
+  return "tool";
 }
 
-function normalizeToolResultForClient(tool, raw = {}, req) {
-  const result = persistToolFileResult(raw, req);
-  if (!result || typeof result !== "object") return { success: true, tool, value: result };
+function normalizeToolResultForUI(toolName, result = {}, input = {}) {
+  const normalized = result && typeof result === "object" ? { ...result } : { value: result };
+  const type = guessToolResultType(toolName, normalized);
+  const title = normalized.title || input.title || input.subject || input.filename || input.name || `${toolName} sonucu`;
 
-  const url = result.downloadUrl || result.url;
-  const type = result.type || (url ? "file" : tool);
   return {
-    ...result,
     type,
-    tool: result.tool || tool,
-    title: result.title || result.label || undefined,
-    url,
-    downloadUrl: url,
+    tool: toolName,
+    title,
+    success: normalized.success !== false,
+    url: normalized.downloadUrl || normalized.url || "",
+    downloadUrl: normalized.downloadUrl || normalized.url || "",
+    filename: normalized.filename || normalized.downloadName || normalized.storedFilename || "",
+    storedFilename: normalized.storedFilename || "",
+    mimeType: normalized.mimeType || normalized.contentType || "",
+    chartType: normalized.chartType || input.chartType || "bar",
+    data: normalized.data || normalized.chartData || null,
+    code: normalized.code || normalized.mermaid || "",
+    text: normalized.text || normalized.message || "",
+    files: Array.isArray(normalized.files) ? normalized.files : undefined,
+    count: normalized.count,
+    raw: normalized,
   };
 }
 
-function renderToolResultForAnswer(item) {
-  const tool = item.tool;
-  const result = item.result || {};
+function widgetFence(payload) {
+  return `\n\n\`\`\`lucy-widget\n${JSON.stringify(payload)}\n\`\`\``;
+}
 
-  if (result.success === false) {
-    const draft = result.draft ? `\n\n**Taslak:**\n\n${result.draft.text || result.draft.html || ""}` : "";
-    return `❌ ${tool}: ${result.message || result.error || "Tool çalışmadı"}${draft}`;
-  }
-
-  const url = result.downloadUrl || result.url;
-  if (url) return `✅ ${tool}: ${url}`;
-
-  if (tool === "calculator" && result.result !== undefined) return `✅ calculator: **${result.expression || "sonuç"} = ${result.result}**`;
-  if (tool === "time" && result.time) return `✅ time: **${result.time}** (${result.timeZone || ""})`;
-
-  if (tool === "mermaid" && result.code) {
-    return `✅ mermaid: Diyagram hazır\n\n\`\`\`mermaid\n${result.code}\n\`\`\``;
-  }
-
-  if (tool === "chartData" && result.data) {
-    return `✅ chartData: Grafik hazır\n\n\`\`\`lucy-chart-json\n${compactJson({ chartType: result.chartType || "bar", data: result.data })}\n\`\`\``;
-  }
-
-  if (tool === "textStats") {
-    return [
-      "✅ textStats: Metin analizi hazır",
-      "",
-      "| Ölçüm | Değer |",
-      "|---|---:|",
-      `| Karakter | ${result.characters ?? 0} |`,
-      `| Kelime | ${result.words ?? 0} |`,
-      `| Satır | ${result.lines ?? 0} |`,
-    ].join("\n");
-  }
-
-  if (tool === "fileManager" && Array.isArray(result.files)) {
-    const rows = result.files.slice(0, 12).map((file) => `| ${file.name} | ${file.size} | [Aç](${file.url || file.downloadUrl}) |`);
-    return ["✅ fileManager: Dosya listesi", "", "| Dosya | Boyut | Link |", "|---|---:|---|", ...rows].join("\n");
-  }
-
-  if (tool === "mail") return `✅ mail: ${result.messageId ? `Mail gönderildi (**${result.subject || "Başlıksız"}**)` : "Mail işlemi tamamlandı"}`;
-  if (tool === "telegram") return `✅ telegram: ${result.messageId ? `Telegram mesajı gönderildi (#${result.messageId})` : "Telegram işlemi tamamlandı"}`;
-  if (tool === "whatsapp") return `✅ whatsapp: ${result.messageId ? `WhatsApp mesajı gönderildi (#${result.messageId})` : "WhatsApp işlemi tamamlandı"}`;
-
-  return `✅ ${tool}: ${compactJson(result, 1200)}`;
+function summarizeToolResultLine(toolName, ui) {
+  if (!ui.success) return `❌ ${toolName}: ${ui.text || ui.raw?.error || "Tool çalışmadı"}`;
+  if (ui.downloadUrl) return `✅ ${toolName}: ${ui.downloadUrl}`;
+  if (ui.type === "chart") return `✅ ${toolName}: Grafik verisi hazır.`;
+  if (ui.type === "mermaid") return `✅ ${toolName}: Mermaid diyagramı hazır.`;
+  if (ui.type === "file-list") return `✅ ${toolName}: ${ui.count || ui.files?.length || 0} dosya listelendi.`;
+  if (ui.type === "mail") return `✅ ${toolName}: ${ui.text || "Mail işlemi tamamlandı."}`;
+  return `✅ ${toolName}: İşlem tamamlandı.`;
 }
 
 async function executeToolCallsFromAnswer(answer = "", req) {
@@ -343,13 +361,23 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   }
 
   const toolResults = [];
+  const resultLines = [];
+  const widgets = [];
+
   for (const call of toolCalls) {
-    const raw = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
+    const rawResult = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
+    const persistedResult = persistToolFileResult(rawResult, req);
+    const ui = normalizeToolResultForUI(call.tool, persistedResult, call.input);
+
     toolResults.push({
       tool: call.tool,
       input: call.input,
-      result: normalizeToolResultForClient(call.tool, raw, req),
+      result: persistedResult,
+      ui,
     });
+
+    resultLines.push(summarizeToolResultLine(call.tool, ui));
+    widgets.push(widgetFence(ui));
   }
 
   const cleanAnswer = String(answer || "")
@@ -358,13 +386,15 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     .replace(/\{\s*"tool_call"[\s\S]*?\}\s*$/i, "")
     .trim();
 
-  const resultLines = toolResults.map(renderToolResultForAnswer).filter(Boolean);
-  const finalAnswer = resultLines.length
-    ? `${cleanAnswer ? `${cleanAnswer}\n\n` : ""}🔧 Gerçek tool çalıştırıldı.\n${resultLines.join("\n\n")}`
-    : cleanAnswer;
+  const finalAnswer = [
+    cleanAnswer,
+    resultLines.length ? `🔧 Gerçek tool çalıştırıldı.\n${resultLines.join("\n")}` : "",
+    widgets.join(""),
+  ].filter(Boolean).join("\n\n");
 
   return { toolCalls, toolResults, finalAnswer };
 }
+
 
 function numberEnv(name, fallback) {
   const value = Number(envValue(name));
@@ -702,120 +732,40 @@ function buildSystemPrompt(body = {}) {
   }
 
 
-  if (listLoadedTools().length) {
+  parts.push([
+    "LUCY FORMAT ENGINE AKTIF:",
+    "Ömer özellikle ChatGPT gibi biçimli cevap istiyor.",
+    "Gerektiğinde markdown kullan: **kalın**, _italik_, tablo, başlık, liste, link ve kod bloğu serbesttir.",
+    "Cevapları ekranda okunabilir, profesyonel, şablonlu ve düzenli ver.",
+    "Tool sonuçları backend tarafından lucy-widget olarak ekrana kart şeklinde render edilir."
+  ].join("\n"));
+
+    if (listLoadedTools().length) {
     parts.push([
       "LUCY TOOL ENGINE AKTIF:",
-      "Gerçek dosya, PDF, Excel, QR, hesap, grafik, Mermaid, OCR, webFetch, textStats, zip, mail, telegram, whatsapp veya document gerektiğinde normal cevapta roleplay yapma.",
-      "Bunun yerine cevabın içinde yalnızca geçerli JSON tool_call üret. Tool çalışmadan 'gönderdim/oluşturdum' deme.",
+      "Gerçek dosya, PDF, Excel, QR, hesap, grafik, Mermaid, OCR, webFetch veya textStats gerektiğinde normal cevapta roleplay yapma.",
+      "Bunun yerine cevabın içinde yalnızca geçerli JSON tool_call üret.",
       "Format:",
       "```json",
       "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan. ZIP için input.files kullan. Document için input.format ve input.content kullan.",
-      "Grafik gerekiyorsa chartData tool_call üret; Mermaid gerekiyorsa mermaid tool_call üret. Son kullanıcıya markdown tablo, başlık, kalın/italik ve temiz şablonla cevap ver.",
-      "Mail/Telegram/WhatsApp tool config yoksa gerçek gönderildi deme; tool zaten ayar eksikliği döndürür."
+      "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan.",
+      "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
+      "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
+      "Mermaid istenirse mermaid tool_call üret veya doğrudan ```mermaid kod bloğu yaz.",
+      "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
+      "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
     ].join("\n"));
   }
 
   return parts.join("\n\n");
 }
 
-
-function shouldSkipZipEntry(entryPath = "") {
-  const clean = String(entryPath || "").replace(/\\/g, "/");
-  const lower = clean.toLowerCase();
-  if (!clean || clean.endsWith("/")) return true;
-  if (lower.includes("/node_modules/") || lower.startsWith("node_modules/")) return true;
-  if (lower.includes("/.git/") || lower.startsWith(".git/")) return true;
-  if (lower.includes("/dist/") || lower.startsWith("dist/")) return true;
-  if (lower.includes("/build/") || lower.startsWith("build/")) return true;
-  if (lower.includes("/generated/") || lower.startsWith("generated/")) return true;
-  if (lower.includes("/uploads/") || lower.startsWith("uploads/")) return true;
-  if (lower.endsWith("package-lock.json")) return false;
-  return false;
-}
-
-function isReadableZipEntry(entryPath = "") {
-  const ext = path.extname(entryPath).toLowerCase();
-  return TEXT_EXTENSIONS.has(ext);
-}
-
-async function extractZipTextFromFile(filePath, originalName) {
-  const MAX_FILES_TO_READ = 80;
-  const MAX_ENTRY_CHARS = 6000;
-  const MAX_TOTAL_CHARS = 120000;
-
-  const directory = await unzipper.Open.file(filePath);
-  const files = directory.files.filter((entry) => entry.type === "File");
-  const readable = [];
-  const skipped = [];
-  let totalChars = 0;
-
-  for (const entry of files) {
-    const entryName = entry.path || entry.props?.path || "dosya";
-    const normalizedName = String(entryName).replace(/\\/g, "/");
-
-    if (shouldSkipZipEntry(normalizedName)) {
-      skipped.push(normalizedName);
-      continue;
-    }
-
-    if (!isReadableZipEntry(normalizedName)) {
-      skipped.push(normalizedName);
-      continue;
-    }
-
-    if (readable.length >= MAX_FILES_TO_READ || totalChars >= MAX_TOTAL_CHARS) {
-      skipped.push(normalizedName);
-      continue;
-    }
-
-    try {
-      const buffer = await entry.buffer();
-      const raw = buffer.toString("utf8");
-      const clean = limitText(raw, MAX_ENTRY_CHARS);
-      totalChars += clean.length;
-      readable.push({ name: normalizedName, text: clean });
-    } catch (error) {
-      skipped.push(`${normalizedName} (okunamadı: ${error.message})`);
-    }
-  }
-
-  const parts = [];
-  parts.push(`ZIP DOSYA ANALİZİ: ${originalName}`);
-  parts.push(`Toplam dosya: ${files.length}`);
-  parts.push(`Okunan metin/kod dosyası: ${readable.length}`);
-  parts.push(`Atlanan/listelenen dosya: ${skipped.length}`);
-
-  if (readable.length) {
-    parts.push("\n# Okunan dosyalar");
-    for (const item of readable) {
-      parts.push(`\n## ${item.name}\n\`\`\`\n${item.text}\n\`\`\``);
-    }
-  }
-
-  if (skipped.length) {
-    parts.push("\n# Okunmayan / atlanan dosyalar");
-    parts.push(skipped.slice(0, 120).map((name) => `- ${name}`).join("\n"));
-    if (skipped.length > 120) parts.push(`- ... ${skipped.length - 120} dosya daha`);
-  }
-
-  if (!readable.length) {
-    parts.push("\nBu ZIP açıldı ve listelendi; fakat içinde desteklenen metin/kod dosyası bulunamadı. PDF/DOCX/XLSX gibi dosyalar ZIP dışından tek tek yüklenirse okunur.");
-  }
-
-  return limitText(parts.join("\n"), MAX_TOTAL_CHARS);
-}
-
 async function extractTextFromFile(filePath, originalName) {
   const ext = path.extname(originalName).toLowerCase();
 
   if (TEXT_EXTENSIONS.has(ext)) return limitText(fs.readFileSync(filePath, "utf8"));
-
-  if (ext === ".zip") {
-    return await extractZipTextFromFile(filePath, originalName);
-  }
 
   if (ext === ".pdf") {
     const buffer = fs.readFileSync(filePath);
@@ -1688,32 +1638,6 @@ app.get("/", (req, res) => {
   res.json({ success: true, message: "LUCY backend çalışıyor", brain: "DeepSeek", port: PORT });
 });
 
-
-app.get("/api/generated", (req, res) => {
-  try {
-    ensureGeneratedDir();
-    const base = publicBaseUrl(req);
-    const files = fs.readdirSync(GENERATED_DIR)
-      .map((name) => {
-        const fullPath = path.join(GENERATED_DIR, name);
-        const stat = fs.statSync(fullPath);
-        return {
-          name,
-          storedFilename: name,
-          size: stat.size,
-          createdAt: stat.birthtime?.toISOString?.() || stat.mtime.toISOString(),
-          updatedAt: stat.mtime.toISOString(),
-          url: `${base}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`,
-          downloadUrl: `${base}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`,
-        };
-      })
-      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-    res.json({ success: true, count: files.length, files });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 app.get("/api/tools", (req, res) => {
   res.json({
     success: true,
@@ -1735,7 +1659,7 @@ app.post("/api/tools/execute", async (req, res) => {
 app.post("/api/tools/:name", async (req, res) => {
   const timeoutMs = Number(req.body?.timeoutMs || 30000);
   const input = req.body?.input || req.body?.args || req.body || {};
-  const result = normalizeToolResultForClient(req.params.name, await executeLucyTool(req.params.name, input, timeoutMs), req);
+  const result = await executeLucyTool(req.params.name, input, timeoutMs);
   const status = result.success === false && result.error === "tool_not_found" ? 404 : 200;
   res.status(status).json(result);
 });
