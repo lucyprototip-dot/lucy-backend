@@ -333,11 +333,6 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     mimeType: normalized.mimeType || normalized.contentType || "",
     chartType: normalized.chartType || input.chartType || "bar",
     data: normalized.data || normalized.chartData || null,
-    headers: normalized.headers || normalized.columnsList || [],
-    previewRows: normalized.previewRows || normalized.preview || [],
-    rows: normalized.rows,
-    columns: normalized.columns,
-    note: normalized.note || "",
     code: normalized.code || normalized.mermaid || "",
     text: normalized.text || normalized.message || "",
     files: Array.isArray(normalized.files) ? normalized.files : undefined,
@@ -382,22 +377,15 @@ function latestGeneratedFileFromDisk() {
 function extractGeneratedFileRefsFromText(text = "") {
   const source = String(text || "");
   const refs = [];
-  const pushRef = (storedFilename, filename = storedFilename) => {
-    const stored = String(storedFilename || "").trim().replace(/[.,;]+$/g, "");
-    const file = String(filename || stored || "").trim().replace(/[.,;]+$/g, "");
-    if (!stored && !file) return;
-    refs.push({ storedFilename: stored || file, filename: file || stored });
-  };
-
-  for (const match of source.matchAll(/LUCY_FILE_REF\s+([^\n]+)/gi)) {
-    const chunk = match[1] || "";
-    const stored = chunk.match(/storedFilename=([^\s]+)/i)?.[1] || "";
-    const filename = chunk.match(/filename=([^\s]+)/i)?.[1] || stored;
-    pushRef(stored, filename);
-  }
 
   for (const match of source.matchAll(/\/generated\/([^\s"')]+)(?:[\s"')]|$)/gi)) {
-    try { pushRef(decodeURIComponent(match[1])); } catch { pushRef(match[1]); }
+    try {
+      const storedFilename = decodeURIComponent(match[1].replace(/[.,;]+$/g, ""));
+      if (storedFilename) refs.push({ storedFilename, filename: storedFilename });
+    } catch {
+      const storedFilename = match[1].replace(/[.,;]+$/g, "");
+      if (storedFilename) refs.push({ storedFilename, filename: storedFilename });
+    }
   }
 
   for (const match of source.matchAll(/```lucy-widget\s*([\s\S]*?)```/gi)) {
@@ -405,11 +393,7 @@ function extractGeneratedFileRefsFromText(text = "") {
     if (!widget || typeof widget !== "object") continue;
     const storedFilename = widget.storedFilename || widget.raw?.storedFilename;
     const filename = widget.filename || widget.raw?.filename || storedFilename;
-    pushRef(storedFilename || filename, filename || storedFilename);
-  }
-
-  for (const match of source.matchAll(/\b([\wğüşöçıİĞÜŞÖÇ ._-]{2,120}\.(?:xlsx|xls|pdf|zip|docx|txt|csv|png|jpg|jpeg))\b/gi)) {
-    pushRef(match[1], match[1]);
+    if (storedFilename || filename) refs.push({ storedFilename: storedFilename || filename, filename: filename || storedFilename });
   }
 
   return refs;
@@ -425,90 +409,6 @@ function collectConversationGeneratedFileRefs(req) {
   return refs;
 }
 
-function generatedFileExists(storedFilename = "") {
-  const full = path.join(GENERATED_DIR, path.basename(String(storedFilename || "")));
-  try { return fs.existsSync(full) && fs.statSync(full).isFile(); } catch { return false; }
-}
-
-function resolveStoredGeneratedFileName(ref = {}) {
-  const wanted = path.basename(String(ref.storedFilename || ref.filename || "").trim());
-  if (!wanted) return "";
-  if (generatedFileExists(wanted)) return wanted;
-  try {
-    ensureGeneratedDir();
-    const files = fs.readdirSync(GENERATED_DIR).filter((name) => !name.startsWith("."));
-    const exact = files.find((name) => name === wanted);
-    if (exact) return exact;
-    const suffix = files
-      .filter((name) => name.endsWith(wanted))
-      .map((name) => ({ name, mtimeMs: fs.statSync(path.join(GENERATED_DIR, name)).mtimeMs }))
-      .sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
-    if (suffix?.name) return suffix.name;
-  } catch {}
-  return wanted;
-}
-
-function latestGeneratedFileByIntent(req, extensions = []) {
-  // Generic fallback: only use recent generated files by extension.
-  // It does NOT score by topic words by topic-specific words.
-  const normalizedExt = extensions.map((ext) => String(ext).replace(/^\./, "").toLowerCase()).filter(Boolean);
-  try {
-    ensureGeneratedDir();
-    const files = fs.readdirSync(GENERATED_DIR)
-      .filter((name) => !name.startsWith("."))
-      .map((name) => {
-        const full = path.join(GENERATED_DIR, name);
-        const stat = fs.statSync(full);
-        if (!stat.isFile() || stat.size <= 0) return null;
-        const ext = path.extname(name).replace(/^\./, "").toLowerCase();
-        if (normalizedExt.length && !normalizedExt.includes(ext)) return null;
-        return { name, full, mtimeMs: stat.mtimeMs, size: stat.size };
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return files[0] || null;
-  } catch { return null; }
-}
-
-function pickLastGeneratedRefForIntent(req, extensions = [], { allowDiskFallback = false } = {}) {
-  const refs = collectConversationGeneratedFileRefs(req);
-  const normalizedExt = extensions.map((ext) => String(ext).replace(/^\./, "").toLowerCase()).filter(Boolean);
-
-  for (let i = refs.length - 1; i >= 0; i -= 1) {
-    const ref = refs[i];
-    const name = ref.storedFilename || ref.filename || "";
-    const ext = path.extname(name).replace(/^\./, "").toLowerCase();
-    if (normalizedExt.length && !normalizedExt.includes(ext)) continue;
-    const stored = resolveStoredGeneratedFileName(ref);
-    if (!stored) continue;
-    try {
-      const full = path.join(GENERATED_DIR, path.basename(stored));
-      const stat = fs.statSync(full);
-      if (!stat.isFile() || stat.size <= 0) continue;
-    } catch { continue; }
-    return { storedFilename: stored, filename: ref.filename || stored };
-  }
-
-  // Only fall back to disk when explicitly allowed. For generic “bunu zip yap”,
-  // random old files from disk cause wrong context; conversation refs are safer.
-  if (allowDiskFallback) {
-    const disk = latestGeneratedFileByIntent(req, normalizedExt);
-    if (disk?.name) return { storedFilename: disk.name, filename: disk.name };
-  }
-
-  return null;
-}
-
-function requestedOutputExtensionsFromIntent(intentText = "") {
-  const text = normalizeIntentText(intentText);
-  if (/xlsx|xls|excel|excell/.test(text)) return ["xlsx", "xls"];
-  if (/pdf/.test(text)) return ["pdf"];
-  if (/docx|word/.test(text)) return ["docx"];
-  if (/txt|metin|plaintext/.test(text)) return ["txt"];
-  if (/png|jpg|jpeg|gorsel|görsel|qr/.test(text)) return ["png", "jpg", "jpeg"];
-  return [];
-}
-
 function enrichToolCallInput(call, req) {
   if (!call || typeof call !== "object") return call;
   const toolName = String(call.tool || "").toLowerCase();
@@ -517,22 +417,24 @@ function enrichToolCallInput(call, req) {
   if (toolName === "zip") {
     const hasFiles = Array.isArray(input.files) && input.files.length > 0;
     if (!hasFiles) {
-      const extHints = requestedOutputExtensionsFromIntent(latestUserIntentText(req));
-      const ref = pickLastGeneratedRefForIntent(req, extHints);
-      if (ref?.storedFilename) {
-        input.files = [{ storedFilename: ref.storedFilename, filename: ref.filename || ref.storedFilename }];
+      const refs = collectConversationGeneratedFileRefs(req);
+      const lastRef = refs[refs.length - 1];
+      if (lastRef?.storedFilename) {
+        input.files = [{
+          storedFilename: lastRef.storedFilename,
+          filename: lastRef.filename || lastRef.storedFilename,
+        }];
+      } else {
+        const latest = latestGeneratedFileFromDisk();
+        if (latest?.name) input.files = [{ storedFilename: latest.name, filename: latest.name }];
       }
     }
-
-    if (!input.filename) {
-      const first = input.files?.[0]?.filename || input.files?.[0]?.storedFilename || "lucy-dosyalari";
-      const base = path.basename(String(first), path.extname(String(first))).replace(/^[0-9]+-/, "") || "lucy-dosyalari";
-      input.filename = `${base}.zip`;
-    }
+    if (!input.filename) input.filename = "lucy-dosyalari.zip";
   }
 
   return { ...call, input };
 }
+
 
 function latestUserIntentText(req) {
   const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
@@ -548,7 +450,7 @@ function latestUserIntentText(req) {
 
 function requestedToolWork(req) {
   const text = latestUserIntentText(req).toLowerCase();
-  return /\b(pdf|zip|excel|excell|xlsx|xls|word|docx|csv|json|qr|ocr|webfetch|hesap|calculator)\b|grafik|chart|pasta|diyagram|mermaid|akış|akis|çiz|ciz|dosya|indir|tablo oluştur|rapor oluştur/.test(text);
+  return /\b(pdf|zip|excel|xlsx|word|docx|csv|json|qr|ocr|webfetch|hesap|calculator)\b|grafik|chart|pasta|diyagram|mermaid|akış|akis|çiz|ciz|dosya|indir|tablo oluştur|rapor oluştur/.test(text);
 }
 
 function requestedMermaidWork(req) {
@@ -596,390 +498,6 @@ function extractMermaidBlocksFromAnswer(answer = "") {
   return blocks;
 }
 
-
-// ------------------------------------------------------------
-//  LUCY TOOL ROUTER STABILIZER - STEP 1
-//  Amaç: Prompt'a dokunmadan, açık tool komutlarını backend tarafında
-//  deterministik olarak doğru tool'a bağlamak.
-// ------------------------------------------------------------
-function normalizeIntentText(value = "") {
-  return String(value || "")
-    .toLocaleLowerCase("tr-TR")
-    .replace(/ı/g, "i")
-    .replace(/ğ/g, "g")
-    .replace(/ü/g, "u")
-    .replace(/ş/g, "s")
-    .replace(/ö/g, "o")
-    .replace(/ç/g, "c")
-    .trim();
-}
-
-function latestAssistantText(req) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] || {};
-    const role = String(message.role || message.sender || "").toLowerCase();
-    if (role && !/assistant|lucy|bot|ai/.test(role)) continue;
-    const text = String(message.content || message.text || message.message || "").trim();
-    if (text) return text;
-  }
-  return "";
-}
-
-function conversationToPlainText(req, { skipLatestUser = false } = {}) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  const end = skipLatestUser ? Math.max(0, messages.length - 1) : messages.length;
-  return messages.slice(0, end).map((message, index) => {
-    const role = String(message.role || message.sender || "").toLowerCase();
-    const label = /user|kullan/.test(role) ? "Kullanıcı" : (/assistant|lucy|bot|ai/.test(role) ? "LUCY" : (message.role || "Mesaj"));
-    const text = String(message.content || message.text || message.message || "").trim();
-    return text ? `[${index + 1}] ${label}\n${text}` : "";
-  }).filter(Boolean).join("\n\n---\n\n");
-}
-
-function stripEmptyCodeBlocks(text = "") {
-  return String(text || "")
-    .replace(/```\s*```/g, "")
-    .replace(/```\s*\n\s*```/g, "")
-    .trim();
-}
-
-function looksLikeRefusal(text = "") {
-  const clean = normalizeIntentText(text);
-  return /yardimci olamam|cizemem|veremem|yapamam|tehlikeli|yasa disi|zarar verebilir|guvenligin/.test(clean);
-}
-
-function detectForcedToolIntent(req) {
-  const raw = latestUserIntentText(req);
-  const text = normalizeIntentText(raw);
-  if (!text) return null;
-
-  if (/\b(qr|karekod)\b|qr kod|qr olustur|qr yap/.test(text)) return { tool: "qr", raw, text };
-  if (/\b(zip|sikistir|arsiv)\b|zip olarak|zip yap|zip hazirla/.test(text)) return { tool: "zip", raw, text };
-  if (/\b(excel|excell|xlsx|xls)\b|excel dosyasi|excell dosyasi|xls dosyasi|xlsx dosyasi|tabloyu excel|tabloyu excell/.test(text)) return { tool: "excel", raw, text };
-  if (/\b(chartdata|chart data)\b|grafik|pasta grafik|pasta gorsel|bar grafik|cizgi grafik|sutun grafik/.test(text)) return { tool: "chartData", raw, text };
-  if (/\b(mermaid)\b|diyagram|akis semasi|akis|sema|gorsel sema|mermaid gorsel/.test(text)) return { tool: "mermaid", raw, text };
-  if (/\b(pdf)\b|pdf yap|pdf yaz|pdf olarak|konusmalari pdf|sohbeti pdf/.test(text)) return { tool: "pdf", raw, text };
-  if (/\b(hesap|calculator|hesapla)\b/.test(text)) return { tool: "calculator", raw, text };
-  if (/\b(saat|tarih|time)\b/.test(text)) return { tool: "time", raw, text };
-  return null;
-}
-
-function extractFirstMarkdownTable(text = "") {
-  const lines = String(text || "").split(/\r?\n/);
-  const start = lines.findIndex((line, i) => line.includes("|") && lines[i + 1] && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(lines[i + 1].trim()));
-  if (start < 0) return "";
-  const table = [];
-  for (let i = start; i < lines.length; i += 1) {
-    if (!lines[i].includes("|")) break;
-    table.push(lines[i]);
-  }
-  return table.join("\n");
-}
-
-function extractMarkdownTablesWithContext(text = "") {
-  const lines = String(text || "").split(/\r?\n/);
-  const tables = [];
-
-  for (let i = 0; i < lines.length - 1; i += 1) {
-    const isHeader = lines[i].includes("|") && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(String(lines[i + 1] || "").trim());
-    if (!isHeader) continue;
-
-    let title = "";
-    for (let back = i - 1; back >= 0; back -= 1) {
-      const candidate = String(lines[back] || "").replace(/^#{1,6}\s*/, "").replace(/[*_`]/g, "").trim();
-      if (!candidate) continue;
-      if (candidate.includes("|")) break;
-      title = candidate;
-      break;
-    }
-
-    const table = [];
-    let j = i;
-    for (; j < lines.length; j += 1) {
-      if (!lines[j].includes("|")) break;
-      table.push(lines[j]);
-    }
-    if (table.length >= 3) tables.push({ title, table: table.join("\n") });
-    i = Math.max(i, j - 1);
-  }
-
-  return tables;
-}
-
-function latestAssistantTableText(req) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] || {};
-    const role = String(message.role || message.sender || "").toLowerCase();
-    if (role && !/assistant|lucy|bot|ai/.test(role)) continue;
-    const text = String(message.content || message.text || message.message || "").trim();
-    const tables = extractMarkdownTablesWithContext(text);
-    if (tables.length) return tables.map((item) => `${item.title ? `### ${item.title}\n` : ""}${item.table}`).join("\n\n");
-  }
-  return "";
-}
-
-function latestAssistantExcelSource(req, answer = "") {
-  const cleanedAnswer = stripEmptyCodeBlocks(answer);
-  const answerTables = extractMarkdownTablesWithContext(cleanedAnswer);
-  if (answerTables.length) return answerTables.map((item) => `${item.title ? `### ${item.title}\n` : ""}${item.table}`).join("\n\n");
-
-  const recentTable = latestAssistantTableText(req);
-  if (recentTable) return recentTable;
-
-  const lastAssistant = latestAssistantText(req);
-  if (extractFirstMarkdownTable(lastAssistant)) return lastAssistant;
-  return cleanedAnswer || lastAssistant || "";
-}
-
-function titleCaseTR(value = "") {
-  return String(value || "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toLocaleUpperCase("tr-TR") + word.slice(1))
-    .join(" ");
-}
-
-function cleanTitleCandidate(value = "") {
-  return String(value || "")
-    .replace(/[`*_#>|]/g, " ")
-    .replace(/\b(bunu|şunu|sunu|bu|şu|su|olarak|gönder|gonder|hazırla|hazirla|yap|ver|yaz|dosyası|dosyasi|dosya|indir|ekranda|göster|goster|profesyonel|çizgili|cizgili|net|tablo|excel|excell|xlsx|xls|pdf|zip|grafik|chartdata|mermaid|diyagram|şema|sema)\b/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function inferTitleFromSource(sourceText = "") {
-  const lines = String(sourceText || "").split(/\r?\n/);
-  for (const line of lines) {
-    const clean = line.replace(/^#{1,6}\s*/, "").replace(/[*_`]/g, "").trim();
-    if (!clean || clean.includes("|") || /^-{3,}$/.test(clean)) continue;
-    if (/^(tabii|tamam|işte|iste|hemen|aşkım|askim)\b/i.test(clean)) continue;
-    if (clean.length >= 3 && clean.length <= 80) return clean;
-  }
-  return "";
-}
-
-function genericTitleFromIntent(userText = "", sourceText = "", fallback = "LUCY Çıktısı") {
-  const sourceTitle = inferTitleFromSource(sourceText);
-  if (sourceTitle) return titleCaseTR(sourceTitle);
-  const cleaned = cleanTitleCandidate(userText);
-  if (cleaned) return titleCaseTR(cleaned.slice(0, 80));
-  return fallback;
-}
-
-function excelTitleFromIntent(userText = "", sourceText = "") {
-  return genericTitleFromIntent(userText, sourceText, "LUCY Excel Tablosu");
-}
-
-function excelFilenameFromTitle(title = "lucy") {
-  return `${String(title || "lucy")
-    .toLocaleLowerCase("tr-TR")
-    .replace(/ğ/g, "g").replace(/ü/g, "u").replace(/ş/g, "s").replace(/ı/g, "i").replace(/ö/g, "o").replace(/ç/g, "c")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "") || "lucy"}.xlsx`;
-}
-
-function parseLabelValuePairs(text = "") {
-  const source = String(text || "");
-  const pairs = [];
-  const table = extractFirstMarkdownTable(source);
-  const candidateLines = (table || source).split(/\r?\n/);
-
-  for (const rawLine of candidateLines) {
-    const line = rawLine.trim();
-    if (!line || /^\|?\s*:?-{3,}/.test(line)) continue;
-
-    if (line.includes("|")) {
-      const cells = line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim()).filter(Boolean);
-      if (cells.length >= 2) {
-        let numericIndex = -1;
-        let numericValue = NaN;
-        for (let i = cells.length - 1; i >= 0; i -= 1) {
-          const maybeNumber = cells[i].replace(/[%₺$€]/g, "").replace(/[^0-9.,-]/g, "").replace(",", ".");
-          const value = Number(maybeNumber);
-          if (Number.isFinite(value)) { numericIndex = i; numericValue = value; break; }
-        }
-        if (numericIndex >= 0) {
-          const labelCells = cells.filter((_, index) => index !== numericIndex);
-          const label = labelCells.join(" ").replace(/[*_`]/g, "").trim();
-          if (label) pairs.push({ label, value: numericValue });
-        }
-      }
-      continue;
-    }
-
-    const match = line.match(/^[-*•]?\s*([^:→\-–—]+?)\s*(?:[:→\-–—]|\s+)\s*%?\s*(-?\d+(?:[.,]\d+)?)/);
-    if (match) {
-      const label = match[1].replace(/[*_`]/g, "").trim();
-      const value = Number(String(match[2]).replace(",", "."));
-      if (label && Number.isFinite(value)) pairs.push({ label, value });
-    }
-  }
-
-  const seen = new Set();
-  return pairs.filter((pair) => {
-    const key = pair.label.toLocaleLowerCase("tr-TR");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, 40);
-}
-
-function extractLooseMermaidCode(answer = "") {
-  const source = String(answer || "").replace(/```mermaid\s*/gi, "").replace(/```/g, "");
-  const lines = source.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^(graph|flowchart)\s+(TD|LR|BT|RL)\b|^sequenceDiagram\b|^classDiagram\b|^stateDiagram\b|^erDiagram\b|^journey\b|^gantt\b|^pie\b/i.test(line.trim()));
-  if (start < 0) return "";
-  const out = [];
-  for (let i = start; i < lines.length; i += 1) {
-    const line = lines[i].trimEnd();
-    if (!line.trim()) {
-      if (out.length) break;
-      continue;
-    }
-    if (out.length > 0 && /^(nasıl|nasil|beğendin|begendin|işte|iste|tamam|aşkım|askim)\b/i.test(line.trim())) break;
-    out.push(line);
-  }
-  return out.join("\n").trim();
-}
-
-function parseMarkdownTableObjects(tableText = "") {
-  const table = extractFirstMarkdownTable(tableText);
-  if (!table) return [];
-  const lines = table.split(/\r?\n/).filter((line) => line.includes("|"));
-  if (lines.length < 3) return [];
-  const headers = lines[0].replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.replace(/[*_`]/g, "").trim());
-  return lines.slice(2).map((line) => {
-    const cells = line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.replace(/[*_`]/g, "").trim());
-    const row = {};
-    headers.forEach((header, index) => { row[header || `Sütun ${index + 1}`] = cells[index] || ""; });
-    return row;
-  }).filter((row) => Object.values(row).some((value) => String(value || "").trim()));
-}
-
-function mermaidSafeLabel(value = "") {
-  return String(value || "")
-    .replace(/[\[\]{}<>]/g, " ")
-    .replace(/"/g, "'")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 90) || "Öğe";
-}
-
-function mermaidFromLatestTable(sourceText = "", title = "Şema") {
-  const rows = parseMarkdownTableObjects(sourceText);
-  if (!rows.length) return "";
-  const headers = Object.keys(rows[0] || {});
-  const labelHeader = headers.find((h) => /ad|başlık|baslik|ürün|urun|kategori|etiket|isim|name|denklem|kalem|açıklama|aciklama/i.test(h)) || headers[0];
-  const lines = ["flowchart TD", `ROOT[${mermaidSafeLabel(title)}]`];
-  rows.slice(0, 30).forEach((row, index) => {
-    const node = `N${index + 1}`;
-    const label = mermaidSafeLabel(row[labelHeader] || `Satır ${index + 1}`);
-    lines.push(`ROOT --> ${node}[${label}]`);
-    headers.filter((header) => header !== labelHeader).slice(0, 4).forEach((header, hIndex) => {
-      const value = String(row[header] || "").trim();
-      if (!value) return;
-      lines.push(`${node} --> ${node}_${hIndex + 1}[${mermaidSafeLabel(`${header}: ${value}`)}]`);
-    });
-  });
-  return lines.join("\n");
-}
-
-function buildForcedToolCall(intent, answer = "", req = null) {
-  if (!intent?.tool) return null;
-  const tool = intent.tool;
-  const userRaw = String(intent.raw || "").trim();
-  const userText = intent.text || normalizeIntentText(userRaw);
-  const cleanedAnswer = stripEmptyCodeBlocks(answer);
-  const lastAssistant = latestAssistantText(req);
-  const sourceText = cleanedAnswer || lastAssistant || "";
-
-  if (tool === "qr") {
-    const explicit = userRaw.replace(/qr|karekod|kod|oluştur|olustur|yap|hazırla|hazirla/gi, "").trim();
-    return { tool: "qr", input: { text: explicit || userRaw || "LUCY", filename: "lucy-qr.png" } };
-  }
-
-  if (tool === "chartData") {
-    const pairs = parseLabelValuePairs(sourceText);
-    if (pairs.length < 2) return null;
-    const chartType = /pasta|pie|dilim/.test(userText) ? "pie" : (/cizgi|çizgi|line/.test(userText) ? "line" : "bar");
-    const title = genericTitleFromIntent(userRaw, sourceText, /pasta|pie/.test(userText) ? "Pasta Grafik" : "Grafik");
-    return {
-      tool: "chartData",
-      input: {
-        title,
-        label: /pasta|pie/.test(userText) ? "Dağılım" : "Değer",
-        chartType,
-        labels: pairs.map((pair) => pair.label),
-        values: pairs.map((pair) => pair.value),
-      },
-    };
-  }
-
-  if (tool === "mermaid") {
-    if (looksLikeRefusal(sourceText)) return null;
-    const title = genericTitleFromIntent(userRaw, sourceText, "Mermaid Diyagram");
-    const code = extractLooseMermaidCode(sourceText) || mermaidFromLatestTable(sourceText, title);
-    if (!code) return null;
-    return { tool: "mermaid", input: { code, title } };
-  }
-
-  if (tool === "excel") {
-    const excelSource = latestAssistantExcelSource(req, answer);
-    const text = excelSource && excelSource !== userRaw ? excelSource : cleanedAnswer;
-    if (!String(text || "").trim()) return null;
-    const title = excelTitleFromIntent(userRaw, text);
-    const filename = excelFilenameFromTitle(title);
-    return {
-      tool: "excel",
-      input: {
-        title,
-        text,
-        filename,
-        sheetName: title,
-        subtitle: "LUCY tarafından profesyonel Excel tablosu olarak hazırlandı.",
-      },
-    };
-  }
-
-  if (tool === "zip") {
-    const extHints = requestedOutputExtensionsFromIntent(userRaw);
-    const ref = pickLastGeneratedRefForIntent(req, extHints);
-    const files = ref?.storedFilename ? [{ storedFilename: ref.storedFilename, filename: ref.filename || ref.storedFilename }] : [];
-    if (!files.length) return { tool: "zip", input: { filename: "lucy-dosyalari.zip", files: [] } };
-    return { tool: "zip", input: { filename: `${path.basename(files[0].filename, path.extname(files[0].filename))}.zip`, files } };
-  }
-
-  if (tool === "pdf") {
-    const allConversation = /butun|bütün|tum|tüm|konusma|konuşma|sohbet/.test(userText);
-    const tableSource = latestAssistantExcelSource(req, answer);
-    const text = allConversation ? conversationToPlainText(req, { skipLatestUser: true }) : (tableSource || lastAssistant || cleanedAnswer || sourceText);
-    if (!String(text || "").trim()) return null;
-    const title = allConversation ? "LUCY Sohbet Dökümü" : genericTitleFromIntent(userRaw, text, "LUCY PDF");
-    const filename = allConversation ? "lucy-sohbet-dokumu.pdf" : `${excelFilenameFromTitle(title).replace(/\.xlsx$/i, "")}.pdf`;
-    return { tool: "pdf", input: { title, text, filename } };
-  }
-
-  if (tool === "calculator") {
-    const expression = userRaw.match(/[-+*/().\d\s]+/)?.[0]?.trim() || "1+1";
-    return { tool: "calculator", input: { expression } };
-  }
-
-  if (tool === "time") {
-    return { tool: "time", input: { locale: "tr-TR", timeZone: "Europe/Istanbul" } };
-  }
-
-  return null;
-}
-
-function forcedToolCallsFromIntent(answer = "", req = null) {
-  const intent = detectForcedToolIntent(req);
-  if (!intent) return [];
-  const call = buildForcedToolCall(intent, answer, req);
-  return call ? [call] : [];
-}
-
 function isUsableToolCall(call = {}) {
   const tool = String(call.tool || "").toLowerCase();
   const input = call.input && typeof call.input === "object" ? call.input : {};
@@ -996,22 +514,164 @@ function isUsableToolCall(call = {}) {
   return true;
 }
 
+
+function normalizeIntentText(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ı/g, "i")
+    .replace(/ğ/g, "g")
+    .replace(/ü/g, "u")
+    .replace(/ş/g, "s")
+    .replace(/ö/g, "o")
+    .replace(/ç/g, "c")
+    .replace(/İ/g, "i")
+    .trim();
+}
+
+function wantsPdfFromText(text = "") {
+  const q = normalizeIntentText(text);
+  return /\bpdf\b|pdf olarak|pdf yap|pdf yaz|pdf hazirla|pdf gonder|pdf indir|rapor pdf/.test(q);
+}
+
+function wantsExcelFromText(text = "") {
+  const q = normalizeIntentText(text);
+  return /\bexcel\b|\bxlsx\b|\bxls\b|e-tablo|spreadsheet|calisma kitabi|tabloyu excel|excel olarak|xlsx olarak/.test(q);
+}
+
+function wantsZipFromText(text = "") {
+  const q = normalizeIntentText(text);
+  return /\bzip\b|arsiv|arsivle|sikistir|zip olarak|zip yap|zip gonder|zip indir/.test(q);
+}
+
+function wantsChartFromText(text = "") {
+  const q = normalizeIntentText(text);
+  return /grafik|chart|pasta grafik|cizgi grafik|bar grafik|sutun grafik|doughnut/.test(q);
+}
+
+function isOnlyTransformCommand(text = "") {
+  const q = normalizeIntentText(text).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (!q) return false;
+  const compact = q
+    .replace(/\b(bunu|sunlari|sunlari|son|az onceki|onceki|yukardaki|yukaridaki|tabloyu|metni|icerigi|dosyayi|dosyaları|dosyalari|olarak|seklinde|lutfen|hadi|bana|gonder|hazirla|yap|yaz|ver|indir|cevir|donustur)\b/g, " ")
+    .replace(/\s+/g, " ").trim();
+  return /^(pdf|excel|xlsx|xls|zip|docx|word|csv|json)$/.test(compact) || q.length <= 42;
+}
+
+function stripToolNoise(text = "") {
+  return String(text || "")
+    .replace(/```json\s*[\s\S]*?```/gi, "")
+    .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
+    .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
+    .trim();
+}
+
+function messageText(message = {}) {
+  return String(message?.content || message?.text || message?.message || "").trim();
+}
+
+function latestAssistantContent(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || message.sender || "").toLowerCase();
+    if (role === "assistant") {
+      const text = stripToolNoise(messageText(message));
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function latestUsefulConversationContent(req, answer = "") {
+  const userText = latestUserIntentText(req);
+  const answerText = stripToolNoise(answer);
+  const previousAssistant = latestAssistantContent(req);
+
+  // Kullanıcı aynı mesajda içerik verdiyse onu önceliklendir: "şunu pdf yap: ..."
+  const userHasInlineContent = String(userText || "").length > 90 || /\n/.test(userText) || /\|.+\|/.test(userText);
+  if (userHasInlineContent && !isOnlyTransformCommand(userText)) return stripToolNoise(userText);
+
+  // Model bir tablo/metin ürettiyse ve dosya isteniyorsa onu kullan.
+  if (answerText && answerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText))) return answerText;
+
+  // "bunu pdf/excel/zip yap" gibi komutlarda son gerçek assistant içeriğini kullan.
+  if (previousAssistant) return previousAssistant;
+  if (answerText) return answerText;
+  return stripToolNoise(userText);
+}
+
+function hasMarkdownTable(text = "") {
+  const lines = String(text || "").split(/\r?\n/);
+  return lines.some((line, index) => line.includes("|") && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || ""));
+}
+
+function contentTitleFromText(text = "", fallback = "LUCY Çıktısı") {
+  const firstHeading = String(text || "").split(/\r?\n/).map((line) => line.trim()).find((line) => /^#{1,4}\s+/.test(line));
+  if (firstHeading) return firstHeading.replace(/^#{1,4}\s+/, "").slice(0, 70);
+  const firstLine = String(text || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (firstLine && !firstLine.includes("|")) return firstLine.replace(/[*_`#]/g, "").slice(0, 70);
+  return fallback;
+}
+
+function safeOutputStem(value = "lucy-cikti") {
+  return String(value || "lucy-cikti")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[ıİ]/g, "i")
+    .replace(/[ğĞ]/g, "g")
+    .replace(/[üÜ]/g, "u")
+    .replace(/[şŞ]/g, "s")
+    .replace(/[öÖ]/g, "o")
+    .replace(/[çÇ]/g, "c")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 54) || "lucy-cikti";
+}
+
+function buildImplicitToolCalls(answer = "", req) {
+  const userText = latestUserIntentText(req);
+  const source = latestUsefulConversationContent(req, answer);
+  const title = contentTitleFromText(source, hasMarkdownTable(source) ? "LUCY Tablosu" : "LUCY Çıktısı");
+  const stem = safeOutputStem(title);
+  const calls = [];
+
+  if (wantsExcelFromText(userText)) {
+    calls.push({
+      tool: "excel",
+      input: { title, sheetName: title.slice(0, 31), text: source, filename: `${stem || "lucy-tablo"}.xlsx` },
+    });
+  }
+
+  if (wantsPdfFromText(userText)) {
+    calls.push({
+      tool: "pdf",
+      input: { title, text: source, filename: `${stem || "lucy-rapor"}.pdf` },
+    });
+  }
+
+  if (wantsZipFromText(userText)) {
+    calls.push({ tool: "zip", input: { filename: `${stem || "lucy-dosyalari"}.zip` } });
+  }
+
+  return calls.filter(isUsableToolCall).slice(0, 3);
+}
+
 async function executeToolCallsFromAnswer(answer = "", req) {
   const explicitCalls = extractToolCallsFromAnswer(answer);
   const allowMermaid = requestedMermaidWork(req);
   const allowAnyTool = requestedToolWork(req);
   const mermaidCalls = explicitCalls.length || !allowMermaid ? [] : extractMermaidBlocksFromAnswer(answer);
-  let toolCalls = [...explicitCalls, ...mermaidCalls].filter(isUsableToolCall);
-
-  // Model JSON tool_call üretmezse veya işe yarar input vermezse,
-  // açık kullanıcı komutundan deterministik tool çağrısı oluştur.
-  if (!toolCalls.length && allowAnyTool) {
-    toolCalls = forcedToolCallsFromIntent(answer, req).filter(isUsableToolCall);
-  }
+  const toolCalls = [...explicitCalls, ...mermaidCalls].filter(isUsableToolCall);
 
   if (!toolCalls.length) {
-    const cleaned = sanitizeNormalAnswer(answer, req);
-    return { toolCalls: [], toolResults: [], finalAnswer: cleaned || (allowAnyTool ? "Lucy tool isteğini algıladı ama çalıştırılabilir veri bulamadı." : "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙") };
+    const implicitCalls = allowAnyTool ? buildImplicitToolCalls(answer, req) : [];
+    if (implicitCalls.length) {
+      toolCalls.push(...implicitCalls);
+    } else {
+      const cleaned = sanitizeNormalAnswer(answer, req);
+      return { toolCalls: [], toolResults: [], finalAnswer: cleaned || (allowAnyTool ? "" : "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙") };
+    }
   }
 
   if (!allowAnyTool) {
@@ -1399,7 +1059,11 @@ function buildSystemPrompt(body = {}) {
       "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text kullan. Excel için input.rows dizisi kullan; rows yoksa input.text içine markdown tablo/metin koyabilirsin. ZIP için input.files yoksa backend son üretilen dosyayı otomatik zincire alır. QR için input.text veya input.url kullan.",
+      "PDF için input.text kullan. Markdown tablo varsa aynen koru; backend tabloyu PDF içinde gerçek grid tabloya dönüştürür.",
+      "Excel için input.rows dizisi en iyisidir; rows yoksa input.text içine markdown tablo/metin koy. Backend markdown tabloyu gerçek satır/sütunlu XLSX'e dönüştürür.",
+      "ZIP için input.files yoksa backend son üretilen dosyayı otomatik zincire alır; ZIP içine ZIP koyma.",
+      "Kullanıcı 'tablo yap' derse ekranda markdown tablo yaz. Kullanıcı 'excel/xlsx/pdf/zip gönder/yap' derse tool_call üret.",
+      "QR için input.text veya input.url kullan.",
       "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
       "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
       "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma. Mermaid kodu boşsa tool_call üretme.",
