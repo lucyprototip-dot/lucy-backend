@@ -103,6 +103,12 @@ function markdownToHtml(text = "") {
     const line = lines[i] || "";
     const next = lines[i + 1] || "";
 
+    if (/^---+$/.test(line.trim())) {
+      flushParagraph();
+      html.push("<hr>");
+      continue;
+    }
+
     if (/^#{1,6}\s+/.test(line)) {
       flushParagraph();
       const level = Math.min((line.match(/^#+/)?.[0] || "#").length, 3);
@@ -145,10 +151,12 @@ async function puppeteerPdf({ title, text }) {
     const page = await browser.newPage();
     const htmlBody = markdownToHtml(text);
     const html = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><style>
-      body{font-family:'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji','DejaVu Sans','Noto Sans',Arial,sans-serif;margin:54px;color:#111827;font-size:14.5px;line-height:1.55}
+      body{font-family:'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji','Segoe UI','DejaVu Sans','Noto Sans',Arial,sans-serif;margin:54px;color:#111827;font-size:14.5px;line-height:1.55}
       h1{font-size:25px;margin:0 0 22px;text-decoration:none;font-weight:800;color:#0b0b0f;border-bottom:2px solid #111827;padding-bottom:10px}
-      h2{font-size:19px;margin:18px 0 8px} h3{font-size:16px;margin:16px 0 8px}
+      h2{font-size:18px;margin:18px 0 8px;padding:9px 12px;border-radius:10px;background:#f3f4f6;color:#111827;break-after:avoid}
+      h3{font-size:16px;margin:16px 0 8px;break-after:avoid}
       p{margin:0 0 10px;white-space:normal}.content{width:100%}
+      hr{border:0;border-top:1px solid #e5e7eb;margin:16px 0;break-after:avoid}
       table{border-collapse:collapse;width:100%;margin:14px 0 18px;font-size:12.5px;page-break-inside:auto}
       tr{page-break-inside:avoid;page-break-after:auto}td,th{border:1px solid #c9ced6;padding:7px 8px;text-align:left;vertical-align:top;word-break:break-word}th{background:#f3f4f6;font-weight:800}
       .footer{position:fixed;bottom:22px;left:54px;right:54px;font-size:10px;color:#6b7280;border-top:1px solid #e5e7eb;padding-top:6px}
