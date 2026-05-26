@@ -5,24 +5,14 @@ const tools = {};
 
 function loadTools() {
   const toolsPath = __dirname;
-
-  if (!fs.existsSync(toolsPath)) return tools;
-
   const files = fs
     .readdirSync(toolsPath)
     .filter((file) => file.endsWith(".js") && file !== "toolRegistry.js");
 
   for (const file of files) {
-    const fullPath = path.join(toolsPath, file);
-    const loadedTool = require(fullPath);
-    const toolName = loadedTool.name || file.replace(/\.js$/, "");
-
-    if (!loadedTool || typeof loadedTool.execute !== "function") {
-      console.warn(`⚠️ Tool atlandı: ${file} execute() yok`);
-      continue;
-    }
-
-    tools[toolName] = loadedTool;
+    const tool = require(path.join(toolsPath, file));
+    const toolName = tool.name || file.replace(".js", "");
+    tools[toolName] = tool;
     console.log(`✅ Tool yüklendi: ${toolName}`);
   }
 
@@ -41,6 +31,7 @@ function listTools() {
 }
 
 module.exports = {
+  tools,
   loadTools,
   getTool,
   listTools,
