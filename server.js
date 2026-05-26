@@ -307,75 +307,6 @@ function wantsDeepSeekThinking(body = {}) {
   return body.thinking === true || body.thinking === "true" || THINKING_MODE_IDS.has(raw);
 }
 
-function getLucyModeId(body = {}) {
-  return String(body.apiMode || body.mode || body.modeId || "").toLowerCase().trim();
-}
-
-function isLucyFastMode(body = {}) {
-  const raw = getLucyModeId(body);
-  return !wantsDeepSeekThinking(body) && [
-    "",
-    "fast",
-    "hızlı",
-    "hizli",
-    "chat",
-  ].includes(raw);
-}
-
-function isLucyProFastMode(body = {}) {
-  const raw = getLucyModeId(body);
-  return !wantsDeepSeekThinking(body) && [
-    "pro_fast",
-    "pro-fast",
-    "pro_hizli",
-    "pro_hızlı",
-    "pro-hizli",
-    "pro-hızlı",
-    "pro hızlı",
-    "pro hizli",
-  ].includes(raw);
-}
-
-function pickLucyTemperature(body = {}, thinkingEnabled = false, stream = false) {
-  if (body.options?.temperature !== undefined) return Number(body.options.temperature);
-  if (thinkingEnabled) return 0.55;
-  if (isLucyFastMode(body)) return stream ? 0.32 : 0.35;
-  if (isLucyProFastMode(body)) return stream ? 0.38 : 0.4;
-  return stream ? 0.42 : 0.45;
-}
-
-function pickLucyMaxTokens(body = {}, thinkingEnabled = false, stream = false) {
-  const explicit = Number(body.options?.max_tokens || body.max_tokens || 0);
-  if (Number.isFinite(explicit) && explicit > 0) return explicit;
-
-  // Hızlı modun hızlı hissettirmesi için çıktı bütçesi düşük tutulur.
-  // Uzun kullanıcı metni yine modele gider; sadece cevap gereksiz uzamaz.
-  if (thinkingEnabled) return stream ? 8000 : 16000;
-  if (isLucyFastMode(body)) return stream ? 1800 : 2200;
-  if (isLucyProFastMode(body)) return stream ? 2600 : 3200;
-  return stream ? 3500 : 5000;
-}
-
-function buildVisibleThinkingSummary(body = {}) {
-  const lastUserText = getLastUserText(body.messages || []);
-  const textLen = String(lastUserText || "").length;
-  const hasWeb = isWebMode(body);
-  const bullets = [];
-
-  bullets.push("İsteği okuyup amacını ayırıyorum.");
-  if (textLen > 1800) bullets.push("Uzun metni parçalara bölüp ana niyeti çıkarıyorum.");
-  if (hasWeb) bullets.push("Web sonuçlarını cevaba destek olacak şekilde süzüyorum.");
-  bullets.push("Gereksiz detaya kaçmadan son cevabı düzenliyorum.");
-
-  return `🧠 Lucy düşünce özeti:\n${bullets.map((item) => `- ${item}`).join("\n")}\n\n`;
-}
-
-function withVisibleThinkingIfNeeded(body = {}, answer = "") {
-  if (!wantsDeepSeekThinking(body)) return answer;
-  return `${buildVisibleThinkingSummary(body)}${answer || ""}`;
-}
-
-
 function pickOpenRouterDeepSeekModel(body = {}, thinkingEnabled = false) {
   const explicit = String(body.routerModel || "").trim();
 
@@ -430,18 +361,6 @@ function buildSystemPrompt(body = {}) {
 
   if (voiceMode === "normal") {
     parts.push("Ses modu: Normal. Konuşma tarzın doğal, dengeli, net ve günlük konuşmaya yakın olsun.");
-  }
-
-  if (isLucyFastMode(body)) {
-    parts.push("Mod notu: Hızlı mod. Cevabı doğrudan, kısa ve pratik ver. Gereksiz giriş, uzun analiz ve tekrar yapma. Kullanıcı özellikle istemedikçe uzun açıklama yazma.");
-  }
-
-  if (isLucyProFastMode(body)) {
-    parts.push("Mod notu: Pro Hızlı mod. Profesyonel ama hızlı cevap ver. Önce sonucu söyle, sonra gerekirse kısa gerekçe ekle.");
-  }
-
-  if (wantsDeepSeekThinking(body)) {
-    parts.push("Mod notu: Düşün modu. Kullanıcıya yalnızca kısa ve güvenli 'düşünce özeti' gösterilebilir; gizli muhakeme zinciri veya ham iç akış yazılmaz.");
   }
 
   return parts.join("\n\n");
@@ -909,8 +828,8 @@ async function askDeepSeek(body = {}) {
 
   const model = pickDeepSeekModel(body);
   const thinkingEnabled = wantsDeepSeekThinking(body);
-  const temperature = pickLucyTemperature(body, thinkingEnabled, false);
-  const maxTokens = pickLucyMaxTokens(body, thinkingEnabled, false);
+  const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.45));
+  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 16000);
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
@@ -960,7 +879,7 @@ async function askDeepSeek(body = {}) {
   }
 
   const choiceMessage = data?.choices?.[0]?.message || {};
-  return withVisibleThinkingIfNeeded(body, choiceMessage.content || "Cevap üretemedim.");
+  return choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.";
 }
 
 
@@ -969,14 +888,107 @@ function extractDeepSeekStreamDelta(data = {}) {
   const delta = choice.delta || {};
   const message = choice.message || {};
 
-  // Ham reasoning_content gizli muhakeme olabilir; ekrana basma.
-  // Düşün modunda kullanıcıya ayrı güvenli "düşünce özeti" gönderiyoruz.
-  return delta.content || message.content || "";
+  return (
+    delta.content ||
+    delta.reasoning_content ||
+    message.content ||
+    message.reasoning_content ||
+    ""
+  );
 }
 
 function writeSse(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  res.flush?.();
+}
+
+
+function buildVisibleReasoningMessages(body = {}, cleanMessages = []) {
+  const lastUserText = getLastUserText(cleanMessages);
+  const contextTail = cleanMessages.slice(-8);
+
+  return [
+    {
+      role: "system",
+      content: [
+        "Sen Lucy'nin görünür düşünce/çalışma panelini yazıyorsun.",
+        "Bu metin kullanıcıya canlı gösterilecek; rastgele, genel, klasik cümleler yazma.",
+        "Ham gizli chain-of-thought yazma; bunun yerine kullanıcının isteğini, niyetini, bağlamı ve cevap planını detaylı ama güvenli şekilde özetle.",
+        "DeepSeek Web'deki 'Derin Düşünüyor' paneli gibi davran: kullanıcının neden bunu istediğini, hangi problemi çözmeye çalıştığını, hangi dosya/akış/kararı kontrol edeceğini söyle.",
+        "Ömer'in önceki bağlamına referans verebilirsin; ama uydurma yapma. Bilmediğini 'emin değilim' diye belirt.",
+        "Sadece görünür düşünce panelini üret. Final cevabı yazma.",
+        "Türkçe yaz. 3-8 madde arası yaz. Başlıkla başla: 🧠 Lucy derin düşünüyor:",
+        "Kod bloğu kullanma. Aşırı romantik/klasik cümle kullanma. Gerçek görev analizi yap."
+      ].join("\n")
+    },
+    ...contextTail,
+    {
+      role: "user",
+      content: `Son kullanıcı isteği: ${lastUserText}\n\nBu isteğe cevap vermeden önce, kullanıcıya gösterilecek gerçekçi görev/niyet/plan analizini yaz.`
+    }
+  ];
+}
+
+async function streamVisibleReasoning({ body = {}, cleanMessages = [], res, deepSeekKey, model }) {
+  const visiblePayload = {
+    model,
+    messages: buildVisibleReasoningMessages(body, cleanMessages),
+    temperature: Number(body.options?.thinking_temperature ?? 0.35),
+    max_tokens: Number(body.options?.thinking_max_tokens || body.thinking_max_tokens || 900),
+    stream: true,
+  };
+
+  const response = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${deepSeekKey}`,
+    },
+    body: JSON.stringify(visiblePayload),
+  });
+
+  if (!response.ok) return "";
+
+  const reader = response.body?.getReader?.();
+  if (!reader) return "";
+
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let visibleText = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith(":")) continue;
+      if (!line.startsWith("data:")) continue;
+
+      const payloadText = line.replace(/^data:\s*/, "");
+      if (payloadText === "[DONE]") {
+        writeSse(res, { delta: "\n\n" });
+        return visibleText;
+      }
+
+      try {
+        const json = JSON.parse(payloadText);
+        const delta = extractDeepSeekStreamDelta(json);
+        if (delta) {
+          visibleText += delta;
+          writeSse(res, { delta });
+        }
+      } catch {
+        // keep-alive veya parse edilemeyen satır.
+      }
+    }
+  }
+
+  writeSse(res, { delta: "\n\n" });
+  return visibleText;
 }
 
 async function askDeepSeekStream(body = {}, res) {
@@ -990,29 +1002,35 @@ async function askDeepSeekStream(body = {}, res) {
 
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const model = pickDeepSeekModel(body);
-  const temperature = pickLucyTemperature(body, thinkingEnabled, true);
-  const maxTokens = pickLucyMaxTokens(body, thinkingEnabled, true);
+  const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.42));
+  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 8000);
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
     ...cleanMessages,
   ];
 
+  if (thinkingEnabled && body.visibleThinking !== false) {
+    await streamVisibleReasoning({ body, cleanMessages, res, deepSeekKey, model });
+  }
+
+  const answerMessages = thinkingEnabled
+    ? [
+        ...finalMessages,
+        {
+          role: "system",
+          content: "Görünür düşünce paneli zaten kullanıcıya gösterildi. Şimdi sadece final cevabı yaz. Düşünce/analiz başlığı açma, [VISIBLE_REASONING] etiketi kullanma, ham reasoning yazma.",
+        },
+      ]
+    : finalMessages;
+
   const payload = {
     model,
-    messages: finalMessages,
+    messages: answerMessages,
     temperature,
     max_tokens: maxTokens,
     stream: true,
   };
-
-  let fullAnswer = "";
-
-  if (thinkingEnabled) {
-    const visibleThinking = buildVisibleThinkingSummary(body);
-    fullAnswer += visibleThinking;
-    writeSse(res, { delta: visibleThinking, type: "visible_thinking" });
-  }
 
   const response = await fetch("https://api.deepseek.com/chat/completions", {
     method: "POST",
@@ -1033,6 +1051,7 @@ async function askDeepSeekStream(body = {}, res) {
 
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
+  let fullAnswer = "";
 
   while (true) {
     const { value, done } = await reader.read();
