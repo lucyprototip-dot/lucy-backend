@@ -648,7 +648,10 @@ function buildSystemPrompt(body = {}) {
       "```",
       `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
       "PDF için input.text kullan. Excel için input.rows dizisi kullan. QR için input.text veya input.url kullan.",
-      "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla."
+      "ZIP için tool=zip kullan; input.files dizisine {filename, content} veya {storedFilename} ver.",
+      "Dosya listesini görmek gerekiyorsa tool=fileManager ve input.action=list kullan.",
+      "Mail göndermek gerekiyorsa tool=mail kullan; ama SMTP ayarı yoksa gönderildi deme, tool sonucundaki hatayı aynen bildir.",
+      "Tool çalıştırmadan PDF/Excel/ZIP/Mail/QR oluşturdum veya gönderdim deme. Sadece gerçek tool sonucu varsa tamamlandı de."
     ].join("\n"));
   }
 
@@ -1531,6 +1534,31 @@ app.get("/", (req, res) => {
   res.json({ success: true, message: "LUCY backend çalışıyor", brain: "DeepSeek", port: PORT });
 });
 
+
+app.get("/api/generated", (req, res) => {
+  try {
+    ensureGeneratedDir();
+    const base = publicBaseUrl(req);
+    const files = fs.readdirSync(GENERATED_DIR)
+      .map((name) => {
+        const fullPath = path.join(GENERATED_DIR, name);
+        const stat = fs.statSync(fullPath);
+        return {
+          name,
+          size: stat.size,
+          createdAt: stat.birthtime?.toISOString?.() || stat.mtime.toISOString(),
+          updatedAt: stat.mtime.toISOString(),
+          url: `${base}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`,
+          downloadUrl: `${base}${GENERATED_PUBLIC_PATH}/${encodeURIComponent(name)}`,
+        };
+      })
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    res.json({ success: true, count: files.length, files });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/api/tools", (req, res) => {
   res.json({
     success: true,
@@ -1552,7 +1580,7 @@ app.post("/api/tools/execute", async (req, res) => {
 app.post("/api/tools/:name", async (req, res) => {
   const timeoutMs = Number(req.body?.timeoutMs || 30000);
   const input = req.body?.input || req.body?.args || req.body || {};
-  const result = await executeLucyTool(req.params.name, input, timeoutMs);
+  const result = persistToolFileResult(await executeLucyTool(req.params.name, input, timeoutMs), req);
   const status = result.success === false && result.error === "tool_not_found" ? 404 : 200;
   res.status(status).json(result);
 });
