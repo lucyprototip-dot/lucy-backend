@@ -111,6 +111,48 @@ function detectVisualStyle(value = "") {
   };
 }
 
+function detectColorPalette(value = "") {
+  const text = normalizeToolIntentText(value);
+
+  if (/\b(sari|lacivert|beyaz)\b/.test(text)) {
+    return {
+      name: "yellow-navy-white",
+      colors: ["#facc15", "#001f5b", "#ffffff"],
+      requested: true,
+    };
+  }
+
+  if (/\b(siyah beyaz|black white|monokrom|monochrome)\b/.test(text)) {
+    return {
+      name: "mono",
+      colors: ["#ffffff", "#9ca3af", "#111827"],
+      requested: true,
+    };
+  }
+
+  if (/\b(renkli|rengarenk|colorful|renk)\b/.test(text)) {
+    return {
+      name: "colorful",
+      colors: ["#ef4444", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ec4899"],
+      requested: true,
+    };
+  }
+
+  if (/\b(neon|cyberpunk|premium)\b/.test(text)) {
+    return {
+      name: "neon",
+      colors: ["#a855f7", "#22d3ee", "#f472b6", "#facc15"],
+      requested: true,
+    };
+  }
+
+  return {
+    name: "default",
+    colors: [],
+    requested: false,
+  };
+}
+
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
   return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|yuvarlak|daire|dilim|trend|cizgi|cubuk|sutun|diyagram|mermaid|akis|sema|kutular|baglantili|ciz|indir|arsiv|rapor|tablo/.test(text);
