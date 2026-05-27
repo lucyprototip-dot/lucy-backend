@@ -1,16 +1,16 @@
 // LUCY Tool Intent Normalizer
-// Amaç: tool router'dan önce yazım hatası / yakın anlam düzeltmesi yapmak.
+// Amaç: tool router'dan önce yazım hatası / yakın anlam / stil niyetlerini güvenli şekilde normalize etmek.
 
 function baseNormalize(value = "") {
   return String(value || "")
     .toLowerCase()
+    .replace(/İ/g, "i")
     .replace(/ı/g, "i")
     .replace(/ğ/g, "g")
     .replace(/ü/g, "u")
     .replace(/ş/g, "s")
     .replace(/ö/g, "o")
     .replace(/ç/g, "c")
-    .replace(/İ/g, "i")
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
     .trim();
@@ -24,9 +24,10 @@ const PHRASE_REPLACEMENTS = [
   [/\bdigram\b/g, "diyagram"],
   [/\bdiyagram olarak dedim\b/g, "diyagram yap"],
   [/\bsiyagram olarak dedim\b/g, "diyagram yap"],
-  [/\bsema\b/g, "sema"],
   [/\bsemasi\b/g, "sema"],
+  [/\bsema olarak\b/g, "sema"],
   [/\bakis semasi\b/g, "akis semasi"],
+  [/\bflow chart\b/g, "flowchart"],
 
   // Excel
   [/\bexcell\b/g, "excel"],
@@ -51,29 +52,31 @@ const PHRASE_REPLACEMENTS = [
   [/\barsive\b/g, "arsiv"],
   [/\barsivle\b/g, "arsiv"],
 
-  // Grafik
+  // Grafik / Chart
   [/\bgrafk\b/g, "grafik"],
   [/\bgrafgi\b/g, "grafik"],
   [/\bgrafigi\b/g, "grafik"],
   [/\bgrafiği\b/g, "grafik"],
+  [/\bgrefik\b/g, "grafik"],
+  [/\bgrefi\b/g, "grafik"],
   [/\bpasta grafigi\b/g, "pasta grafik"],
   [/\bpasta grafi\b/g, "pasta grafik"],
   [/\byuvarlak grafik\b/g, "pasta grafik"],
+  [/\byuvarlan grafik\b/g, "pasta grafik"],
   [/\byuvarlak pasta\b/g, "pasta grafik"],
+  [/\byuvarlan pasta\b/g, "pasta grafik"],
   [/\bdaire grafik\b/g, "pasta grafik"],
-  [/\bdaire grafigi\b/g, "pasta grafik"],
   [/\bdilimli grafik\b/g, "pasta grafik"],
-  [/\brenkli dagilim\b/g, "pasta grafik"],
-  [/\bdagilim grafigi\b/g, "pasta grafik"],
   [/\bcubuk grafigi\b/g, "cubuk grafik"],
   [/\bsutun grafigi\b/g, "sutun grafik"],
   [/\bcizgi grafigi\b/g, "cizgi grafik"],
   [/\btrend grafigi\b/g, "trend grafik"],
-  [/\bakis olarak\b/g, "akis semasi"],
-  [/\bakisa cevir\b/g, "akis semasi"],
-  [/\bkutularla goster\b/g, "diyagram"],
-  [/\bbaglantili goster\b/g, "diyagram"],
-  [/\bsema yap\b/g, "diyagram yap"],
+
+  // Referans kelimeleri
+  [/\bbi onceki\b/g, "bir onceki"],
+  [/\baz onceki\b/g, "onceki"],
+  [/\byukardaki\b/g, "yukaridaki"],
+  [/\bustteki\b/g, "ustteki"],
 
   // QR / OCR / diğer
   [/\bkare kod\b/g, "karekod"],
@@ -92,20 +95,32 @@ function normalizeToolIntentText(value = "") {
 
 function detectChartType(value = "") {
   const text = normalizeToolIntentText(value);
-  if (/\b(pasta|pie|dilim|dilimli|daire|yuvarlak|doughnut|donut|donut grafik|renkli dagilim|dagilim)\b/.test(text)) return "pie";
-  if (/\b(cizgi|line|trend|zaman|zamana gore|artis|azalis|degisim)\b/.test(text)) return "line";
-  if (/\b(cubuk|bar|sutun|kolon|normal grafik|karsilastirma)\b/.test(text)) return "bar";
+  if (/\b(pasta|pie|dilim|daire|yuvarlak|doughnut|donut|halka)\b/.test(text)) return "pie";
+  if (/\b(cizgi|line|trend|zaman|aylik|gelisim|degisim)\b/.test(text)) return "line";
+  if (/\b(cubuk|bar|sutun|kolon|normal grafik|karsilastir)\b/.test(text)) return "bar";
   return "bar";
+}
+
+function detectVisualStyle(value = "") {
+  const text = normalizeToolIntentText(value);
+  return {
+    colorful: /\b(renkli|rengarenk|colorful|renk)\b/.test(text),
+    premium: /\b(premium|sik|modern|profesyonel|neon|cyberpunk)\b/.test(text),
+    round: /\b(yuvarlak|daire|pasta|pie|donut|halka)\b/.test(text),
+    compact: /\b(kisa|kompakt|minimal)\b/.test(text),
+  };
 }
 
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
-  return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|yuvarlak|daire|dilim|dagilim|trend|diyagram|mermaid|akis|sema|kutularla|baglantili|ciz|indir|arsiv|rapor|tablo/.test(text);
+  return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|yuvarlak|daire|dilim|trend|cizgi|cubuk|sutun|diyagram|mermaid|akis|sema|kutular|baglantili|ciz|indir|arsiv|rapor|tablo/.test(text);
 }
 
 module.exports = {
   baseNormalize,
   normalizeToolIntentText,
   detectChartType,
+  detectVisualStyle,
+  detectColorPalette,
   likelyToolIntent,
 };
