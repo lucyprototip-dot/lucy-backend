@@ -40,6 +40,7 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     chartType: normalized.chartType || input.chartType || "bar",
     data: normalized.data || normalized.chartData || null,
     code: normalized.code || normalized.mermaid || "",
+    svg: normalized.svg || "",
     text: normalized.text || normalized.message || "",
     files: Array.isArray(normalized.files) ? normalized.files : undefined,
     headers: Array.isArray(normalized.headers) ? normalized.headers : (Array.isArray(input.headers) ? input.headers : undefined),
