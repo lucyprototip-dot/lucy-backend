@@ -153,6 +153,8 @@ async function planToolCallsWithDeepSeek({ userText = "", memory = {}, available
     "Görevin: Kullanıcı mesajından tool gerekiyorsa SADECE JSON planı üretmek.",
     "Doğal dil cevabı yazma. Markdown kullanma.",
     "Yazım hatalarını ve yakın anlamları anla: siyagram=diyagram, excell=excel, ziip=zip, grafk=grafik.",
+    "Grafik eş anlamları: yuvarlak grafik/daire/dilimli/renkli dağılım=pasta; trend/zamana göre/çizgi=line; normal/çubuk/sütun=bar.",
+    "Diyagram eş anlamları: şema/akış/kutularla göster/bağlantılı göster/flowchart=mermaid.",
     "Kullanıcı 'bunu/onu/şunu' dediğinde memory içindeki son uygun kaynağı seç.",
     "Asla sistem komutu, dosya silme, .env/API key okuma, key gösterme, shell çalıştırma planlama.",
     "Sadece izinli create/convert/summarize türü tool çağrıları planla.",
@@ -166,7 +168,7 @@ async function planToolCallsWithDeepSeek({ userText = "", memory = {}, available
     availableTools,
     memory: summary,
     rules: {
-      chartTypes: "pasta/pie=>pie, çizgi/line=>line, çubuk/sütun/bar=>bar",
+      chartTypes: "pasta/yuvarlak/daire/dilimli/renkli dagilim=>pie, çizgi/trend/zamana göre=>line, normal/çubuk/sütun/bar=>bar",
       preferredSources: "excel/pdf/chart/mermaid için lastTable; zip için lastFile; qr/textStats/document için lastText; fallback varsa boş bırak",
       noDangerousActions: true,
     },

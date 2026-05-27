@@ -58,9 +58,22 @@ const PHRASE_REPLACEMENTS = [
   [/\bgrafiği\b/g, "grafik"],
   [/\bpasta grafigi\b/g, "pasta grafik"],
   [/\bpasta grafi\b/g, "pasta grafik"],
+  [/\byuvarlak grafik\b/g, "pasta grafik"],
+  [/\byuvarlak pasta\b/g, "pasta grafik"],
+  [/\bdaire grafik\b/g, "pasta grafik"],
+  [/\bdaire grafigi\b/g, "pasta grafik"],
+  [/\bdilimli grafik\b/g, "pasta grafik"],
+  [/\brenkli dagilim\b/g, "pasta grafik"],
+  [/\bdagilim grafigi\b/g, "pasta grafik"],
   [/\bcubuk grafigi\b/g, "cubuk grafik"],
   [/\bsutun grafigi\b/g, "sutun grafik"],
   [/\bcizgi grafigi\b/g, "cizgi grafik"],
+  [/\btrend grafigi\b/g, "trend grafik"],
+  [/\bakis olarak\b/g, "akis semasi"],
+  [/\bakisa cevir\b/g, "akis semasi"],
+  [/\bkutularla goster\b/g, "diyagram"],
+  [/\bbaglantili goster\b/g, "diyagram"],
+  [/\bsema yap\b/g, "diyagram yap"],
 
   // QR / OCR / diğer
   [/\bkare kod\b/g, "karekod"],
@@ -79,15 +92,15 @@ function normalizeToolIntentText(value = "") {
 
 function detectChartType(value = "") {
   const text = normalizeToolIntentText(value);
-  if (/\b(pasta|pie|dilim|daire|doughnut|donut)\b/.test(text)) return "pie";
-  if (/\b(cizgi|line|trend)\b/.test(text)) return "line";
-  if (/\b(cubuk|bar|sutun|kolon)\b/.test(text)) return "bar";
+  if (/\b(pasta|pie|dilim|dilimli|daire|yuvarlak|doughnut|donut|donut grafik|renkli dagilim|dagilim)\b/.test(text)) return "pie";
+  if (/\b(cizgi|line|trend|zaman|zamana gore|artis|azalis|degisim)\b/.test(text)) return "line";
+  if (/\b(cubuk|bar|sutun|kolon|normal grafik|karsilastirma)\b/.test(text)) return "bar";
   return "bar";
 }
 
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
-  return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|diyagram|mermaid|akis|sema|ciz|indir|arsiv|rapor|tablo/.test(text);
+  return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|yuvarlak|daire|dilim|dagilim|trend|diyagram|mermaid|akis|sema|kutularla|baglantili|ciz|indir|arsiv|rapor|tablo/.test(text);
 }
 
 module.exports = {

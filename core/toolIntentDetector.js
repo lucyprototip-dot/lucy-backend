@@ -42,7 +42,7 @@ function wantsZipFromText(text = "") {
 
 function wantsChartFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /grafik|chart|pasta grafik|pasta olarak|pasta yap|pie chart|cizgi grafik|bar grafik|sutun grafik|doughnut|cizelge/.test(q);
+  return /grafik|chart|pasta grafik|pasta olarak|pasta yap|pie chart|yuvarlak grafik|yuvarlak pasta|daire grafik|dilimli grafik|renkli dagilim|dagilim|cizgi grafik|trend grafik|bar grafik|sutun grafik|cubuk grafik|doughnut|donut|cizelge|gorsellestir|görselleştir/.test(q);
 }
 
 function wantsDocumentFromText(text = "") {
@@ -62,7 +62,7 @@ function wantsOcrFromText(text = "") {
 
 function wantsMermaidFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /mermaid|diyagram|flowchart|akış|akis|şema|sema/.test(q);
+  return /mermaid|diyagram|diagram|flowchart|akış|akis|şema|sema|akis semasi|kutularla|baglantili goster|bagla|baglantili|node|blok sema/.test(q);
 }
 
 function wantsTextStatsFromText(text = "") {

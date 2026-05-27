@@ -482,8 +482,7 @@ function requestedToolWork(req) {
 }
 
 function requestedMermaidWork(req) {
-  const text = normalizeIntentText(latestUserIntentText(req));
-  return /mermaid|diyagram|flowchart|akis|sema/.test(text);
+  return wantsMermaidFromText(latestUserIntentText(req));
 }
 
 function stripToolOnlyBlocks(answer = "") {
@@ -774,16 +773,63 @@ function activeContentToText(content = {}, fallback = "") {
   if (content.type === "mermaid") {
     const code = content.code || content.mermaid || content.ui?.code || "";
     const ui = content.ui || mermaidUiFromMemory({ code, title: content.title }, content.title || "Mermaid diyagram");
-    const mermaidBlock = code ? `\n\n\`\`\`mermaid\n${code}\n\`\`\`` : "";
+    const mermaidBlock = "";
     return `${mermaidBlock}${ui ? widgetFence(ui) : ""}`.trim() || fallback || "";
   }
   if (content.type === "file" && content.file) return content.file.url || content.file.filename || fallback || "";
   return String(content.text || fallback || "").trim();
 }
 
+
+function wantsPreviousContent(text = "") {
+  const q = normalizeIntentText(text);
+  return /\b(onceki|bir onceki|az onceki|daha once|daha onceki|eski|sondan onceki|yukardaki|yukaridaki)\b/.test(q);
+}
+
+function relevantContentForIntent(content = {}, userText = "") {
+  if (!content || typeof content !== "object") return false;
+  if (wantsChartFromText(userText) || wantsExcelFromText(userText)) {
+    return content.type === "table" || Boolean(content.table?.rows?.length) || Boolean(activeContentTable(content)?.rows?.length);
+  }
+  if (wantsMermaidFromText(userText)) {
+    return content.type === "table" || content.type === "text" || content.type === "mermaid" || Boolean(content.table?.rows?.length) || Boolean(activeContentTable(content)?.rows?.length);
+  }
+  if (wantsPdfFromText(userText) || wantsDocumentFromText(userText) || wantsTextStatsFromText(userText)) {
+    return ["table", "text", "chart", "mermaid"].includes(String(content.type || ""));
+  }
+  return true;
+}
+
+function contentIdentity(content = {}) {
+  if (!content || typeof content !== "object") return "";
+  if (content.type === "table" && content.table?.rows?.length) return `table:${JSON.stringify(content.table.headers || [])}:${content.table.rows.length}`;
+  if (content.type === "chart") return `chart:${content.title || ""}:${JSON.stringify(content.chart?.data?.labels || content.ui?.data?.labels || [])}`;
+  if (content.type === "mermaid") return `mermaid:${String(content.code || content.mermaid || content.ui?.code || "").slice(0, 120)}`;
+  if (content.text) return `text:${String(content.text).slice(0, 160)}`;
+  return `${content.type || "unknown"}:${content.title || ""}`;
+}
+
+function selectHistoryContent(memory = {}, userText = "") {
+  if (!wantsPreviousContent(userText)) return null;
+  const history = Array.isArray(memory.contentHistory) ? memory.contentHistory.slice().reverse() : [];
+  if (!history.length) return null;
+
+  const activeKey = contentIdentity(memory.activeContent || {});
+  const seen = new Set();
+  for (const item of history) {
+    const key = contentIdentity(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    if (key === activeKey) continue;
+    if (relevantContentForIntent(item, userText)) return item;
+  }
+  return null;
+}
+
 function resolveActiveContent(req, answer = "") {
   const memory = hydrateMemoryFromRequest(req);
   const userText = latestUserIntentText(req);
+  const selectedHistoryContent = selectHistoryContent(memory, userText);
   const answerText = stripToolNoise(answer);
 
   // Aynı mesajda uzun içerik/metin verildiyse öncelik kullanıcının son içeriği.
@@ -802,6 +848,7 @@ function resolveActiveContent(req, answer = "") {
       : { type: "text", text: answerText, title: contentTitleFromText(answerText, "LUCY İçeriği"), source: "assistant-answer" };
   }
 
+  if (selectedHistoryContent) return selectedHistoryContent;
   if (memory.activeContent) return memory.activeContent;
   if (memory.lastTable?.rows?.length) return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "lastTable" };
   if (memory.lastChart?.data) return { type: "chart", chart: memory.lastChart, ui: chartUiFromMemory(memory.lastChart, "Grafik"), title: "Grafik", source: "lastChart" };
@@ -1256,11 +1303,23 @@ async function buildDeepSeekPlannerToolCalls(answer = "", req) {
 }
 
 
+function toolResultDedupeKey(item = {}) {
+  const ui = item?.ui || normalizeToolResultForUI(item?.tool, item?.result || {}, item?.input || {});
+  if (ui.type === "mermaid") return `mermaid:${String(ui.code || "").trim()}`;
+  if (ui.type === "chart") return `chart:${ui.chartType}:${JSON.stringify(ui.data?.labels || [])}:${JSON.stringify(ui.data?.datasets?.[0]?.data || [])}`;
+  if (ui.downloadUrl) return `file:${ui.downloadUrl}`;
+  return `${ui.tool || item?.tool}:${ui.title || ""}:${ui.type || ""}`;
+}
+
 function buildToolFinalAnswer(toolResults = []) {
   const lines = [];
   const widgets = [];
+  const seenResults = new Set();
 
   for (const item of toolResults || []) {
+    const dedupeKey = toolResultDedupeKey(item);
+    if (dedupeKey && seenResults.has(dedupeKey)) continue;
+    if (dedupeKey) seenResults.add(dedupeKey);
     const ui = item?.ui || normalizeToolResultForUI(item?.tool, item?.result || {}, item?.input || {});
     const tool = String(item?.tool || ui.tool || "tool");
 
@@ -1284,7 +1343,6 @@ function buildToolFinalAnswer(toolResults = []) {
 
     if (ui.type === "mermaid") {
       lines.push(`✅ ${ui.title || "Diyagram"} hazırlandı.`);
-      if (ui.code) lines.push(`\n\`\`\`mermaid\n${ui.code}\n\`\`\``);
       widgets.push(widgetFence(ui));
       continue;
     }
