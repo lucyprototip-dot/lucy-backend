@@ -224,8 +224,12 @@ module.exports = {
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       filename: input.filename || "lucy-tablo.xlsx",
       base64: Buffer.from(buffer).toString("base64"),
+      title: input.title || "Excel tablosu hazır",
+      headers: columns,
+      previewRows: rows.slice(0, 12),
       rows: rows.length,
       columns: columns.length,
+      sourceType: Array.isArray(input.rows) ? "rows" : input.text ? "text" : "data",
       message: `${rows.length} satır ve ${columns.length} sütun içeren Excel hazırlandı.`,
     };
   },
