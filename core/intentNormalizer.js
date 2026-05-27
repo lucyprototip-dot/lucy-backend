@@ -155,7 +155,7 @@ function detectColorPalette(value = "") {
 
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
-  return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|yuvarlak|daire|dilim|trend|cizgi|cubuk|sutun|diyagram|mermaid|akis|sema|kutular|baglantili|ciz|indir|arsiv|rapor|tablo/.test(text);
+  return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|yuvarlak|daire|dilim|trend|cizgi|cubuk|sutun|diyagram|mermaid|akis|sema|kutular|baglantili|ciz|indir|arsiv|rapor|tablo|renkli|renklerini|rengini|renkleri|sari|lacivert|beyaz|siyah|neon|premium|tema|style|stil/.test(text);
 }
 
 module.exports = {

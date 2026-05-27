@@ -858,6 +858,9 @@ function rememberLucyWidget(memory, widget = {}) {
       chartType: widget.chartType || widget.raw?.chartType || "bar",
       data: widget.data || widget.raw?.data || null,
       title: widget.title || widget.raw?.title || "Grafik",
+      style: widget.style || widget.raw?.style || {},
+      colors: widget.colors || widget.palette || widget.raw?.colors || widget.raw?.palette || widget.style?.colors || [],
+      palette: widget.palette || widget.colors || widget.raw?.palette || widget.raw?.colors || widget.style?.colors || [],
     };
     if (chart.data?.labels?.length) {
       memory.lastChart = chart;
@@ -953,6 +956,9 @@ function rememberToolResult(req, call = {}, result = {}) {
       chartType: result.chartType || input.chartType || "bar",
       data: result.data || input.data || { labels: input.labels || [], datasets: [{ label: input.label || "Veri", data: input.values || [] }] },
       title: result.title || input.title || input.label || "Grafik",
+      style: result.style || input.style || {},
+      colors: result.colors || result.palette || input.colors || input.palette || result.style?.colors || input.style?.colors || [],
+      palette: result.palette || result.colors || input.palette || input.colors || result.style?.colors || input.style?.colors || [],
     };
     memory.lastChart = chart;
     setActiveContent(memory, { type: "chart", chart, ui: chartUiFromMemory(chart, chart.title), title: chart.title, source: "chartData" });
@@ -1132,6 +1138,37 @@ function lastImageFileFromMemory(memory = {}) {
 }
 
 
+function userExplicitlyReferencesChart(userText = "") {
+  const q = normalizeIntentText(userText);
+  return /\b(grafik|chart|pasta|pie|yuvarlak|daire|dilim|donut|halka|trend|cizgi|line|bar|cubuk|sutun|ilk yaptigin grafik|onceki grafik|son grafik)\b/.test(q);
+}
+
+function userStyleOnlyMutation(userText = "") {
+  const q = normalizeIntentText(userText);
+  const hasStyle = /renk|renkli|rengarenk|rengini|renklerini|renkleri|tema|style|stil|neon|premium|siyah beyaz|sari|lacivert|beyaz|canli|farkli ton/.test(q);
+  const hasStructural = /tablo|excel|pdf|zip|dosya|yeni|ekle|cikar|çıkar|sil|hesapla/.test(q);
+  return hasStyle && !hasStructural;
+}
+
+function userSpecificallyReferencesChart(userText = "") {
+  const q = normalizeIntentText(userText);
+  // "renklerini değiştir", "renkli yap", "pasta olsun" gibi komutlar
+  // çoğunlukla son grafiğin stil/tip mutasyonudur. Tablo açıkça isteniyorsa tablo kaynağına döneriz.
+  if (/\b(tablo|excel|xlsx|satir|sutun)\b/.test(q) && !userExplicitlyReferencesChart(userText)) return false;
+  return userExplicitlyReferencesChart(userText) || /\b(renk|renkli|rengarenk|rengini|renklerini|renkleri|tema|style|stil|neon|premium|siyah beyaz|sari|lacivert|beyaz|bunu|bu|onceki|son|aynisi)\b/.test(q);
+}
+
+function userExplicitlyWantsMermaidOnly(userText = "") {
+  const q = normalizeIntentText(userText);
+  return /mermaid|diyagram|diagram|flowchart|akis|akış|sema|şema|kutular|baglantili|bagla|node|blok sema/.test(q);
+}
+
+function shouldRouteStyleMutationToMermaid(userText = "", activeContent = null, memory = {}) {
+  return userStyleOnlyMutation(userText)
+    && !userExplicitlyReferencesChart(userText)
+    && (activeContent?.type === "mermaid" || Boolean(memory.lastMermaid?.code));
+}
+
 function referencedHistoryIndex(userText = "") {
   const q = normalizeIntentText(userText);
   if (/\b(ilk|birinci|en bastaki|en baştaki)\b/.test(q)) return "first";
@@ -1246,7 +1283,7 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsChartFromText(userText)) {
+  if (wantsChartFromText(userText) && !userExplicitlyWantsMermaidOnly(userText) && !shouldRouteStyleMutationToMermaid(userText, activeContent, memory)) {
     const selectedChart = chartFromHistory(memory, userText);
     const selectedTable = tableFromHistory(memory, userText) || activeTable;
     const preferExistingChart = userSpecificallyReferencesChart(userText) && selectedChart?.data;
@@ -1261,7 +1298,7 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsMermaidFromText(userText)) {
+  if (wantsMermaidFromText(userText) || shouldRouteStyleMutationToMermaid(userText, activeContent, memory)) {
     const selectedTable = tableFromHistory(memory, userText) || activeTable;
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
     if (memory.lastMermaid?.code && /daha\s+(karmasik|detayli|genis|buyuk)|gelistir|ayrintili|renkli/.test(normalizeIntentText(userText)) && !selectedTable?.rows?.length && !selectedChart?.data) {

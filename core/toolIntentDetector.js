@@ -42,7 +42,9 @@ function wantsZipFromText(text = "") {
 
 function wantsChartFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /grafik|chart|pasta|pie chart|yuvarlak|daire|dilim|renkli pasta|cizgi grafik|trend grafik|bar grafik|sutun grafik|doughnut|donut|cizelge/.test(q);
+  // Grafik kelimesi geçmese bile kullanıcı çoğu zaman son grafiği stillendirir:
+  // "renklerini değiştir", "renkli olsun", "pasta olsun", "trend yap" gibi.
+  return /grafik|chart|pasta grafik|pasta olarak|pasta yap|\bpasta\b|pie chart|yuvarlak grafik|yuvarlak pasta|daire grafik|dilimli grafik|renkli dagilim|dagilim|cizgi grafik|trend grafik|\btrend\b|bar grafik|sutun grafik|cubuk grafik|doughnut|donut|cizelge|gorsellestir|görselleştir|renklerini degistir|rengini degistir|renkleri degistir|renkli olsun|renkli yap|renkli olacak|sadece .* renkleri kullan|sari|lacivert|beyaz|siyah beyaz|neon|premium/.test(q);
 }
 
 function wantsDocumentFromText(text = "") {
@@ -62,7 +64,7 @@ function wantsOcrFromText(text = "") {
 
 function wantsMermaidFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /mermaid|diyagram|flowchart|akış|akis|şema|sema|kutular|baglantili|bağlantılı|akisi|akışı/.test(q);
+  return /mermaid|diyagram|diagram|flowchart|akış|akis|şema|sema|akis semasi|kutularla|baglantili goster|bagla|baglantili|node|blok sema/.test(q);
 }
 
 function wantsTextStatsFromText(text = "") {
