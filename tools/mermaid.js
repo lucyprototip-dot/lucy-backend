@@ -1,4 +1,24 @@
-const { sanitizeMermaidCode } = require("../core/safeMermaidBuilder");
+let sanitizeMermaidCode;
+try {
+  ({ sanitizeMermaidCode } = require("../core/safeMermaidBuilder"));
+} catch {
+  sanitizeMermaidCode = null;
+}
+
+function fallbackSanitizeMermaid(raw = "") {
+  let code = String(raw || "")
+    .replace(/^```mermaid\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  // En azından Mermaid başlangıcı yoksa flowchart içine alma.
+  if (code && !/^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie)\b/i.test(code)) {
+    const safe = code.replace(/[\[\]{}<>|]/g, " ").replace(/\s+/g, " ").slice(0, 80) || "LUCY";
+    code = `flowchart TD\n A["${safe}"]`;
+  }
+  return code;
+}
 
 module.exports = {
   name: "mermaid",
@@ -15,9 +35,11 @@ module.exports = {
       };
     }
 
-    const cleaned = sanitizeMermaidCode(raw, input.userText || input.prompt || input.title || "");
+    const cleaned = typeof sanitizeMermaidCode === "function"
+      ? sanitizeMermaidCode(raw, input.userText || input.prompt || input.title || "")
+      : fallbackSanitizeMermaid(raw);
 
-    if (!cleaned) {
+    if (!String(cleaned || "").trim()) {
       return {
         success: false,
         error: "mermaid_code_invalid",
@@ -28,6 +50,7 @@ module.exports = {
     return {
       success: true,
       type: "mermaid",
+      tool: "mermaid",
       title: input.title || "Mermaid diyagram",
       code: cleaned,
     };

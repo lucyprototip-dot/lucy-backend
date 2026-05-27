@@ -3,6 +3,16 @@ const DEFAULT_PALETTE = [
   "#ec4899", "#06b6d4", "#84cc16", "#f97316", "#14b8a6",
 ];
 
+function cleanNumber(value) {
+  const raw = String(value ?? "")
+    .replace(/[%₺$€£]/g, "")
+    .replace(/\s/g, "")
+    .replace(/\.(?=\d{3}(\D|$))/g, "")
+    .replace(/,/g, ".");
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : 0;
+}
+
 function paletteFor(input = {}, count = 1) {
   const style = input.style && typeof input.style === "object" ? input.style : {};
   const explicit = Array.isArray(input.colors) ? input.colors : Array.isArray(style.colors) ? style.colors : [];
@@ -30,18 +40,12 @@ module.exports = {
         ? input.headers
         : Object.keys(input.rows.find((row) => row && typeof row === "object") || {});
       const labelKey = headers[0];
-      const valueKey = headers.find((header) => input.rows.some((row) => {
-        const num = Number(String(row?.[header] ?? "").replace(/[%₺$€£]/g, "").replace(/\s/g, "").replace(/\.(?=\d{3}(\D|$))/g, "").replace(/,/g, "."));
-        return Number.isFinite(num);
-      }));
+      const valueKey = headers.find((header) => input.rows.some((row) => Number.isFinite(cleanNumber(row?.[header]))));
       labels = input.rows.slice(0, 30).map((row, index) => String(row?.[labelKey] ?? `Satır ${index + 1}`));
-      values = input.rows.slice(0, 30).map((row) => {
-        const num = Number(String(row?.[valueKey] ?? 0).replace(/[%₺$€£]/g, "").replace(/\s/g, "").replace(/\.(?=\d{3}(\D|$))/g, "").replace(/,/g, "."));
-        return Number.isFinite(num) ? num : 0;
-      });
+      values = input.rows.slice(0, 30).map((row) => cleanNumber(row?.[valueKey]));
     }
 
-    const numericValues = values.map((value) => Number(value) || 0);
+    const numericValues = values.map((value) => cleanNumber(value));
     if (!labels.length || !numericValues.length || labels.length !== numericValues.length) {
       return {
         success: false,
@@ -52,12 +56,13 @@ module.exports = {
 
     const colors = paletteFor(input, labels.length);
     const title = input.title || input.label || (chartType === "pie" ? "Pasta Grafiği" : chartType === "line" ? "Trend Grafiği" : "Grafik");
-
-    const colorful = Boolean(style.colorful || chartType === "pie" || input.colorful || Array.isArray(input.colors) || Array.isArray(style.colors));
+    const colorful = Boolean(style.colorful || chartType === "pie" || input.colorful || colors.length);
     const paletteName = style.palette || input.palette || (colorful ? "colorful" : "default");
 
     return {
       success: true,
+      type: "chart",
+      tool: "chartData",
       chartType,
       colorful,
       paletteName,
@@ -65,6 +70,7 @@ module.exports = {
       colors,
       palette: colors,
       title,
+      label: input.label || "Veri",
       data: {
         labels,
         datasets: [
