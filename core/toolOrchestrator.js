@@ -47,10 +47,42 @@ function listLoadedTools() {
   }));
 }
 
+const TOOL_NAME_ALIASES = {
+  chartdata: "chartData",
+  chart_data: "chartData",
+  "chart-data": "chartData",
+  chart: "chartData",
+  grafik: "chartData",
+  textstats: "textStats",
+  text_stats: "textStats",
+  "text-stats": "textStats",
+  webfetch: "webFetch",
+  web_fetch: "webFetch",
+  "web-fetch": "webFetch",
+  filemanager: "fileManager",
+  file_manager: "fileManager",
+  "file-manager": "fileManager",
+};
+
+function canonicalToolName(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return "";
+  const compact = raw.replace(/\s+/g, "");
+  const lower = compact.toLowerCase();
+  return TOOL_NAME_ALIASES[lower] || TOOL_NAME_ALIASES[compact] || compact;
+}
+
 function getLoadedTool(name) {
   const cleanName = String(name || "").trim();
   if (!cleanName) return null;
-  return toolRegistry?.getTool?.(cleanName) || lucyTools?.[cleanName] || null;
+  const canonicalName = canonicalToolName(cleanName);
+  return (
+    toolRegistry?.getTool?.(canonicalName) ||
+    toolRegistry?.getTool?.(cleanName) ||
+    lucyTools?.[canonicalName] ||
+    lucyTools?.[cleanName] ||
+    null
+  );
 }
 
 function withTimeout(promise, ms = 30000) {
@@ -62,7 +94,8 @@ function withTimeout(promise, ms = 30000) {
 }
 
 async function executeLucyTool(toolName, input = {}, timeoutMs = 30000) {
-  const tool = getLoadedTool(toolName);
+  const canonicalName = canonicalToolName(toolName);
+  const tool = getLoadedTool(canonicalName);
   if (!tool || typeof tool.execute !== "function") {
     return {
       success: false,
