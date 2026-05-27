@@ -1,6 +1,8 @@
 const fs = require("fs");
 const path = require("path");
 const dotenv = require("dotenv");
+const { normalizeToolIntentText, detectChartType, likelyToolIntent } = require("./intentNormalizer");
+const { planToolCallsWithDeepSeek } = require("./toolPlanner");
 
 dotenv.config();
 
@@ -457,13 +459,12 @@ function latestUserIntentText(req) {
 }
 
 function requestedToolWork(req) {
-  const text = normalizeIntentText(latestUserIntentText(req));
-  return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|diyagram|mermaid|akış|akis|şema|sema|çiz|ciz|indir|arsiv|arşiv|rapor|tablo/.test(text);
+  return likelyToolIntent(latestUserIntentText(req));
 }
 
 function requestedMermaidWork(req) {
-  const text = latestUserIntentText(req).toLowerCase();
-  return /mermaid|diyagram|flowchart|akış|akis|şema|sema/.test(text);
+  const text = normalizeIntentText(latestUserIntentText(req));
+  return /mermaid|diyagram|flowchart|akis|sema/.test(text);
 }
 
 function stripToolOnlyBlocks(answer = "") {
@@ -524,16 +525,7 @@ function isUsableToolCall(call = {}) {
 
 
 function normalizeIntentText(value = "") {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/ı/g, "i")
-    .replace(/ğ/g, "g")
-    .replace(/ü/g, "u")
-    .replace(/ş/g, "s")
-    .replace(/ö/g, "o")
-    .replace(/ç/g, "c")
-    .replace(/İ/g, "i")
-    .trim();
+  return normalizeToolIntentText(value);
 }
 
 function wantsPdfFromText(text = "") {
@@ -766,8 +758,7 @@ function tableToChartInput(table, userText = "") {
     values = sampleRows.map(() => 1);
   }
   const labels = sampleRows.map((row, index) => String(row?.[labelKey] ?? `Satır ${index + 1}`).trim() || `Satır ${index + 1}`);
-  const q = normalizeIntentText(userText);
-  const chartType = q.includes("pasta") || q.includes("pie") ? "pie" : q.includes("cizgi") || q.includes("çizgi") || q.includes("line") ? "line" : "bar";
+  const chartType = detectChartType(userText);
   return { labels, values, chartType, label: valueKey || "Veri" };
 }
 
@@ -1024,6 +1015,29 @@ function buildImplicitToolCalls(answer = "", req) {
   return calls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall).slice(0, 5);
 }
 
+async function buildDeepSeekPlannerToolCalls(answer = "", req) {
+  const userText = latestUserIntentText(req);
+  const memory = hydrateMemoryFromRequest(req);
+
+  try {
+    const planned = await planToolCallsWithDeepSeek({
+      userText,
+      memory,
+      availableTools: listLoadedTools().map((tool) => tool.name || tool),
+    });
+
+    if (!Array.isArray(planned) || !planned.length) return [];
+
+    return planned
+      .map((call) => enrichToolCallInput(call, req))
+      .filter(isUsableToolCall)
+      .slice(0, 5);
+  } catch (error) {
+    console.warn("Lucy DS tool planner devre dışı/fallback:", error.message);
+    return [];
+  }
+}
+
 async function executeToolCallsFromAnswer(answer = "", req) {
   hydrateMemoryFromRequest(req);
   const explicitCalls = extractToolCallsFromAnswer(answer);
@@ -1034,8 +1048,11 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   let toolCalls = rawToolCalls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall);
 
   if (!toolCalls.length) {
-    const implicitCalls = allowAnyTool ? buildImplicitToolCalls(answer, req) : [];
-    if (implicitCalls.length) {
+    const plannerCalls = allowAnyTool ? await buildDeepSeekPlannerToolCalls(answer, req) : [];
+    const implicitCalls = plannerCalls.length ? [] : (allowAnyTool ? buildImplicitToolCalls(answer, req) : []);
+    if (plannerCalls.length) {
+      toolCalls = plannerCalls;
+    } else if (implicitCalls.length) {
       toolCalls = implicitCalls;
     } else {
       const cleaned = sanitizeNormalAnswer(answer, req);
