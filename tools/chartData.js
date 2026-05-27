@@ -1,3 +1,15 @@
+const DEFAULT_PALETTE = [
+  "#facc15", "#1d4ed8", "#ffffff", "#ec4899", "#22c55e",
+  "#f97316", "#8b5cf6", "#06b6d4", "#ef4444", "#84cc16",
+];
+
+function paletteFor(input = {}, count = 1) {
+  const style = input.style && typeof input.style === "object" ? input.style : {};
+  const explicit = Array.isArray(input.colors) ? input.colors : Array.isArray(style.colors) ? style.colors : [];
+  const base = explicit.length ? explicit : DEFAULT_PALETTE;
+  return Array.from({ length: Math.max(1, count) }, (_, i) => base[i % base.length]);
+}
+
 module.exports = {
   name: "chartData",
   description: "Grafik için etiket ve veri setini standart JSON formatına çevirir",
@@ -38,17 +50,24 @@ module.exports = {
       };
     }
 
+    const colors = paletteFor(input, labels.length);
+    const title = input.title || input.label || (chartType === "pie" ? "Pasta Grafiği" : chartType === "line" ? "Trend Grafiği" : "Grafik");
+
     return {
       success: true,
       chartType,
-      style,
-      title: input.title || input.label || (chartType === "pie" ? "Pasta Grafiği" : chartType === "line" ? "Trend Grafiği" : "Grafik"),
+      style: { ...style, colorful: style.colorful || chartType === "pie" || Boolean(input.colorful) },
+      colors,
+      palette: colors,
+      title,
       data: {
         labels,
         datasets: [
           {
             label: input.label || "Veri",
             data: numericValues,
+            backgroundColor: colors,
+            borderColor: colors,
           },
         ],
       },
