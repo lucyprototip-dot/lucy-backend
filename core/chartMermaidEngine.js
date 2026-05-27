@@ -1,4 +1,5 @@
 const { detectChartType, detectVisualStyle, detectColorPalette, normalizeToolIntentText } = require("./intentNormalizer");
+const { cleanLabel: cleanSafeMermaidLabel, sanitizeMermaidCode, buildFlowchartFromPairs, buildPieMermaid } = require("./safeMermaidBuilder");
 
 function numberFromCell(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -257,54 +258,28 @@ function chartToChartInput(chart = {}, userText = "") {
 }
 
 function cleanMermaidLabel(value = "") {
-  return String(value || "")
-    .replace(/[\[\]{}<>|]/g, " ")
-    .replace(/\"/g, "'")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 54) || "Değer";
+  return cleanSafeMermaidLabel(value);
 }
 
 function tableToMermaidCode(table, title = "LUCY Tablosu", userText = "") {
   if (!table?.headers?.length || !table?.rows?.length) return "";
   const chartInput = tableToChartInput(table, userText) || tableToBarInput(table, userText);
-  const style = styleFromUserText(userText);
-  const root = cleanMermaidLabel(title);
-  const lines = ["flowchart TD"];
-  if (style.colorful) {
-    const palette = Array.isArray(style.colors) && style.colors.length ? style.colors : ["#0f766e", "#7c2d12", "#1d4ed8", "#be123c", "#a16207"];
-    const rootFill = palette[1] || "#4c1d95";
-    lines.push(`classDef root fill:${rootFill},stroke:#ffffff,stroke-width:3px,color:#ffffff`);
-    for (let i = 0; i < 5; i += 1) {
-      const fill = palette[i % palette.length];
-      const textColor = fill.toLowerCase() === "#ffffff" ? "#111827" : "#ffffff";
-      lines.push(`classDef c${i + 1} fill:${fill},stroke:#ffffff,stroke-width:2px,color:${textColor}`);
-    }
-    lines.push(`A["${root}"]:::root`);
-  } else {
-    lines.push(`A["${root}"]`);
+  if (!chartInput?.labels?.length) return "";
+  const chartType = detectChartType(userText);
+  if (chartType === "pie" && /mermaid|pasta|pie|yuvarlak|daire/i.test(normalizeToolIntentText(userText))) {
+    return buildPieMermaid({ title, labels: chartInput.labels, values: chartInput.values });
   }
-  const labels = chartInput?.labels || [];
-  const values = chartInput?.values || [];
-  labels.slice(0, 12).forEach((label, index) => {
-    const safeLabel = cleanMermaidLabel(label);
-    const safeValue = values[index] === undefined ? "" : cleanMermaidLabel(String(values[index]));
-    const className = style.colorful ? `:::c${(index % 5) + 1}` : "";
-    lines.push(`A --> N${index + 1}["${safeLabel}${safeValue ? `\\n${safeValue}` : ""}"]${className}`);
-  });
-  return lines.join("\n");
+  return buildFlowchartFromPairs({ title, labels: chartInput.labels, values: chartInput.values, userText });
 }
 
 function chartToMermaidCode(chart = {}, title = "Grafik", userText = "") {
   const input = chartToChartInput(chart, userText);
   if (!input) return "";
-  const root = cleanMermaidLabel(title || chart.title || "Grafik");
-  const lines = ["flowchart TD", `A["${root}"]`];
-  input.labels.slice(0, 12).forEach((label, index) => {
-    const value = input.values[index];
-    lines.push(`A --> N${index + 1}["${cleanMermaidLabel(label)}\\n${cleanMermaidLabel(String(value ?? ""))}"]`);
-  });
-  return lines.join("\n");
+  const chartType = detectChartType(userText) || input.chartType || "bar";
+  if (chartType === "pie" && /mermaid|pasta|pie|yuvarlak|daire/i.test(normalizeToolIntentText(userText))) {
+    return buildPieMermaid({ title: title || chart.title || "Dağılım", labels: input.labels, values: input.values });
+  }
+  return buildFlowchartFromPairs({ title: title || chart.title || "Grafik", labels: input.labels, values: input.values, userText });
 }
 
 function chartUiFromMemory(chart = {}, title = "Grafik") {
@@ -331,7 +306,7 @@ function chartUiFromMemory(chart = {}, title = "Grafik") {
 }
 
 function mermaidUiFromMemory(mermaid = {}, title = "Mermaid diyagram") {
-  const code = mermaid.code || mermaid.mermaid || "";
+  const code = sanitizeMermaidCode(mermaid.code || mermaid.mermaid || "", mermaid.userText || mermaid.title || title || "");
   if (!String(code || "").trim()) return null;
   return {
     type: "mermaid",

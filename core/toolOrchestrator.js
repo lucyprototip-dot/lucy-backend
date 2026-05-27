@@ -408,6 +408,7 @@ function enrichToolCallInput(call, req) {
         : "";
     if (generated) input.code = generated;
     else if (memory.lastMermaid?.code) input.code = memory.lastMermaid.code;
+    input.userText = userText;
   }
 
   if (toolName === "qr" && !String(input.text || input.url || input.value || "").trim()) {
@@ -1264,16 +1265,16 @@ function buildImplicitToolCalls(answer = "", req) {
     const selectedTable = tableFromHistory(memory, userText) || activeTable;
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
     if (memory.lastMermaid?.code && /daha\s+(karmasik|detayli|genis|buyuk)|gelistir|ayrintili|renkli/.test(normalizeIntentText(userText)) && !selectedTable?.rows?.length && !selectedChart?.data) {
-      calls.push({ tool: "mermaid", input: { code: memory.lastMermaid.code, title } });
+      calls.push({ tool: "mermaid", input: { code: memory.lastMermaid.code, title, userText } });
     } else if (selectedTable?.rows?.length) {
       const code = tableToMermaidCode(selectedTable, title || "LUCY Diyagramı", userText);
-      if (code) calls.push({ tool: "mermaid", input: { code, title: title || "LUCY Diyagramı" } });
+      if (code) calls.push({ tool: "mermaid", input: { code, title: title || "LUCY Diyagramı", userText } });
     } else if (selectedChart?.data) {
       const code = chartToMermaidCode(selectedChart, selectedChart.title || title || "LUCY Grafiği", userText);
-      if (code) calls.push({ tool: "mermaid", input: { code, title: selectedChart.title || title || "LUCY Grafiği" } });
+      if (code) calls.push({ tool: "mermaid", input: { code, title: selectedChart.title || title || "LUCY Grafiği", userText } });
     } else if (source) {
       const code = String(source).match(/```mermaid\s*([\s\S]*?)```/i)?.[1]?.trim();
-      if (code) calls.push({ tool: "mermaid", input: { code, title } });
+      if (code) calls.push({ tool: "mermaid", input: { code, title, userText } });
     }
   }
 
@@ -1386,7 +1387,6 @@ function buildToolFinalAnswer(toolResults = []) {
 
     if (ui.type === "mermaid") {
       lines.push(`✅ ${ui.title || "Diyagram"} hazırlandı.`);
-      if (ui.code) lines.push(`\n\`\`\`mermaid\n${ui.code}\n\`\`\``);
       widgets.push(widgetFence(ui));
       continue;
     }
