@@ -1,4 +1,4 @@
-const { detectChartType, detectVisualStyle, normalizeToolIntentText } = require("./intentNormalizer");
+const { detectChartType, detectVisualStyle, detectColorPalette, normalizeToolIntentText } = require("./intentNormalizer");
 
 function numberFromCell(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -86,12 +86,46 @@ function compactTitle(value = "Grafik") {
   return String(value || "Grafik").replace(/[*_`#]/g, "").replace(/\s+/g, " ").trim().slice(0, 90) || "Grafik";
 }
 
+
+function styleFromUserText(userText = "") {
+  const visual = detectVisualStyle(userText);
+  const palette = detectColorPalette(userText);
+  return {
+    ...visual,
+    palette: palette.name,
+    colors: palette.requested ? palette.colors : (visual.colors || []),
+    colorful: visual.colorful || palette.requested,
+  };
+}
+
+function monthLikeHeaders(table) {
+  const nums = numericHeaders(table);
+  const monthPattern = /ocak|subat|şubat|mart|nisan|mayis|mayıs|haziran|temmuz|agustos|ağustos|eylul|eylül|ekim|kasim|kasım|aralik|aralık|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|ay\s*\d+/i;
+  const matching = nums.filter((header) => monthPattern.test(normalizeHeader(header)) || monthPattern.test(String(header || "")));
+  return matching.length >= 2 ? matching : (nums.length >= 3 ? nums : []);
+}
+
+function columnTotalsByHeaders(table, headers = []) {
+  const rows = table?.rows || [];
+  return headers.map((header) => rows.reduce((sum, row) => sum + (numberFromCell(row?.[header]) ?? 0), 0));
+}
+
 function tableToPieInput(table, userText = "") {
   const rows = (table?.rows || []).slice(0, 30);
   const headers = table?.headers || [];
   if (!headers.length || !rows.length) return null;
   const q = normalizeToolIntentText(userText);
   const labelKey = labelHeader(table);
+  const monthHeaders = monthLikeHeaders(table);
+
+  // 6x6 aylık masraf tablosu gibi: satırlar kategori, kolonlar ay ise pasta/trend için ay toplamlarını kullan.
+  if (monthHeaders.length >= 2 && !/kategori|kalem|masraf kalemi|harcama kalemi/.test(q)) {
+    return {
+      labels: monthHeaders,
+      values: columnTotalsByHeaders(table, monthHeaders),
+      label: "Aylık Toplam",
+    };
+  }
 
   // Aylık gelir/gider tablosu gibi: ilk satır/ay üzerinden kategori dağılımı istenebilir.
   // "gider" denmişse gider sütunlarını kategori olarak topla. "gelir" denmişse gelir sütunlarını topla.
@@ -127,6 +161,15 @@ function tableToLineInput(table, userText = "") {
   if (!headers.length || !rows.length) return null;
   const labelKey = labelHeader(table);
   const q = normalizeToolIntentText(userText);
+  const monthHeaders = monthLikeHeaders(table);
+
+  if (monthHeaders.length >= 2) {
+    return {
+      labels: monthHeaders,
+      values: columnTotalsByHeaders(table, monthHeaders),
+      label: "Aylık Toplam",
+    };
+  }
 
   // "gider trendi" için giderleri satır bazında topla.
   const exp = expenseHeaders(table);
@@ -162,6 +205,14 @@ function tableToBarInput(table, userText = "") {
   const headers = table?.headers || [];
   if (!headers.length || !rows.length) return null;
   const labelKey = labelHeader(table);
+  const monthHeaders = monthLikeHeaders(table);
+  if (monthHeaders.length >= 2 && !/kategori|kalem|masraf kalemi|harcama kalemi/.test(normalizeToolIntentText(userText))) {
+    return {
+      labels: monthHeaders,
+      values: columnTotalsByHeaders(table, monthHeaders),
+      label: "Aylık Toplam",
+    };
+  }
   const valueKey = chooseValueHeader(table, userText, "bar");
   if (!valueKey) return null;
   return {
@@ -174,7 +225,7 @@ function tableToBarInput(table, userText = "") {
 function tableToChartInput(table, userText = "") {
   if (!table?.headers?.length || !table?.rows?.length) return null;
   const chartType = detectChartType(userText);
-  const style = detectVisualStyle(userText);
+  const style = styleFromUserText(userText);
   const picked = chartType === "pie" ? tableToPieInput(table, userText)
     : chartType === "line" ? tableToLineInput(table, userText)
     : tableToBarInput(table, userText);
@@ -193,13 +244,15 @@ function chartToChartInput(chart = {}, userText = "") {
   const labels = data?.labels || chart.labels || [];
   const values = data?.datasets?.[0]?.data || chart.values || [];
   if (!Array.isArray(labels) || !labels.length || !Array.isArray(values) || !values.length) return null;
+  const text = normalizeToolIntentText(userText);
+  const hasExplicitChartType = /pasta|pie|dilim|daire|yuvarlak|doughnut|donut|halka|cizgi|line|trend|zaman|aylik|gelisim|degisim|cubuk|bar|sutun|kolon|normal grafik|karsilastir/.test(text);
   return {
     labels,
     values,
-    chartType: detectChartType(userText) || chart.chartType || chart.type || "bar",
+    chartType: hasExplicitChartType ? detectChartType(userText) : (chart.chartType || chart.type || "bar"),
     label: data?.datasets?.[0]?.label || chart.label || chart.title || "Veri",
     title: chart.title || "Grafik",
-    style: detectVisualStyle(userText),
+    style: styleFromUserText(userText),
   };
 }
 
@@ -215,7 +268,7 @@ function cleanMermaidLabel(value = "") {
 function tableToMermaidCode(table, title = "LUCY Tablosu", userText = "") {
   if (!table?.headers?.length || !table?.rows?.length) return "";
   const chartInput = tableToChartInput(table, userText) || tableToBarInput(table, userText);
-  const style = detectVisualStyle(userText);
+  const style = styleFromUserText(userText);
   const root = cleanMermaidLabel(title);
   const lines = ["flowchart TD"];
   if (style.colorful) {
@@ -265,12 +318,14 @@ function chartUiFromMemory(chart = {}, title = "Grafik") {
     chartType: chart.chartType || chart.type || "bar",
     data,
     style: chart.style || {},
+    colors: chart.colors || chart.palette || chart.style?.colors || [],
     raw: {
       success: true,
       chartType: chart.chartType || chart.type || "bar",
       title: chart.title || title || "Grafik",
       data,
       style: chart.style || {},
+      colors: chart.colors || chart.palette || chart.style?.colors || [],
     },
   };
 }

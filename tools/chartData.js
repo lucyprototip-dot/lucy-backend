@@ -1,6 +1,6 @@
 const DEFAULT_PALETTE = [
-  "#facc15", "#1d4ed8", "#ffffff", "#ec4899", "#22c55e",
-  "#f97316", "#8b5cf6", "#06b6d4", "#ef4444", "#84cc16",
+  "#ef4444", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6",
+  "#ec4899", "#06b6d4", "#84cc16", "#f97316", "#14b8a6",
 ];
 
 function paletteFor(input = {}, count = 1) {
@@ -56,7 +56,7 @@ module.exports = {
     return {
       success: true,
       chartType,
-      style: { ...style, colorful: style.colorful || chartType === "pie" || Boolean(input.colorful) },
+      style: { ...style, colors, colorful: style.colorful || chartType === "pie" || Boolean(input.colorful) || Array.isArray(input.colors) },
       colors,
       palette: colors,
       title,

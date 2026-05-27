@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const dotenv = require("dotenv");
-const { normalizeToolIntentText, detectChartType, likelyToolIntent } = require("./intentNormalizer");
+const { normalizeToolIntentText, detectChartType, detectVisualStyle, detectColorPalette, likelyToolIntent } = require("./intentNormalizer");
 const { planToolCallsWithDeepSeek } = require("./toolPlanner");
 const {
   normalizeIntentText,
@@ -374,14 +374,40 @@ function enrichToolCallInput(call, req) {
   if (toolName === "chartdata") {
     const labels = input.labels || input.data?.labels;
     const values = input.values || input.data?.datasets?.[0]?.data;
+    const style = { ...(input.style || {}), ...detectVisualStyle(userText) };
+    const palette = detectColorPalette(userText);
+    if (palette.requested) {
+      style.colorful = true;
+      style.palette = palette.name;
+      style.colors = palette.colors;
+      input.colors = palette.colors;
+    }
+    input.style = style;
+    input.chartType = detectChartType(userText) || input.chartType || input.type || "bar";
+
     if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
-      const chartInput = tableToChartInput(memory.lastTable, userText);
-      if (chartInput) Object.assign(input, chartInput);
+      const selectedChart = chartFromHistory(memory, userText);
+      const selectedTable = tableFromHistory(memory, userText) || memory.lastTable;
+      const preferExistingChart = userSpecificallyReferencesChart(userText) && selectedChart?.data;
+      const chartInput = preferExistingChart
+        ? chartToChartInput(selectedChart, userText)
+        : selectedTable?.rows?.length
+          ? tableToChartInput(selectedTable, userText)
+          : chartToChartInput(selectedChart || memory.lastChart, userText);
+      if (chartInput) Object.assign(input, chartInput, { style: { ...(chartInput.style || {}), ...style }, colors: input.colors || chartInput.colors });
     }
   }
 
-  if (toolName === "mermaid" && !String(input.code || input.mermaid || "").trim() && memory.lastMermaid?.code) {
-    input.code = memory.lastMermaid.code;
+  if (toolName === "mermaid" && !String(input.code || input.mermaid || "").trim()) {
+    const selectedTable = tableFromHistory(memory, userText) || memory.lastTable;
+    const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
+    const generated = selectedTable?.rows?.length
+      ? tableToMermaidCode(selectedTable, input.title || "LUCY Diyagramı", userText)
+      : selectedChart?.data
+        ? chartToMermaidCode(selectedChart, input.title || selectedChart.title || "LUCY Grafiği", userText)
+        : "";
+    if (generated) input.code = generated;
+    else if (memory.lastMermaid?.code) input.code = memory.lastMermaid.code;
   }
 
   if (toolName === "qr" && !String(input.text || input.url || input.value || "").trim()) {
@@ -482,7 +508,7 @@ function sanitizeNormalAnswer(answer = "", req = null) {
   text = text
     .replace(/```json\s*[\s\S]*?```/gi, "")
     .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
-    .replace(/```mermaid\s*[\s\S]*?```/gi, requestedMermaidWork(req) ? "$&" : "")
+    .replace(/```mermaid\s*[\s\S]*?```/gi, "")
     .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
     .replace(/"tool_call"\s*:\s*\{[\s\S]*?\}/gi, "")
     .replace(/^\s*[}\]]+\s*$/gm, "")
@@ -786,8 +812,7 @@ function activeContentToText(content = {}, fallback = "") {
   if (content.type === "mermaid") {
     const code = content.code || content.mermaid || content.ui?.code || "";
     const ui = content.ui || mermaidUiFromMemory({ code, title: content.title }, content.title || "Mermaid diyagram");
-    const mermaidBlock = code ? `\n\n\`\`\`mermaid\n${code}\n\`\`\`` : "";
-    return `${mermaidBlock}${ui ? widgetFence(ui) : ""}`.trim() || fallback || "";
+    return ui ? widgetFence(ui) : (fallback || "");
   }
   if (content.type === "file" && content.file) return content.file.url || content.file.filename || fallback || "";
   return String(content.text || fallback || "").trim();
