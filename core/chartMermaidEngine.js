@@ -99,24 +99,6 @@ function styleFromUserText(userText = "") {
   };
 }
 
-function hasExplicitStyleRequest(userText = "") {
-  const q = normalizeToolIntentText(userText);
-  return /renk|renkli|rengarenk|rengini|renkleri|sari|lacivert|beyaz|siyah|neon|premium|modern|tema|style|stil/.test(q);
-}
-
-function mergeChartStyle(previous = {}, userText = "") {
-  const next = styleFromUserText(userText);
-  const explicit = hasExplicitStyleRequest(userText);
-  const prev = previous && typeof previous === "object" ? previous : {};
-  return {
-    ...prev,
-    ...next,
-    colors: explicit && Array.isArray(next.colors) && next.colors.length ? next.colors : (Array.isArray(prev.colors) ? prev.colors : next.colors),
-    palette: explicit ? next.palette : (prev.palette || next.palette),
-    colorful: Boolean((explicit && next.colorful) || prev.colorful || next.colorful),
-  };
-}
-
 function monthLikeHeaders(table) {
   const nums = numericHeaders(table);
   const monthPattern = /ocak|subat|şubat|mart|nisan|mayis|mayıs|haziran|temmuz|agustos|ağustos|eylul|eylül|ekim|kasim|kasım|aralik|aralık|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|ay\s*\d+/i;
@@ -266,18 +248,24 @@ function chartToChartInput(chart = {}, userText = "") {
   const text = normalizeToolIntentText(userText);
   const hasExplicitChartType = /pasta|pie|dilim|daire|yuvarlak|doughnut|donut|halka|cizgi|line|trend|zaman|aylik|gelisim|degisim|cubuk|bar|sutun|kolon|normal grafik|karsilastir/.test(text);
   const previousStyle = chart.style || chart.raw?.style || {};
-  const style = mergeChartStyle(previousStyle, userText);
-  const colors = Array.isArray(chart.colors) ? chart.colors : Array.isArray(chart.palette) ? chart.palette : Array.isArray(style.colors) ? style.colors : [];
-  if (!style.colors?.length && colors.length) style.colors = colors;
+  const previousColors = chart.colors || chart.palette || chart.raw?.colors || chart.raw?.palette || previousStyle.colors || [];
+  const requestedStyle = styleFromUserText(userText);
+  const mergedStyle = {
+    ...previousStyle,
+    ...requestedStyle,
+    colors: Array.isArray(requestedStyle.colors) && requestedStyle.colors.length
+      ? requestedStyle.colors
+      : (Array.isArray(previousColors) ? previousColors : []),
+    colorful: Boolean(requestedStyle.colorful || previousStyle.colorful || (Array.isArray(previousColors) && previousColors.length)),
+  };
   return {
     labels,
     values,
     chartType: hasExplicitChartType ? detectChartType(userText) : (chart.chartType || chart.type || "bar"),
     label: data?.datasets?.[0]?.label || chart.label || chart.title || "Veri",
     title: chart.title || "Grafik",
-    style,
-    colors: style.colors || colors,
-    palette: style.colors || colors,
+    style: mergedStyle,
+    colors: mergedStyle.colors,
   };
 }
 
@@ -309,26 +297,22 @@ function chartToMermaidCode(chart = {}, title = "Grafik", userText = "") {
 function chartUiFromMemory(chart = {}, title = "Grafik") {
   const data = chart.data || chart.raw?.data || null;
   if (!data?.labels?.length) return null;
-  const style = chart.style || chart.raw?.style || {};
-  const colors = chart.colors || chart.palette || style.colors || chart.raw?.colors || chart.raw?.palette || [];
   return {
     type: "chart",
     tool: "chartData",
     title: chart.title || title || "Grafik",
     success: true,
-    chartType: chart.chartType || chart.type || chart.raw?.chartType || "bar",
+    chartType: chart.chartType || chart.type || "bar",
     data,
-    style,
-    colors,
-    palette: colors,
+    style: chart.style || {},
+    colors: chart.colors || chart.palette || chart.style?.colors || [],
     raw: {
       success: true,
-      chartType: chart.chartType || chart.type || chart.raw?.chartType || "bar",
+      chartType: chart.chartType || chart.type || "bar",
       title: chart.title || title || "Grafik",
       data,
-      style,
-      colors,
-      palette: colors,
+      style: chart.style || {},
+      colors: chart.colors || chart.palette || chart.style?.colors || [],
     },
   };
 }

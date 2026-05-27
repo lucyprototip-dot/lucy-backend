@@ -491,6 +491,43 @@ function requestedMermaidWork(req) {
   return /mermaid|diyagram|flowchart|akis|sema|kutular|baglantili|bagla|akisi/.test(text);
 }
 
+
+function styleMutationText(userText = "") {
+  const q = normalizeIntentText(userText);
+  return /(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|premium|modern|canli|farkli ton|tonlarda)/.test(q);
+}
+
+function userSpecificallyReferencesChart(userText = "") {
+  const q = normalizeIntentText(userText);
+  return /grafik|chart|pasta|pie|trend|cizgi|line|cubuk|bar|sutun|yuvarlak|daire|dilim|donut|dagilim|renkli pasta|renklerini degistir|renkleri degistir|renklendir|palet|tema|stil/.test(q)
+    && !wantsMermaidFromText(q);
+}
+
+function userStyleMutationOnly(userText = "") {
+  const q = normalizeIntentText(userText);
+  if (!styleMutationText(q)) return false;
+  if (wantsPdfFromText(q) || wantsExcelFromText(q) || wantsZipFromText(q) || wantsMermaidFromText(q)) return false;
+  return !/(tablo|excel|pdf|zip|dosya|metin|yazi|yazı)/.test(q);
+}
+
+function shouldForceChartRenderer(req) {
+  const userText = latestUserIntentText(req);
+  const memory = hydrateMemoryFromRequest(req);
+  if (!memory.lastChart?.data) return false;
+  if (wantsMermaidFromText(userText)) return false;
+  return userSpecificallyReferencesChart(userText) || userStyleMutationOnly(userText);
+}
+
+function chartTitleFromPlan(userText = "", chartInput = {}, fallback = "Grafik") {
+  const q = normalizeIntentText(userText);
+  const type = chartInput.chartType || detectChartType(userText);
+  const base = String(chartInput.title || fallback || "Grafik").replace(/\s*\((Renkli|Pasta|Trend|Grafik)\)\s*$/i, "").trim() || "Grafik";
+  const prefix = /renk|renkli|renklendir|palet|tema|stil|sari|lacivert|beyaz|neon|premium/.test(q) ? "Renkli " : "";
+  if (type === "pie") return `${base.includes("Pasta") ? base : `${prefix}${base} (Pasta Grafiği)`}`.replace(/^Renkli Renkli /, "Renkli ");
+  if (type === "line") return `${base.includes("Trend") ? base : `${prefix}${base} (Trend Grafiği)`}`.replace(/^Renkli Renkli /, "Renkli ");
+  return `${prefix}${base}`.trim() || "Grafik";
+}
+
 function stripToolOnlyBlocks(answer = "") {
   return stripHtmlToolButtons(String(answer || ""))
     .replace(/```json\s*[\s\S]*?```/gi, "")
@@ -858,9 +895,6 @@ function rememberLucyWidget(memory, widget = {}) {
       chartType: widget.chartType || widget.raw?.chartType || "bar",
       data: widget.data || widget.raw?.data || null,
       title: widget.title || widget.raw?.title || "Grafik",
-      style: widget.style || widget.raw?.style || {},
-      colors: widget.colors || widget.palette || widget.raw?.colors || widget.raw?.palette || widget.style?.colors || [],
-      palette: widget.palette || widget.colors || widget.raw?.palette || widget.raw?.colors || widget.style?.colors || [],
     };
     if (chart.data?.labels?.length) {
       memory.lastChart = chart;
@@ -957,8 +991,8 @@ function rememberToolResult(req, call = {}, result = {}) {
       data: result.data || input.data || { labels: input.labels || [], datasets: [{ label: input.label || "Veri", data: input.values || [] }] },
       title: result.title || input.title || input.label || "Grafik",
       style: result.style || input.style || {},
-      colors: result.colors || result.palette || input.colors || input.palette || result.style?.colors || input.style?.colors || [],
-      palette: result.palette || result.colors || input.palette || input.colors || result.style?.colors || input.style?.colors || [],
+      colors: result.colors || result.palette || input.colors || input.style?.colors || [],
+      palette: result.palette || result.colors || input.colors || input.style?.colors || [],
     };
     memory.lastChart = chart;
     setActiveContent(memory, { type: "chart", chart, ui: chartUiFromMemory(chart, chart.title), title: chart.title, source: "chartData" });
@@ -1138,50 +1172,6 @@ function lastImageFileFromMemory(memory = {}) {
 }
 
 
-function userExplicitlyReferencesChart(userText = "") {
-  const q = normalizeIntentText(userText);
-  return /\b(grafik|chart|pasta|pie|yuvarlak|daire|dilim|donut|halka|trend|cizgi|line|bar|cubuk|sutun|ilk yaptigin grafik|onceki grafik|son grafik)\b/.test(q);
-}
-
-function userStyleOnlyMutation(userText = "") {
-  const q = normalizeIntentText(userText);
-  const hasStyle = /renk|renkli|rengarenk|rengini|renklerini|renkleri|tema|style|stil|neon|premium|siyah beyaz|sari|lacivert|beyaz|canli|farkli ton/.test(q);
-  const hasStructural = /tablo|excel|pdf|zip|dosya|yeni|ekle|cikar|çıkar|sil|hesapla/.test(q);
-  return hasStyle && !hasStructural;
-}
-
-function userSpecificallyReferencesChart(userText = "") {
-  const q = normalizeIntentText(userText);
-  // "renklerini değiştir", "renkli yap", "pasta olsun" gibi komutlar
-  // çoğunlukla son grafiğin stil/tip mutasyonudur. Tablo açıkça isteniyorsa tablo kaynağına döneriz.
-  if (/\b(tablo|excel|xlsx|satir|sutun)\b/.test(q) && !userExplicitlyReferencesChart(userText)) return false;
-  return userExplicitlyReferencesChart(userText) || /\b(renk|renkli|rengarenk|rengini|renklerini|renkleri|tema|style|stil|neon|premium|siyah beyaz|sari|lacivert|beyaz|bunu|bu|onceki|son|aynisi)\b/.test(q);
-}
-
-function userExplicitlyWantsMermaidOnly(userText = "") {
-  const q = normalizeIntentText(userText);
-  return /mermaid|diyagram|diagram|flowchart|akis|akış|sema|şema|kutular|baglantili|bagla|node|blok sema/.test(q);
-}
-
-function shouldRouteStyleMutationToMermaid(userText = "", activeContent = null, memory = {}) {
-  if (!userStyleOnlyMutation(userText)) return false;
-
-  // Grafik dili açıkça geçiyorsa renk/stil komutunu Mermaid'e kaçırma.
-  // Örn: "renklerini değiştir", "renkli pasta dedim", "trend yap" son grafiği mutasyona sokmalı.
-  if (userExplicitlyReferencesChart(userText)) return false;
-
-  // Şema/diyagram/mermaid açıkça isteniyorsa Mermaid tarafında kal.
-  if (userExplicitlyWantsMermaidOnly(userText)) return true;
-
-  const activeType = activeContent?.type || memory.activeContent?.type || "";
-  if (activeType === "chart") return false;
-  if (activeType === "mermaid") return true;
-
-  // İkisi de varsa ve kullanıcı sadece renk/stil diyorsa varsayılan güvenli hedef son chart olsun.
-  if (memory.lastChart?.data) return false;
-  return Boolean(memory.lastMermaid?.code);
-}
-
 function referencedHistoryIndex(userText = "") {
   const q = normalizeIntentText(userText);
   if (/\b(ilk|birinci|en bastaki|en baştaki)\b/.test(q)) return "first";
@@ -1261,55 +1251,6 @@ function userWantsChartRestyleOnly(userText = "") {
     && !/\b(ekle|cikar|çıkar|degistir|sil|yeni tablo|tablo yaz)\b/.test(q);
 }
 
-function chartTitleFromPlan(userText = "", chartInput = {}, fallback = "Grafik") {
-  const q = normalizeIntentText(userText);
-  const base = String(fallback || chartInput.title || chartInput.label || "Grafik")
-    .replace(/[*_`#]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 70) || "Grafik";
-  const chartType = chartInput.chartType || detectChartType(userText);
-  const style = chartInput.style || {};
-  const colorful = style.colorful || /renkli|rengarenk|renk/.test(q);
-  if (chartType === "pie") return `${base.replace(/grafiği|grafik|dağılımı/gi, "").trim()} ${colorful ? "(Renkli Pasta) 🎨" : "(Pasta Grafiği)"}`.replace(/\s+/g, " ").trim();
-  if (chartType === "line") return `${base.replace(/grafiği|grafik/gi, "").trim()} (Trend Grafiği)`.replace(/\s+/g, " ").trim();
-  return `${base}${colorful ? " (Renkli) 🎨" : ""}`.replace(/\s+/g, " ").trim();
-}
-
-function arbitrateToolCallsForIntent(toolCalls = [], req = null) {
-  const calls = Array.isArray(toolCalls) ? toolCalls.filter(Boolean) : [];
-  if (!calls.length) return calls;
-  const userText = latestUserIntentText(req);
-  const memory = hydrateMemoryFromRequest(req);
-  const wantsChart = wantsChartFromText(userText);
-  const wantsMermaid = userExplicitlyWantsMermaidOnly(userText);
-  const hasChartContext = Boolean(memory.lastChart?.data || memory.lastTable?.rows?.length || memory.activeContent?.type === "chart");
-
-  // AI/DS bazen stil komutunu Mermaid tool_call'a çeviriyor. Kullanıcı chart/pasta/trend dili kullanıyorsa
-  // ve açıkça şema/mermaid demediyse explicit Mermaid çağrısını bırakıp deterministic implicit chart path'e düş.
-  if (wantsChart && !wantsMermaid && hasChartContext) {
-    const chartCalls = calls.filter((call) => String(call.tool || "").toLowerCase() === "chartdata");
-    if (chartCalls.length) return chartCalls.slice(0, 1);
-    if (calls.some((call) => String(call.tool || "").toLowerCase() === "mermaid")) return [];
-  }
-
-  if (wantsMermaid) {
-    const mermaidCalls = calls.filter((call) => String(call.tool || "").toLowerCase() === "mermaid");
-    if (mermaidCalls.length) return mermaidCalls.slice(0, 1);
-  }
-
-  const unique = [];
-  const seen = new Set();
-  for (const call of calls) {
-    const key = `${String(call.tool || "").toLowerCase()}:${JSON.stringify(call.input || {})}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(call);
-  }
-  return unique.slice(0, 5);
-}
-
-
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
@@ -1345,7 +1286,7 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsChartFromText(userText) && !userExplicitlyWantsMermaidOnly(userText) && !shouldRouteStyleMutationToMermaid(userText, activeContent, memory)) {
+  if (wantsChartFromText(userText)) {
     const selectedChart = chartFromHistory(memory, userText);
     const selectedTable = tableFromHistory(memory, userText) || activeTable;
     const preferExistingChart = userSpecificallyReferencesChart(userText) && selectedChart?.data;
@@ -1360,7 +1301,7 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsMermaidFromText(userText) || shouldRouteStyleMutationToMermaid(userText, activeContent, memory)) {
+  if (wantsMermaidFromText(userText)) {
     const selectedTable = tableFromHistory(memory, userText) || activeTable;
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
     if (memory.lastMermaid?.code && /daha\s+(karmasik|detayli|genis|buyuk)|gelistir|ayrintili|renkli/.test(normalizeIntentText(userText)) && !selectedTable?.rows?.length && !selectedChart?.data) {
@@ -1517,10 +1458,13 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const rawToolCalls = [...explicitCalls, ...mermaidCalls];
 
   // Öncelik: explicit model tool_call -> kod tabanlı direct intent -> opsiyonel DS fallback.
-  let toolCalls = rawToolCalls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall);
-  toolCalls = arbitrateToolCallsForIntent(toolCalls, req);
+  // Ancak kullanıcı grafik/stil mutasyonu istiyorsa ve elimizde aktif grafik varsa,
+  // modelin yanlışlıkla ürettiği mermaid/text tool_call'larını bastırıp chart renderer'a döneriz.
+  let toolCalls = shouldForceChartRenderer(req)
+    ? []
+    : rawToolCalls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall);
 
-  if (!toolCalls.length && allowAnyTool) {
+  if (!toolCalls.length && (allowAnyTool || shouldForceChartRenderer(req))) {
     const implicitCalls = buildImplicitToolCalls(answer, req);
     if (implicitCalls.length) toolCalls = implicitCalls;
   }
