@@ -1195,6 +1195,56 @@ async function buildDeepSeekPlannerToolCalls(answer = "", req) {
   }
 }
 
+
+function buildToolFinalAnswer(toolResults = []) {
+  const lines = [];
+  const widgets = [];
+
+  for (const item of toolResults || []) {
+    const ui = item?.ui || normalizeToolResultForUI(item?.tool, item?.result || {}, item?.input || {});
+    const tool = String(item?.tool || ui.tool || "tool");
+
+    if (!ui.success) {
+      lines.push(`❌ ${ui.title || tool}: ${ui.text || ui.raw?.message || ui.raw?.error || "Tool çalışmadı."}`);
+      widgets.push(widgetFence(ui));
+      continue;
+    }
+
+    if (ui.downloadUrl) {
+      const fileName = ui.filename || ui.title || "dosya";
+      lines.push(`✅ ${fileName} hazırlandı. [Dosya: ${fileName}](${ui.downloadUrl})`);
+      widgets.push(widgetFence(ui));
+      continue;
+    }
+
+    if (ui.type === "chart") {
+      lines.push(`✅ ${ui.title || "Grafik"} hazırlandı.`);
+      widgets.push(widgetFence(ui));
+      continue;
+    }
+
+    if (ui.type === "mermaid") {
+      lines.push(`✅ ${ui.title || "Diyagram"} hazırlandı.`);
+      if (ui.code) lines.push(`\n\`\`\`mermaid\n${ui.code}\n\`\`\``);
+      widgets.push(widgetFence(ui));
+      continue;
+    }
+
+    if (ui.text) {
+      lines.push(ui.text);
+      widgets.push(widgetFence(ui));
+      continue;
+    }
+
+    lines.push(summarizeToolResultLine(tool, ui));
+    widgets.push(widgetFence(ui));
+  }
+
+  const cleanLines = lines.filter(Boolean).join("\n").trim();
+  const cleanWidgets = widgets.filter(Boolean).join("");
+  return `${cleanLines}${cleanWidgets}`.trim();
+}
+
 async function executeToolCallsFromAnswer(answer = "", req) {
   hydrateMemoryFromRequest(req);
   const explicitCalls = extractToolCallsFromAnswer(answer);
@@ -1250,7 +1300,8 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     });
   }
 
-  return { toolCalls, toolResults, finalAnswer: "" };
+  const finalAnswer = buildToolFinalAnswer(toolResults);
+  return { toolCalls, toolResults, finalAnswer };
 }
 
 module.exports = {
