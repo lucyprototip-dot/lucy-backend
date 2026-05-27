@@ -87,17 +87,19 @@ module.exports = {
     }
 
     const entries = [];
+    const skippedFiles = [];
     files.forEach((file, index) => {
       if (!file || typeof file !== "object") return;
       const filename = safeName(file.filename || file.name || `lucy-file-${index + 1}.txt`);
       const lowerName = filename.toLowerCase();
-      if (!input.allowNestedZip && lowerName.endsWith('.zip')) return;
+      if (!input.allowNestedZip && lowerName.endsWith('.zip')) { skippedFiles.push({ name: filename, reason: 'nested_zip_blocked' }); return; }
 
       if (file.storedFilename || file.generatedFile) {
         const full = safeResolveGenerated(file.storedFilename || file.generatedFile);
         if (full && fs.existsSync(full) && fs.statSync(full).isFile()) {
           const stat = fs.statSync(full);
           if (stat.size > 0) entries.push({ name: filename || path.basename(full), data: fs.readFileSync(full) });
+          else skippedFiles.push({ name: filename || path.basename(full), reason: 'empty_file' });
         }
         return;
       }
@@ -113,7 +115,7 @@ module.exports = {
     });
 
     if (!entries.length) {
-      return { success: false, error: "zip_empty", message: "ZIP için geçerli dosya bulunamadı." };
+      return { success: false, error: "zip_empty", message: "ZIP için geçerli dosya bulunamadı.", skippedFiles };
     }
 
     const buffer = createZip(entries);
@@ -126,7 +128,8 @@ module.exports = {
       base64: buffer.toString("base64"),
       count: entries.length,
       entries: entries.map((entry) => entry.name),
-      message: `${entries.length} dosya ZIP içine eklendi.`,
+      skippedFiles,
+      message: `${entries.length} dosya ZIP içine eklendi.${skippedFiles.length ? ` ${skippedFiles.length} dosya atlandı.` : ""}`,
     };
   },
 };

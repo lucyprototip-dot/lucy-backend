@@ -242,6 +242,8 @@ const TEXT_EXTENSIONS = new Set([
   ".cs", ".php", ".rb", ".go", ".rs", ".sql", ".sh", ".bat", ".ps1",
 ]);
 
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"]);
+
 const DEEPSEEK_MODEL_FAST = process.env.DEEPSEEK_MODEL_FAST || "deepseek-v4-flash";
 const DEEPSEEK_MODEL_THINKING = process.env.DEEPSEEK_MODEL_THINKING || "deepseek-v4-flash";
 const DEEPSEEK_MODEL_PRO = process.env.DEEPSEEK_MODEL_PRO || "deepseek-v4-pro";
@@ -458,6 +460,17 @@ async function extractTextFromFile(filePath, originalName) {
   const ext = path.extname(originalName).toLowerCase();
 
   if (TEXT_EXTENSIONS.has(ext)) return limitText(fs.readFileSync(filePath, "utf8"));
+
+  if (IMAGE_EXTENSIONS.has(ext)) {
+    const ocrResult = await executeLucyTool("ocr", {
+      base64: fs.readFileSync(filePath).toString("base64"),
+      filename: originalName,
+      lang: process.env.LUCY_OCR_LANG || "tur+eng",
+    }, numberEnv("LUCY_OCR_TIMEOUT_MS", 60000));
+
+    if (ocrResult?.success && normalizeText(ocrResult.text)) return limitText(ocrResult.text);
+    throw new Error(ocrResult?.message || "Görsel OCR ile okunamadı.");
+  }
 
   if (ext === ".pdf") {
     const buffer = fs.readFileSync(filePath);
@@ -1345,7 +1358,7 @@ app.post("/api/tools/execute", async (req, res) => {
 app.post("/api/tools/:name", async (req, res) => {
   const timeoutMs = Number(req.body?.timeoutMs || 30000);
   const input = req.body?.input || req.body?.args || req.body || {};
-  const result = await executeLucyTool(req.params.name, input, timeoutMs);
+  const result = persistToolFileResult(await executeLucyTool(req.params.name, input, timeoutMs), req);
   const status = result.success === false && result.error === "tool_not_found" ? 404 : 200;
   res.status(status).json(result);
 });

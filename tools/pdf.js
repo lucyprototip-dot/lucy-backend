@@ -9,6 +9,11 @@ function normalizePdfText(value = "") {
     .trim();
 }
 
+function normalizeCurrencyForPdf(value = "") {
+  // PDF fontlarında ₺ glyph’i bazı hostlarda düşebiliyor. Görünür ve aranabilir çıktı için TL kullan.
+  return String(value || "").replace(/₺/g, "TL");
+}
+
 function escapeHtml(value = "") {
   return String(value || "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;",
@@ -173,7 +178,7 @@ async function puppeteerPdf({ title, text }) {
   try {
     browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox"] });
     const page = await browser.newPage();
-    const body = markdownToHtml(text);
+    const body = markdownToHtml(normalizeCurrencyForPdf(text));
     const html = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><style>
       @page{size:A4;margin:42px}
       *{box-sizing:border-box}
@@ -184,7 +189,7 @@ async function puppeteerPdf({ title, text }) {
       table{border-collapse:collapse;width:100%;margin:14px 0 18px;font-size:12.5px;page-break-inside:auto;border:1px solid #94a3b8}
       tr{page-break-inside:avoid;page-break-after:auto}th,td{border:1px solid #94a3b8;padding:8px 9px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#111827;color:#fff;font-weight:800}tbody tr:nth-child(even) td{background:#f8fafc}
       a{color:#075985;text-decoration:none}.footer{margin-top:28px;font-size:10px;color:#64748b;border-top:1px solid #e5e7eb;padding-top:8px}
-    </style></head><body><h1>${escapeHtml(normalizePdfText(title))}</h1><main>${body}</main><div class="footer">LUCY tarafından hazırlandı</div></body></html>`;
+    </style></head><body><h1>${escapeHtml(normalizePdfText(normalizeCurrencyForPdf(title)))}</h1><main>${body}</main><div class="footer">LUCY tarafından hazırlandı</div></body></html>`;
     await page.setContent(html, { waitUntil: "networkidle0" });
     return await page.pdf({ format: "A4", printBackground: true, margin: { top: "42px", right: "42px", bottom: "42px", left: "42px" } });
   } catch {
@@ -213,8 +218,8 @@ function pdfkitPdf({ title, text }) {
     if (fontPath) { doc.registerFont("LucyUnicode", fontPath); doc.font("LucyUnicode"); }
     else doc.font("Helvetica");
 
-    const safeTitle = degradeEmojiForPdfKit(title);
-    const safeText = degradeEmojiForPdfKit(text).split(/\n/).map(renderPlainMarkdownLine).join("\n");
+    const safeTitle = degradeEmojiForPdfKit(normalizeCurrencyForPdf(title));
+    const safeText = degradeEmojiForPdfKit(normalizeCurrencyForPdf(text)).split(/\n/).map(renderPlainMarkdownLine).join("\n");
 
     doc.fontSize(20).text(safeTitle, { underline: true });
     doc.moveDown(1.2);

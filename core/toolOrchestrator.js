@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const dotenv = require("dotenv");
 const { normalizeToolIntentText, detectChartType, likelyToolIntent } = require("./intentNormalizer");
 const { planToolCallsWithDeepSeek } = require("./toolPlanner");
@@ -225,7 +226,8 @@ function safeFileName(name = "lucy-output.bin") {
     .replace(/-+/g, "-")
     .slice(0, 80) || "lucy-output";
   const ext = (parsed.ext || ".bin").replace(/[^a-zA-Z0-9.]/g, "").slice(0, 12) || ".bin";
-  return `${Date.now()}-${base}${ext}`;
+  const nonce = crypto.randomBytes(4).toString("hex");
+  return `${Date.now()}-${nonce}-${base}${ext}`;
 }
 
 function persistToolFileResult(result = {}, req) {
@@ -420,11 +422,35 @@ function enrichToolCallInput(call, req) {
     input.content = memory.lastTable?.rows?.length ? tableToMarkdown(memory.lastTable) : memory.lastText;
   }
 
+  if (toolName === "ocr") {
+    const hasImageInput = input.base64 || input.imageBase64 || input.fileBase64 || input.dataUrl || input.imageDataUrl || input.storedFilename || input.generatedFile;
+    if (!hasImageInput) {
+      const requestImage = extractImageBase64FromRequest(req);
+      if (requestImage?.base64) {
+        input.base64 = requestImage.base64;
+        input.mimeType = requestImage.mimeType || input.mimeType;
+        input.filename = requestImage.filename || input.filename;
+      } else {
+        const img = lastImageFileFromMemory(memory);
+        if (img?.storedFilename) {
+          input.storedFilename = img.storedFilename;
+          input.filename = img.filename || img.storedFilename;
+          input.mimeType = img.mimeType || img.contentType || input.mimeType;
+        }
+      }
+    }
+    if (!input.lang && !input.language) input.lang = "tur+eng";
+  }
+
   if (toolName === "zip") {
     const hasFiles = Array.isArray(input.files) && input.files.length > 0;
     if (!hasFiles) {
-      if (memory.lastFile?.storedFilename && !String(memory.lastFile.filename || memory.lastFile.storedFilename).toLowerCase().endsWith(".zip")) {
-        input.files = [{ storedFilename: memory.lastFile.storedFilename, filename: memory.lastFile.filename || memory.lastFile.storedFilename }];
+      const memoryFiles = [memory.lastFile, memory.lastPdf, memory.lastExcel]
+        .filter(Boolean)
+        .filter((file) => file?.storedFilename && !String(file.filename || file.storedFilename || "").toLowerCase().endsWith(".zip"));
+      const fromMemory = memoryFiles[0];
+      if (fromMemory?.storedFilename) {
+        input.files = [{ storedFilename: fromMemory.storedFilename, filename: fromMemory.filename || fromMemory.storedFilename }];
       } else {
         const refs = collectConversationGeneratedFileRefs(req).filter((ref) => !String(ref.filename || ref.storedFilename || "").toLowerCase().endsWith(".zip"));
         const lastRef = refs[refs.length - 1];
@@ -433,9 +459,6 @@ function enrichToolCallInput(call, req) {
             storedFilename: lastRef.storedFilename,
             filename: lastRef.filename || lastRef.storedFilename,
           }];
-        } else {
-          const latest = latestGeneratedFileFromDisk();
-          if (latest?.name && !latest.name.toLowerCase().endsWith(".zip")) input.files = [{ storedFilename: latest.name, filename: latest.name }];
         }
       }
     }
@@ -520,7 +543,56 @@ function isUsableToolCall(call = {}) {
   if (tool === "excel") return Boolean((Array.isArray(input.rows) && input.rows.length) || String(input.text || input.content || input.value || "").trim() || (Array.isArray(input.labels) && input.labels.length));
   if (tool === "pdf") return Boolean(String(input.text || input.content || input.value || "").trim());
   if (tool === "qr") return Boolean(String(input.text || input.url || input.value || "").trim());
+  if (tool === "ocr") return Boolean(String(input.base64 || input.imageBase64 || input.fileBase64 || input.dataUrl || input.imageDataUrl || input.storedFilename || input.generatedFile || "").trim());
   return true;
+}
+
+
+function validateToolInput(call = {}, req = null) {
+  const tool = String(call.tool || "").toLowerCase();
+  const input = call.input && typeof call.input === "object" ? call.input : {};
+  const memory = hydrateMemoryFromRequest(req);
+  const fail = (message, code = "invalid_tool_input") => ({ ok: false, code, message });
+
+  if (!tool || !getLoadedTool(tool)) return fail(`Tool bulunamadı: ${tool || "boş"}`, "tool_not_found");
+
+  if (tool === "zip") {
+    const files = Array.isArray(input.files) ? input.files : [];
+    const validFiles = files.filter((file) => file && typeof file === "object" && (file.storedFilename || file.generatedFile || file.base64 || String(file.content || file.text || "").trim()));
+    if (!validFiles.length) return fail("ZIP oluşturabilmem için önce üretilmiş gerçek bir dosya gerekli aşkım.", "zip_source_required");
+    const nestedZip = validFiles.find((file) => String(file.filename || file.name || file.storedFilename || file.generatedFile || "").toLowerCase().endsWith(".zip"));
+    if (nestedZip && !input.allowNestedZip) return fail("ZIP dosyasını tekrar ZIP içine koymuyorum aşkım. Önce PDF/XLSX gibi gerçek bir dosya seçmeliyim.", "nested_zip_blocked");
+  }
+
+  if (tool === "chartdata") {
+    const labels = input.labels || input.data?.labels;
+    const values = input.values || input.data?.datasets?.[0]?.data;
+    if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
+      return fail("Grafik için önce sayısal tablo/veri gerekli aşkım.", "chart_source_required");
+    }
+  }
+
+  if (tool === "mermaid") {
+    if (!String(input.code || input.mermaid || "").trim()) return fail("Diyagram için akış kodu veya tablo kaynağı gerekli aşkım.", "mermaid_source_required");
+  }
+
+  if (tool === "excel") {
+    const hasTable = Array.isArray(input.rows) && input.rows.length;
+    const hasText = String(input.text || input.content || input.value || "").trim();
+    if (!hasTable && !hasText && !memory.lastTable?.rows?.length) return fail("Excel için önce tablo/veri gerekli aşkım.", "excel_source_required");
+  }
+
+  if (tool === "pdf") {
+    const hasText = String(input.text || input.content || input.value || "").trim();
+    if (!hasText && !memory.lastTable?.rows?.length && !memory.lastText) return fail("PDF için önce metin, tablo veya rapor içeriği gerekli aşkım.", "pdf_source_required");
+  }
+
+  if (tool === "ocr") {
+    const hasImage = input.base64 || input.imageBase64 || input.fileBase64 || input.dataUrl || input.imageDataUrl || input.storedFilename || input.generatedFile;
+    if (!hasImage) return fail("OCR için önce bir görsel yüklemem gerekiyor aşkım.", "ocr_image_required");
+  }
+
+  return { ok: true };
 }
 
 
@@ -556,6 +628,11 @@ function wantsDocumentFromText(text = "") {
 function wantsQrFromText(text = "") {
   const q = normalizeIntentText(text);
   return /\bqr\b|karekod|qr kod/.test(q);
+}
+
+function wantsOcrFromText(text = "") {
+  const q = normalizeIntentText(text);
+  return /\bocr\b|gorselden yazi|gorseldeki yazi|gorseldeki metin|resimdeki yazi|resimdeki metin|fotograftaki yazi|fotograftaki metin|goruntu metni|metni oku|yaziyi oku|yazıyı oku|resmi oku|gorseli oku/.test(q);
 }
 
 function wantsMermaidFromText(text = "") {
@@ -730,6 +807,26 @@ function tableToMarkdown(table) {
     `| ${headers.map(() => "---").join(" | ")} |`,
     ...table.rows.map((row) => `| ${headers.map((header) => String(row?.[header] ?? "").replace(/\|/g, "\\|")).join(" | ")} |`),
   ];
+  return lines.join("\n");
+}
+
+function tableToMermaidCode(table, title = "LUCY Tablosu") {
+  if (!table?.headers?.length || !table?.rows?.length) return "";
+  const headers = table.headers;
+  const labelKey = headers[0];
+  const valueKey = headers.find((header) => table.rows.some((row) => numberFromCell(row?.[header]) !== null)) || headers[1] || headers[0];
+  const cleanNode = (value = "") => String(value || "")
+    .replace(/[\[\]{}()<>|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 52) || "Değer";
+  const root = cleanNode(title);
+  const lines = ["flowchart TD", `A["${root}"]`];
+  table.rows.slice(0, 16).forEach((row, index) => {
+    const label = cleanNode(row?.[labelKey] ?? `Satır ${index + 1}`);
+    const value = cleanNode(row?.[valueKey] ?? "");
+    lines.push(`A --> N${index + 1}["${label}${value ? `\\n${value}` : ""}"]`);
+  });
   return lines.join("\n");
 }
 
@@ -937,6 +1034,39 @@ function safeOutputStem(value = "lucy-cikti") {
     .slice(0, 54) || "lucy-cikti";
 }
 
+
+function isImageFileName(name = "") {
+  return /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(String(name || ""));
+}
+
+function extractImageBase64FromRequest(req) {
+  const body = req?.body || {};
+  const direct = body.base64 || body.imageBase64 || body.fileBase64 || body.dataUrl || body.imageDataUrl;
+  if (direct) return { base64: direct, mimeType: body.mimeType || body.contentType || "image/png" };
+
+  const candidates = [];
+  if (Array.isArray(body.files)) candidates.push(...body.files);
+  if (Array.isArray(body.attachments)) candidates.push(...body.attachments);
+  if (body.file && typeof body.file === "object") candidates.push(body.file);
+  if (body.image && typeof body.image === "object") candidates.push(body.image);
+
+  for (const file of candidates) {
+    const raw = file?.base64 || file?.imageBase64 || file?.dataUrl || file?.content;
+    const mime = String(file?.mimeType || file?.type || file?.contentType || "");
+    const name = String(file?.name || file?.filename || file?.originalName || "");
+    if (raw && (mime.startsWith("image/") || isImageFileName(name))) {
+      return { base64: raw, mimeType: mime || "image/png", filename: name };
+    }
+  }
+
+  return null;
+}
+
+function lastImageFileFromMemory(memory = {}) {
+  const candidates = [memory.lastFile, memory.lastQr, memory.lastPdf, memory.lastExcel].filter(Boolean);
+  return candidates.find((file) => isImageFileName(file?.storedFilename || file?.filename || "")) || null;
+}
+
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
@@ -961,16 +1091,28 @@ function buildImplicitToolCalls(answer = "", req) {
     if (url) calls.push({ tool: "webFetch", input: { url } });
   }
 
+  if (wantsOcrFromText(userText)) {
+    const requestImage = extractImageBase64FromRequest(req);
+    if (requestImage?.base64) {
+      calls.push({ tool: "ocr", input: { base64: requestImage.base64, mimeType: requestImage.mimeType, filename: requestImage.filename, lang: "tur+eng" } });
+    } else {
+      const img = lastImageFileFromMemory(memory);
+      if (img?.storedFilename) calls.push({ tool: "ocr", input: { storedFilename: img.storedFilename, filename: img.filename || img.storedFilename, lang: "tur+eng" } });
+    }
+  }
+
   if (wantsChartFromText(userText)) {
     const chartInput = tableToChartInput(activeTable, userText);
     if (chartInput) calls.push({ tool: "chartData", input: { ...chartInput, title } });
   }
 
   if (wantsMermaidFromText(userText)) {
-    if (memory.lastMermaid?.code && isOnlyTransformCommand(userText)) {
+    if (memory.lastMermaid?.code && /daha\s+(karmasik|detayli|genis|buyuk)|gelistir|ayrintili/.test(normalizeIntentText(userText))) {
       calls.push({ tool: "mermaid", input: { code: memory.lastMermaid.code, title } });
-    } else if (source && !isOnlyTransformCommand(userText)) {
-      // Model çoğu zaman explicit Mermaid tool_call üretir. Burada yalnızca ham mermaid blok varsa yakala.
+    } else if (activeTable?.rows?.length) {
+      const code = tableToMermaidCode(activeTable, title || "LUCY Diyagramı");
+      if (code) calls.push({ tool: "mermaid", input: { code, title: title || "LUCY Diyagramı" } });
+    } else if (source) {
       const code = String(source).match(/```mermaid\s*([\s\S]*?)```/i)?.[1]?.trim();
       if (code) calls.push({ tool: "mermaid", input: { code, title } });
     }
@@ -1007,15 +1149,30 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsZipFromText(userText)) {
-    const last = memory.lastFile;
-    const files = last?.storedFilename ? [{ storedFilename: last.storedFilename, filename: last.filename || last.storedFilename }] : undefined;
+    const fileCandidates = [memory.lastFile, memory.lastPdf, memory.lastExcel, memory.lastDocument]
+      .filter(Boolean)
+      .filter((file) => file?.storedFilename && !String(file.filename || file.storedFilename || "").toLowerCase().endsWith(".zip"));
+    const last = fileCandidates[0];
+    const refs = collectConversationGeneratedFileRefs(req)
+      .filter((ref) => ref?.storedFilename && !String(ref.filename || ref.storedFilename || "").toLowerCase().endsWith(".zip"));
+    const ref = refs[refs.length - 1];
+    const chosen = last || ref || null;
+    const files = chosen?.storedFilename ? [{ storedFilename: chosen.storedFilename, filename: chosen.filename || chosen.storedFilename }] : undefined;
     calls.push({ tool: "zip", input: { filename: `${stem || "lucy-dosyalari"}.zip`, ...(files ? { files } : {}) } });
   }
 
   return calls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall).slice(0, 5);
 }
 
+function deepSeekPlannerEnabled() {
+  return /^(1|true|yes|on)$/i.test(envValue("LUCY_DS_TOOL_PLANNER_ENABLED"));
+}
+
 async function buildDeepSeekPlannerToolCalls(answer = "", req) {
+  // DS planner artık ana sürücü değil; yalnızca isteğe bağlı fallback.
+  // Stabil ve hızlı path: normalize -> direct intent -> validate -> tool.
+  if (!deepSeekPlannerEnabled()) return [];
+
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
 
@@ -1033,7 +1190,7 @@ async function buildDeepSeekPlannerToolCalls(answer = "", req) {
       .filter(isUsableToolCall)
       .slice(0, 5);
   } catch (error) {
-    console.warn("Lucy DS tool planner devre dışı/fallback:", error.message);
+    console.warn("Lucy DS tool planner fallback devre dışı:", error.message);
     return [];
   }
 }
@@ -1045,39 +1202,41 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const allowAnyTool = requestedToolWork(req);
   const mermaidCalls = explicitCalls.length || !allowMermaid ? [] : extractMermaidBlocksFromAnswer(answer);
   const rawToolCalls = [...explicitCalls, ...mermaidCalls];
+
+  // Öncelik: explicit model tool_call -> kod tabanlı direct intent -> opsiyonel DS fallback.
   let toolCalls = rawToolCalls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall);
 
-  if (!toolCalls.length) {
-    const plannerCalls = allowAnyTool ? await buildDeepSeekPlannerToolCalls(answer, req) : [];
-    const implicitCalls = plannerCalls.length ? [] : (allowAnyTool ? buildImplicitToolCalls(answer, req) : []);
-    if (plannerCalls.length) {
-      toolCalls = plannerCalls;
-    } else if (implicitCalls.length) {
-      toolCalls = implicitCalls;
-    } else {
-      const cleaned = sanitizeNormalAnswer(answer, req);
-      if (cleaned) rememberText(getStoredToolMemory(req), cleaned);
-      return {
-        toolCalls: [],
-        toolResults: [],
-        finalAnswer: cleaned || (allowAnyTool ? missingToolContextMessage(req) : "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙"),
-      };
-    }
+  if (!toolCalls.length && allowAnyTool) {
+    const implicitCalls = buildImplicitToolCalls(answer, req);
+    if (implicitCalls.length) toolCalls = implicitCalls;
   }
 
-  if (!allowAnyTool) {
-    const cleaned = stripToolOnlyBlocks(answer);
+  if (!toolCalls.length && allowAnyTool && deepSeekPlannerEnabled()) {
+    const plannerCalls = await buildDeepSeekPlannerToolCalls(answer, req);
+    if (plannerCalls.length) toolCalls = plannerCalls;
+  }
+
+  if (!toolCalls.length) {
+    const cleaned = sanitizeNormalAnswer(answer, req);
     if (cleaned) rememberText(getStoredToolMemory(req), cleaned);
     return {
       toolCalls: [],
       toolResults: [],
-      finalAnswer: cleaned || "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙",
+      finalAnswer: cleaned || (allowAnyTool ? missingToolContextMessage(req) : "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙"),
     };
   }
 
   const toolResults = [];
 
   for (const call of toolCalls) {
+    const validation = validateToolInput(call, req);
+    if (!validation.ok) {
+      const failed = { success: false, error: validation.code, message: validation.message };
+      const ui = normalizeToolResultForUI(call.tool, failed, call.input);
+      toolResults.push({ tool: call.tool, input: call.input, result: failed, ui });
+      continue;
+    }
+
     const rawResult = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
     const persistedResult = persistToolFileResult(rawResult, req);
     rememberToolResult(req, call, persistedResult);
