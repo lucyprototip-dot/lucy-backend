@@ -132,6 +132,28 @@ function stripCodeFence(text = "") {
     .trim();
 }
 
+
+function decodeHtmlEntities(value = "") {
+  return String(value || "")
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&#x22;/gi, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function stripHtmlToolButtons(text = "") {
+  return String(text || "")
+    .replace(/<button\b[^>]*\bdata-tool\s*=\s*(?:"[^"]*"|'[^']*')[\s\S]*?<\/button>/gi, "")
+    .replace(/<button\b[^>]*\bdata-tool\s*=\s*(?:"[^"]*"|'[^']*')[^>]*\/?>/gi, "")
+    .replace(/<lucy-tool\b[\s\S]*?<\/lucy-tool>/gi, "")
+    .replace(/<lucy-widget\b[\s\S]*?<\/lucy-widget>/gi, "");
+}
+
 function extractBalancedJsonBlocks(text = "") {
   const source = String(text || "");
   const blocks = [];
@@ -237,6 +259,41 @@ function extractToolCallsFromAnswer(answer = "") {
     unique.push(call);
   }
 
+  return unique.slice(0, 5);
+}
+
+
+function extractToolCallsFromHtmlButtons(answer = "") {
+  const source = String(answer || "");
+  const calls = [];
+  const buttonRegex = /<button\b([^>]*)\bdata-tool\s*=\s*("[^"]*"|'[^']*')([^>]*)>(?:[\s\S]*?<\/button>)?/gi;
+
+  for (const match of source.matchAll(buttonRegex)) {
+    const attrs = `${match[1] || ""} data-tool=${match[2] || ""} ${match[3] || ""}`;
+    const toolRaw = decodeHtmlEntities(String(match[2] || "").replace(/^['"]|['"]$/g, "")).trim();
+    if (!toolRaw) continue;
+
+    let input = {};
+    const paramsMatch = attrs.match(/\bdata-params\s*=\s*("[\s\S]*?"|'[\s\S]*?')/i);
+    const inputMatch = attrs.match(/\bdata-input\s*=\s*("[\s\S]*?"|'[\s\S]*?')/i);
+    const rawParams = paramsMatch?.[1] || inputMatch?.[1] || "";
+    if (rawParams) {
+      const decoded = decodeHtmlEntities(String(rawParams).replace(/^['"]|['"]$/g, "")).trim();
+      const parsed = safeJsonParse(decoded);
+      if (parsed && typeof parsed === "object") input = parsed;
+    }
+
+    calls.push({ tool: toolRaw, input });
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for (const call of calls) {
+    const key = `${call.tool}:${JSON.stringify(call.input)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(call);
+  }
   return unique.slice(0, 5);
 }
 
@@ -524,7 +581,7 @@ function requestedMermaidWork(req) {
 }
 
 function stripToolOnlyBlocks(answer = "") {
-  return String(answer || "")
+  return stripHtmlToolButtons(String(answer || ""))
     .replace(/```json\s*[\s\S]*?```/gi, "")
     .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
     .replace(/```mermaid\s*[\s\S]*?```/gi, "")
@@ -534,7 +591,7 @@ function stripToolOnlyBlocks(answer = "") {
 
 
 function sanitizeNormalAnswer(answer = "", req = null) {
-  let text = String(answer || "");
+  let text = stripHtmlToolButtons(String(answer || ""));
 
   // Normal sohbetlerde model bazen önceki tool JSON'undan kalan kapanış parantezlerini veya
   // yarım tool bloklarını döndürebiliyor. Kullanıcıya asla ham JSON/parantez göstermeyelim.
@@ -650,7 +707,7 @@ function wantsZipFromText(text = "") {
 
 function wantsChartFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /grafik|chart|pasta grafik|cizgi grafik|bar grafik|sutun grafik|doughnut|cizelge/.test(q);
+  return /grafik|chart|pasta grafik|pasta olarak|pasta yap|pie chart|cizgi grafik|bar grafik|sutun grafik|doughnut|cizelge/.test(q);
 }
 
 function wantsDocumentFromText(text = "") {
@@ -718,7 +775,7 @@ function isOnlyTransformCommand(text = "") {
 }
 
 function stripToolNoise(text = "") {
-  return String(text || "")
+  return stripHtmlToolButtons(String(text || ""))
     .replace(/```json\s*[\s\S]*?```/gi, "")
     .replace(/```lucy-widget\s*[\s\S]*?```/gi, "")
     .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
@@ -1441,8 +1498,7 @@ function buildToolFinalAnswer(toolResults = []) {
     }
 
     if (ui.downloadUrl) {
-      const fileName = ui.filename || ui.title || "dosya";
-      lines.push(`✅ ${fileName} hazırlandı. [Dosya: ${fileName}](${ui.downloadUrl})`);
+      lines.push("✅ İndirme hazırlandı. Aşağıdan indirebilirsin.");
       widgets.push(widgetFence(ui));
       continue;
     }
@@ -1477,7 +1533,10 @@ function buildToolFinalAnswer(toolResults = []) {
 
 async function executeToolCallsFromAnswer(answer = "", req) {
   hydrateMemoryFromRequest(req);
-  const explicitCalls = extractToolCallsFromAnswer(answer);
+  const explicitCalls = [
+    ...extractToolCallsFromAnswer(answer),
+    ...extractToolCallsFromHtmlButtons(answer),
+  ];
   const allowMermaid = requestedMermaidWork(req);
   const allowAnyTool = requestedToolWork(req);
   const mermaidCalls = explicitCalls.length || !allowMermaid ? [] : extractMermaidBlocksFromAnswer(answer);
