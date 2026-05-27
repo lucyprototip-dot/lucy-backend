@@ -630,6 +630,40 @@ function validateToolInput(call = {}, req = null) {
     if (!hasImage) return fail("OCR için önce bir görsel yüklemem gerekiyor aşkım.", "ocr_image_required");
   }
 
+  // Mesajlaşma araçları için konfigürasyon kontrolü
+  if (tool === "mail") {
+    const hasSmtp = Boolean(
+      (process.env.SMTP_HOST || process.env.MAIL_HOST) &&
+      (process.env.SMTP_USER || process.env.MAIL_USER) &&
+      (process.env.SMTP_PASS || process.env.MAIL_PASS)
+    );
+    if (!hasSmtp) return fail(
+      "Mail gönderebilmem için Railway/ortam değişkenlerinde SMTP_HOST, SMTP_USER ve SMTP_PASS ayarlanmalı. Şu an mail yapılandırması yok.",
+      "mail_config_required"
+    );
+    const to = String(input.to || input.recipient || "").trim();
+    if (!to) return fail("Mail için alıcı adresi (to) gerekli.", "mail_to_required");
+  }
+
+  if (tool === "whatsapp") {
+    const hasConfig = Boolean(
+      (process.env.WHATSAPP_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN) &&
+      process.env.WHATSAPP_PHONE_NUMBER_ID
+    );
+    if (!hasConfig) return fail(
+      "WhatsApp mesajı gönderebilmem için WHATSAPP_TOKEN ve WHATSAPP_PHONE_NUMBER_ID ortam değişkenleri gerekli.",
+      "whatsapp_config_required"
+    );
+  }
+
+  if (tool === "telegram") {
+    const hasConfig = Boolean(process.env.TELEGRAM_BOT_TOKEN);
+    if (!hasConfig) return fail(
+      "Telegram mesajı gönderebilmem için TELEGRAM_BOT_TOKEN ortam değişkeni gerekli.",
+      "telegram_config_required"
+    );
+  }
+
   return { ok: true };
 }
 
@@ -1263,8 +1297,22 @@ function buildImplicitToolCalls(answer = "", req) {
   const calls = [];
 
   if (wantsCalculatorFromText(userText) && !wantsExcelFromText(userText) && !wantsPdfFromText(userText)) {
-    const expression = String(userText || "").replace(/hesapla|hesap|calculator/gi, "").trim();
-    if (/[0-9]/.test(expression)) calls.push({ tool: "calculator", input: { expression } });
+    // Turkce matematik kelimelerini sembollere cevir
+    let expression = String(userText || "")
+      .replace(/hesaplayin|hesapla|calculator|matematik|kac eder|sonucu ne|toplami|carpimi|bolumu/gi, "")
+      .replace(/bolu|bolü/gi, "/")
+      .replace(/carpi|kere|kat/gi, "*")
+      .replace(/arti|topla/gi, "+")
+      .replace(/eksi|cikar/gi, "-")
+      .replace(/[^0-9+\-*/.()%,\s]/g, " ")
+      .replace(/,/g, ".")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^[+\-*/.]+|[+\-*/.]+$/g, "")
+      .trim();
+    if (/[0-9]/.test(expression) && expression.length > 0) {
+      calls.push({ tool: "calculator", input: { expression } });
+    }
   }
 
   if (wantsTimeFromText(userText) && !calls.length) {
@@ -1301,7 +1349,8 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsMermaidFromText(userText)) {
+  if (wantsMermaidFromText(userText) && !wantsChartFromText(userText)) {
+    // Aynı mesajda hem grafik hem diyagram istenirse grafik öncelikli; mermaid ayrıca çalışmaz
     const selectedTable = tableFromHistory(memory, userText) || activeTable;
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
     if (memory.lastMermaid?.code && /daha\s+(karmasik|detayli|genis|buyuk)|gelistir|ayrintili|renkli/.test(normalizeIntentText(userText)) && !selectedTable?.rows?.length && !selectedChart?.data) {
@@ -1368,7 +1417,9 @@ function buildImplicitToolCalls(answer = "", req) {
 }
 
 function deepSeekPlannerEnabled() {
-  return /^(1|true|yes|on)$/i.test(envValue("LUCY_DS_TOOL_PLANNER_ENABLED"));
+  // LUCY_DS_TOOL_PLANNER_ENABLED VEYA LUCY_DS_TOOL_PLANNER env var'larından birini kontrol et
+  const flag = envValue("LUCY_DS_TOOL_PLANNER_ENABLED") || envValue("LUCY_DS_TOOL_PLANNER");
+  return /^(1|true|yes|on|acik|aktif)$/i.test(flag);
 }
 
 async function buildDeepSeekPlannerToolCalls(answer = "", req) {
@@ -1408,7 +1459,15 @@ function buildToolFinalAnswer(toolResults = []) {
     const tool = String(item?.tool || ui.tool || "tool");
 
     if (!ui.success) {
-      lines.push(`❌ ${ui.title || tool}: ${ui.text || ui.raw?.message || ui.raw?.error || "Tool çalışmadı."}`);
+      const errorCode = ui.raw?.error || ui.raw?.raw?.error || "";
+      const errorMsg = ui.text || ui.raw?.message || ui.raw?.raw?.message || "Tool çalışmadı.";
+      // Konfigürasyon gerektiren hatalar için daha açıklayıcı mesaj
+      const configErrors = ["mail_config_required", "whatsapp_config_required", "telegram_config_required"];
+      if (configErrors.includes(errorCode)) {
+        lines.push(`⚙️ ${ui.title || tool}: ${errorMsg}`);
+      } else {
+        lines.push(`❌ ${ui.title || tool}: ${errorMsg}`);
+      }
       widgets.push(widgetFence(ui));
       continue;
     }

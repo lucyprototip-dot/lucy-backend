@@ -279,28 +279,43 @@ function buildSystemPrompt(body = {}) {
   ].join("\n"));
 
     if (listLoadedTools().length) {
+    const toolList = listLoadedTools().map((tool) => tool.name).join(", ");
     parts.push([
-      "LUCY TOOL ENGINE AKTIF:",
-      "Gerçek dosya, PDF, Excel, QR, hesap, grafik, Mermaid, OCR, webFetch veya textStats gerektiğinde normal cevapta roleplay yapma.",
-      "Bunun yerine cevabın içinde yalnızca geçerli JSON tool_call üret.",
-      "Format:",
+      "=== LUCY TOOL ENGINE ===",
+      "Gerçek dosya, PDF, Excel, QR, hesap, grafik, Mermaid, OCR, webFetch veya textStats gerektiğinde tool_call JSON üret.",
+      "Hiçbir zaman sahte 'dosya hazırladım / grafik çizdim' gibi roleplay yapma. Sadece tool_call üret.",
+      "",
+      "TOOL_CALL FORMATI (tek satır geçerli JSON, kod bloğu içinde):",
       "```json",
-      "{\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Başlık\",\"text\":\"İçerik\",\"filename\":\"lucy.pdf\"}}}",
+      "{\"tool_call\":{\"tool\":\"TOOL_ADI\",\"input\":{...}}}",
       "```",
-      `Kullanılabilir tool'lar: ${listLoadedTools().map((tool) => tool.name).join(", ")}`,
-      "PDF için input.text kullan. Markdown tablo varsa aynen koru; backend tabloyu PDF içinde gerçek grid tabloya dönüştürür.",
-      "Excel için input.rows dizisi en iyisidir; rows yoksa input.text içine markdown tablo/metin koy. Backend markdown tabloyu gerçek satır/sütunlu XLSX'e dönüştürür.",
-      "ZIP için input.files yoksa backend son üretilen dosyayı otomatik zincire alır; ZIP içine ZIP koyma.",
-      "Kullanıcı 'tablo yap' derse ekranda markdown tablo yaz. Kullanıcı 'excel/xlsx/pdf/zip gönder/yap' derse tool_call üret.",
-      "QR için input.text veya input.url kullan.",
-      "Mail gönderdiğini söyleme; mail tool yoksa sadece taslak metin hazırla.",
-      "Grafik istenirse chartData tool_call üretirken labels ve values dizilerini mutlaka dolu ve aynı uzunlukta ver.",
-      "Mermaid istenirse sadece mermaid tool_call üret; doğrudan ```mermaid kod bloğu yazma. Mermaid kodu boşsa tool_call üretme.",
-      "Frontend markdown render destekliyor: gerektiğinde **kalın**, _italik_, başlık, tablo, liste ve kod bloğu kullanabilirsin.",
-      "Basit sohbetlerde, selamlaşmada, teşekkürde, hal-hatırda veya normal cevaplarda kesinlikle pdf/zip/excel/mermaid/chart tool_call üretme. Önceki tool isteğine takılı kalma.",
-      "Ömer açıkça grafik/diyagram/Mermaid/PDF/ZIP/Excel istemediyse önceki tool isteğini hatırlayıp yeniden tool üretme; normal sohbet cevabı ver.",
-      "Asla sahte dosya/mail/grafik yaptım deme; sadece tool sonucu varsa tamamlandı de."
-    ].join("\n"));
+      "",
+      `Yüklü tool'lar: ${toolList}`,
+      "",
+      "TOOL KURALLARI:",
+      "• pdf   → input.text (markdown/tablo olabilir). Örnek: {\"tool_call\":{\"tool\":\"pdf\",\"input\":{\"title\":\"Rapor\",\"text\":\"## Başlık\\nİçerik...\",\"filename\":\"rapor.pdf\"}}}",
+      "• excel → input.rows=[{\"Ad\":\"Ali\",\"Puan\":90}] veya input.text (markdown tablo). Örnek: {\"tool_call\":{\"tool\":\"excel\",\"input\":{\"title\":\"Tablo\",\"rows\":[{\"Ürün\":\"A\",\"Adet\":5}],\"filename\":\"tablo.xlsx\"}}}",
+      "• chartData → input.labels ve input.values MUTLAKA aynı uzunlukta dizi. chartType: bar/line/pie. Örnek: {\"tool_call\":{\"tool\":\"chartData\",\"input\":{\"title\":\"Satışlar\",\"labels\":[\"Ocak\",\"Şubat\"],\"values\":[100,150],\"chartType\":\"bar\"}}}",
+      "• mermaid → input.code (geçerli Mermaid DSL). Kod boşsa tool_call üretme. Örnek: {\"tool_call\":{\"tool\":\"mermaid\",\"input\":{\"code\":\"flowchart TD\\nA-->B\",\"title\":\"Akış\"}}}",
+      "• qr → input.text veya input.url. Örnek: {\"tool_call\":{\"tool\":\"qr\",\"input\":{\"text\":\"https://example.com\"}}}",
+      "• calculator → input.expression (matematiksel ifade). Örnek: {\"tool_call\":{\"tool\":\"calculator\",\"input\":{\"expression\":\"(150*3)+200/4\"}}}",
+      "• webFetch → input.url. Örnek: {\"tool_call\":{\"tool\":\"webFetch\",\"input\":{\"url\":\"https://example.com\"}}}",
+      "• ocr → input.base64 veya input.storedFilename. Lang: tur+eng varsayılan.",
+      "• textStats → input.text. Kelime/karakter/satır sayısı verir.",
+      "• zip → input.files=[{storedFilename, filename}]. ZIP içine ZIP koyma.",
+      "• time → parametresiz çalışır; {\"tool_call\":{\"tool\":\"time\",\"input\":{}}}",
+      "• mail → input.to, input.subject, input.text. SMTP config gerekliyse uyar.",
+      "• document → input.content ve input.format (md/txt/csv/json/html).",
+      "",
+      "ÖNEMLİ KURALLAR:",
+      "• Kullanıcı 'tablo yap/göster' derse markdown tablo yaz — tool_call ÜRETME.",
+      "• Kullanıcı 'excel/pdf/zip/grafik yap' derse tool_call üret — markdown YAZMA.",
+      "• Selamlama, teşekkür, sohbet, soru-cevap: KESİNLİKLE tool_call üretme.",
+      "• Önceki mesajda tool istediyse bile kullanıcı normal sohbet açtıysa tool_call üretme.",
+      "• Tek mesajda birden fazla tool gerekiyorsa ayrı ayrı tool_call blokları üret.",
+      "• chartData labels ve values boşsa, sayı içermiyorsa tool_call üretme — önce veri sor.",
+      "• mermaid code geçerli DSL değilse tool_call üretme — önce veri/akış sor."
+    ].join("\\n"));
   }
 
   return parts.join("\n\n");

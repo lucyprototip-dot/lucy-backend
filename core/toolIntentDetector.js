@@ -47,7 +47,9 @@ function wantsChartFromText(text = "") {
 
 function wantsDocumentFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /\b(document|belge|txt|markdown|md|csv|json|html|word|docx)\b|dosya yap|dosya olarak/.test(q) && !wantsPdfFromText(q) && !wantsExcelFromText(q) && !wantsZipFromText(q);
+  // Sadece net "belge/dosya" kastı olanlar — "word", "json", "html" gibi genel kelimelerden kaçın
+  return /\b(txt dosya|markdown dosya|md dosya|docx belge|belge olustur|metin belgesi|dosya yap|dosya olarak kaydet|csv dosya|json dosya|html dosya)\b|dosya olarak ver/.test(q)
+    && !wantsPdfFromText(q) && !wantsExcelFromText(q) && !wantsZipFromText(q);
 }
 
 function wantsQrFromText(text = "") {
@@ -62,7 +64,8 @@ function wantsOcrFromText(text = "") {
 
 function wantsMermaidFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /mermaid|diyagram|diagram|flowchart|akış|akis|şema|sema|akis semasi|kutularla|baglantili goster|bagla|baglantili|node|blok sema/.test(q);
+  // Sadece net diyagram/akış kastı olanlar — "sema", "bagla", "node" gibi çok geniş kelimeler çıkarıldı
+  return /mermaid|diyagram|diagram|flowchart|akis diagrami|akis semasi|is akisi|proses akisi|blok diyagram|kutularla goster|sequencediagram|classDiagram|statediagram|erdiagram|gantt/.test(q);
 }
 
 function wantsTextStatsFromText(text = "") {
@@ -72,32 +75,45 @@ function wantsTextStatsFromText(text = "") {
 
 function wantsCalculatorFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /\b(hesapla|hesap|calculator|matematik|topla|çarp|carp|böl|bol)\b/.test(q) || /^[0-9+\-*/().,%\s]+$/.test(q);
+  // Sayı içeren hesap isteği — sadece "hesapla", "kaç eder" gibi açık math kastı
+  if (/\b(hesapla|hesap|calculator|matematik|hesaplayin|kac eder|sonucu ne|toplami ne|carpimi ne|bolumu ne)\b/.test(q)) return true;
+  // Saf sayısal ifade (tüm metin sayı/operatörden oluşuyorsa)
+  if (/^[0-9+\-*/().,%\s]+$/.test(String(text || "").trim())) return true;
+  return false;
 }
 
 function wantsTimeFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /\b(saat|tarih|zaman|bugün|bugun)\b/.test(q);
+  // "saat kaç?", "tarih nedir?", "zaman ne?" — sadece açık zaman sorguları
+  return /\b(saat kac|saat nedir|simdi saat|guncel saat|saat ne|kacinci saat|tarih nedir|bugunun tarihi|bugun kac|bugunun saati|simdi kac|zaman nedir|gunun tarihi)\b/.test(q)
+    || /^(saat|zaman)\b/.test(q.trim());
 }
 
 function wantsWebFetchFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /webfetch|web fetch|siteyi oku|url oku|linki oku|sayfayi oku|sayfayı oku/.test(q) || /https?:\/\//i.test(String(text || ""));
+  // Açık "oku/getir/içerik al" talebi
+  if (/webfetch|web fetch|siteyi oku|url oku|linki oku|sayfayi oku|sayfayı oku|icerigi al|icerik getir|bu url|bu linki|siteye gir|web'den/.test(q)) return true;
+  // Sadece URL varsa ve başka metin çok kısaysa (kullanıcı direkt URL yapıştırdı)
+  const raw = String(text || "").trim();
+  const urlMatch = raw.match(/^https?:\/\/\S+/i);
+  if (urlMatch && raw.replace(urlMatch[0], "").replace(/[.,!? ]/g, "").length < 15) return true;
+  return false;
 }
 
 function wantsMailFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /\b(mail|email|e-posta|eposta)\b/.test(q);
+  // Mail gönder kastı — sadece "gönder/ilet/yaz" kombinasyonuyla
+  return /\b(mail gonder|email gonder|eposta gonder|mail at|mail yaz|mailine gonder|maile gonder)\b/.test(q);
 }
 
 function wantsWhatsappFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /whatsapp|wp mesaj/.test(q);
+  return /whatsapp gonder|whatsapp at|wp mesaj gonder|whatsapp yaz/.test(q);
 }
 
 function wantsTelegramFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /telegram/.test(q);
+  return /telegram gonder|telegram at|telegram yaz|telegram mesaj/.test(q);
 }
 
 function isOnlyTransformCommand(text = "") {

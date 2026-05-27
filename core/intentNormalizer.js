@@ -155,7 +155,9 @@ function detectColorPalette(value = "") {
 
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
-  return /\b(pdf|zip|excel|xlsx|xls|word|docx|document|belge|txt|md|csv|json|qr|ocr|webfetch|web|site|url|hesap|calculator|mail|telegram|whatsapp|time|saat|tarih|textstats|istatistik|filemanager|dosya)\b|grafik|chart|pasta|yuvarlak|daire|dilim|trend|cizgi|cubuk|sutun|diyagram|mermaid|akis|sema|kutular|baglantili|ciz|indir|arsiv|rapor|tablo|renk|renkli|renklendir|tema|stil|palet|palette/.test(text);
+  // "web", "saat", "tarih", "sema", "word", "md", "tablo" gibi çok genel kelimeler çıkarıldı
+  // Bu fonksiyon sadece "tool çalıştıralım mı?" kararı için — false positive çok zararlı
+  return /\b(pdf|zip|excel|xlsx|xls|docx|qr|ocr|webfetch|hesap|calculator|hesapla|mail gonder|telegram gonder|whatsapp gonder|textstats|filemanager)\b|grafik|chart|pasta grafik|yuvarlak grafik|daire grafik|dilimli|trend grafik|cizgi grafik|cubuk grafik|sutun grafik|diyagram|mermaid|akis diagrami|blok diyagram|indir|arsivle|rapor pdf|excel yap|pdf yap|zip yap|qr kod/.test(text);
 }
 
 module.exports = {

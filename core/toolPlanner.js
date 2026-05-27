@@ -134,7 +134,8 @@ function normalizePlannerResponse(payload = {}, userText = "") {
 }
 
 function plannerEnabled() {
-  const flag = envValue("LUCY_DS_TOOL_PLANNER").toLowerCase();
+  // Her iki env var'ı da kontrol et (tutarlılık için)
+  const flag = (envValue("LUCY_DS_TOOL_PLANNER") || envValue("LUCY_DS_TOOL_PLANNER_ENABLED")).toLowerCase();
   if (["0", "false", "off", "no", "kapali", "kapalı"].includes(flag)) return false;
   return Boolean(envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT"));
 }
