@@ -747,6 +747,8 @@ function newToolMemory() {
     lastStats: null,
     lastCalc: null,
     lastWeb: null,
+    activeContent: null,
+    contentHistory: [],
     updatedAt: Date.now(),
   };
 }
@@ -892,14 +894,185 @@ function tableToChartInput(table, userText = "") {
   return { labels, values, chartType, label: valueKey || "Veri" };
 }
 
+
+function cloneJsonSafe(value) {
+  if (value === undefined || value === null) return value;
+  try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+}
+
+function pushContentHistory(memory, content) {
+  if (!memory || !content) return memory;
+  if (!Array.isArray(memory.contentHistory)) memory.contentHistory = [];
+  memory.contentHistory.push({ ...cloneJsonSafe(content), rememberedAt: Date.now() });
+  if (memory.contentHistory.length > 20) memory.contentHistory = memory.contentHistory.slice(-20);
+  return memory;
+}
+
+function setActiveContent(memory, content = {}) {
+  if (!memory || !content || typeof content !== "object") return memory;
+  const type = String(content.type || "").trim();
+  if (!type) return memory;
+  const clean = {
+    ...cloneJsonSafe(content),
+    type,
+    updatedAt: Date.now(),
+  };
+  memory.activeContent = clean;
+  pushContentHistory(memory, clean);
+  memory.updatedAt = Date.now();
+  return memory;
+}
+
+function chartUiFromMemory(chart = {}, title = "Grafik") {
+  const data = chart.data || chart.raw?.data || null;
+  if (!data?.labels?.length) return null;
+  return {
+    type: "chart",
+    tool: "chartData",
+    title: chart.title || title || "Grafik",
+    success: true,
+    chartType: chart.chartType || chart.type || "bar",
+    data,
+    raw: {
+      success: true,
+      chartType: chart.chartType || chart.type || "bar",
+      title: chart.title || title || "Grafik",
+      data,
+    },
+  };
+}
+
+function mermaidUiFromMemory(mermaid = {}, title = "Mermaid diyagram") {
+  const code = mermaid.code || mermaid.mermaid || "";
+  if (!String(code || "").trim()) return null;
+  return {
+    type: "mermaid",
+    tool: "mermaid",
+    title: mermaid.title || title || "Mermaid diyagram",
+    success: true,
+    code,
+    raw: { success: true, type: "mermaid", code },
+  };
+}
+
+function activeContentTable(content = {}) {
+  if (!content || typeof content !== "object") return null;
+  if (content.type === "table" && content.table?.rows?.length) return content.table;
+  if (content.table?.rows?.length) return content.table;
+  if (content.text) return parseFirstMarkdownTableObject(content.text);
+  return null;
+}
+
+function activeContentToText(content = {}, fallback = "") {
+  if (!content || typeof content !== "object") return fallback || "";
+  if (content.type === "table" && content.table?.rows?.length) return tableToMarkdown(content.table);
+  if (content.type === "text" && String(content.text || "").trim()) return content.text;
+  if (content.type === "chart") {
+    const ui = content.ui || chartUiFromMemory(content.chart || content, content.title || "Grafik");
+    return ui ? widgetFence(ui) : (content.text || fallback || "");
+  }
+  if (content.type === "mermaid") {
+    const code = content.code || content.mermaid || content.ui?.code || "";
+    const ui = content.ui || mermaidUiFromMemory({ code, title: content.title }, content.title || "Mermaid diyagram");
+    const mermaidBlock = code ? `\n\n\`\`\`mermaid\n${code}\n\`\`\`` : "";
+    return `${mermaidBlock}${ui ? widgetFence(ui) : ""}`.trim() || fallback || "";
+  }
+  if (content.type === "file" && content.file) return content.file.url || content.file.filename || fallback || "";
+  return String(content.text || fallback || "").trim();
+}
+
+function resolveActiveContent(req, answer = "") {
+  const memory = hydrateMemoryFromRequest(req);
+  const userText = latestUserIntentText(req);
+  const answerText = stripToolNoise(answer);
+
+  // Aynı mesajda uzun içerik/metin verildiyse öncelik kullanıcının son içeriği.
+  if (!isOnlyTransformCommand(userText) && (String(userText).length > 90 || /\n/.test(userText) || hasMarkdownTable(userText))) {
+    const table = parseFirstMarkdownTableObject(userText);
+    return table
+      ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(userText, "LUCY Tablosu"), source: "user-inline" }
+      : { type: "text", text: stripToolNoise(userText), title: contentTitleFromText(userText, "LUCY İçeriği"), source: "user-inline" };
+  }
+
+  // Model bu turda gerçek içerik ürettiyse onu kullan.
+  if (answerText && answerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText))) {
+    const table = parseFirstMarkdownTableObject(answerText);
+    return table
+      ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(answerText, "LUCY Tablosu"), source: "assistant-answer" }
+      : { type: "text", text: answerText, title: contentTitleFromText(answerText, "LUCY İçeriği"), source: "assistant-answer" };
+  }
+
+  if (memory.activeContent) return memory.activeContent;
+  if (memory.lastTable?.rows?.length) return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "lastTable" };
+  if (memory.lastChart?.data) return { type: "chart", chart: memory.lastChart, ui: chartUiFromMemory(memory.lastChart, "Grafik"), title: "Grafik", source: "lastChart" };
+  if (memory.lastMermaid?.code) return { type: "mermaid", code: memory.lastMermaid.code, ui: mermaidUiFromMemory(memory.lastMermaid, "Mermaid diyagram"), title: "Mermaid diyagram", source: "lastMermaid" };
+  if (memory.lastText) return { type: "text", text: memory.lastText, title: contentTitleFromText(memory.lastText, "LUCY İçeriği"), source: "lastText" };
+  return null;
+}
+
+function rememberLucyWidget(memory, widget = {}) {
+  if (!memory || !widget || typeof widget !== "object") return memory;
+  const type = String(widget.type || widget.raw?.type || widget.tool || "").toLowerCase();
+  const tool = String(widget.tool || widget.raw?.tool || "").toLowerCase();
+
+  if (type.includes("chart") || tool === "chartdata") {
+    const chart = {
+      chartType: widget.chartType || widget.raw?.chartType || "bar",
+      data: widget.data || widget.raw?.data || null,
+      title: widget.title || widget.raw?.title || "Grafik",
+    };
+    if (chart.data?.labels?.length) {
+      memory.lastChart = chart;
+      setActiveContent(memory, { type: "chart", chart, ui: widget, title: chart.title, source: "widget" });
+    }
+  } else if (type.includes("mermaid") || tool === "mermaid") {
+    const code = widget.code || widget.raw?.code || "";
+    if (String(code || "").trim()) {
+      memory.lastMermaid = { code, title: widget.title || "Mermaid diyagram" };
+      setActiveContent(memory, { type: "mermaid", code, ui: widget, title: widget.title || "Mermaid diyagram", source: "widget" });
+    }
+  } else if (type.includes("file") || widget.url || widget.downloadUrl || widget.filename || widget.storedFilename) {
+    rememberFile(memory, widget, widget.tool || "file");
+  }
+  return memory;
+}
+
+function extractLucyWidgetsFromText(text = "") {
+  const source = String(text || "");
+  const widgets = [];
+  for (const match of source.matchAll(/```lucy-widget\s*([\s\S]*?)```/gi)) {
+    const widget = safeJsonParse(String(match[1] || "").trim());
+    if (widget && typeof widget === "object") widgets.push(widget);
+  }
+  return widgets;
+}
+
+function isGeneratedStatusOnlyText(text = "") {
+  const clean = normalizeIntentText(stripToolNoise(text));
+  if (!clean) return false;
+  if (hasMarkdownTable(text)) return false;
+  if (/```(?:lucy-widget|mermaid)/i.test(String(text || ""))) return false;
+  return clean.length < 180 && /(indirme hazirlandi|asagidan indirebilirsin|dosya hazirlandi|pdf hazirlandi|excel.*hazir|xlsx.*hazir|zip.*hazir|grafik hazirlandi|diyagram hazirlandi)/.test(clean);
+}
+
 function rememberText(memory, text = "") {
   const clean = stripToolNoise(text);
   if (!clean || clean.length < 2) return memory;
+  if (isGeneratedStatusOnlyText(text)) return memory;
   memory.lastText = clean;
   const table = parseFirstMarkdownTableObject(clean);
-  if (table) memory.lastTable = table;
+  if (table) {
+    memory.lastTable = table;
+    setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(clean, "LUCY Tablosu"), source: "text" });
+  } else {
+    setActiveContent(memory, { type: "text", text: clean, title: contentTitleFromText(clean, "LUCY İçeriği"), source: "text" });
+  }
   const mermaid = [...String(clean).matchAll(/```mermaid\s*([\s\S]*?)```/gi)].map((m) => String(m[1] || "").trim()).find(Boolean);
-  if (mermaid) memory.lastMermaid = { code: mermaid };
+  if (mermaid) {
+    memory.lastMermaid = { code: mermaid };
+    setActiveContent(memory, { type: "mermaid", code: mermaid, title: "Mermaid diyagram", source: "text" });
+  }
+  extractLucyWidgetsFromText(clean).forEach((widget) => rememberLucyWidget(memory, widget));
   memory.updatedAt = Date.now();
   return memory;
 }
@@ -932,18 +1105,33 @@ function rememberToolResult(req, call = {}, result = {}) {
 
   if (toolName === "excel") {
     const table = normalizeRowsForMemory(input.rows || result.previewRows, input.headers || result.headers);
-    if (table) memory.lastTable = table;
+    if (table) {
+      memory.lastTable = table;
+      setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: input.title || result.title || "LUCY Tablosu", source: "excel" });
+    }
     rememberFile(memory, result, toolName);
   } else if (toolName === "chartdata") {
-    memory.lastChart = {
+    const chart = {
       chartType: result.chartType || input.chartType || "bar",
       data: result.data || input.data || { labels: input.labels || [], datasets: [{ label: input.label || "Veri", data: input.values || [] }] },
+      title: result.title || input.title || input.label || "Grafik",
     };
+    memory.lastChart = chart;
+    setActiveContent(memory, { type: "chart", chart, ui: chartUiFromMemory(chart, chart.title), title: chart.title, source: "chartData" });
   } else if (toolName === "mermaid") {
-    memory.lastMermaid = { code: result.code || input.code || input.mermaid || "" };
+    const code = result.code || input.code || input.mermaid || "";
+    memory.lastMermaid = { code, title: result.title || input.title || "Mermaid diyagram" };
+    if (String(code || "").trim()) setActiveContent(memory, { type: "mermaid", code, ui: mermaidUiFromMemory({ code, title: result.title || input.title }, result.title || input.title || "Mermaid diyagram"), title: result.title || input.title || "Mermaid diyagram", source: "mermaid" });
   } else if (["pdf", "zip", "document", "qr"].includes(toolName)) {
     rememberFile(memory, result, toolName);
     if (toolName === "qr") memory.lastQr = result;
+    // Dosya üretmek aktif kaynak içeriğini ezmesin: "bunu pdf yap" sonrası "bunu excel yap" hâlâ aynı tablo/metni kullanmalı.
+    if (toolName === "document" && String(input.content || input.text || "").trim()) {
+      const text = String(input.content || input.text || "");
+      const table = parseFirstMarkdownTableObject(text);
+      if (table) setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: input.title || result.title || "LUCY Belgesi", source: "document" });
+      else setActiveContent(memory, { type: "text", text, title: input.title || result.title || "LUCY Belgesi", source: "document" });
+    }
   } else if (toolName === "ocr") {
     memory.lastOcr = result;
     rememberText(memory, result.text || result.message || "");
@@ -971,6 +1159,7 @@ function hydrateMemoryFromRequest(req) {
     const role = String(message?.role || message?.sender || "").toLowerCase();
     const userInlineContent = role === "user" && (String(text).length > 90 || /\n/.test(text) || hasMarkdownTable(text));
     if (text && (role !== "user" || userInlineContent) && !isOnlyTransformCommand(text)) rememberText(memory, text);
+    extractLucyWidgetsFromText(text).forEach((widget) => rememberLucyWidget(memory, widget));
     const refs = extractGeneratedFileRefsFromText(text);
     const lastRef = refs[refs.length - 1];
     if (lastRef?.storedFilename) rememberFile(memory, lastRef, "file");
@@ -984,6 +1173,10 @@ function hydrateMemoryFromRequest(req) {
 }
 
 function sourceFromMemory(req, answer = "") {
+  const active = resolveActiveContent(req, answer);
+  const activeText = activeContentToText(active, "");
+  if (activeText) return activeText;
+
   const memory = hydrateMemoryFromRequest(req);
   const answerText = stripToolNoise(answer);
   if (answerText && answerText.length > 30) return answerText;
@@ -1103,10 +1296,11 @@ function lastImageFileFromMemory(memory = {}) {
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
-  const source = sourceFromMemory(req, answer);
+  const activeContent = resolveActiveContent(req, answer);
+  const source = activeContentToText(activeContent, sourceFromMemory(req, answer));
   const inlineTable = parseFirstMarkdownTableObject(source);
-  const activeTable = inlineTable || memory.lastTable;
-  const title = contentTitleFromText(source, activeTable ? "LUCY Tablosu" : "LUCY Çıktısı");
+  const activeTable = activeContentTable(activeContent) || inlineTable || memory.lastTable;
+  const title = activeContent?.title || contentTitleFromText(source, activeTable ? "LUCY Tablosu" : "LUCY Çıktısı");
   const stem = safeOutputStem(title);
   const calls = [];
 
@@ -1152,9 +1346,12 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsExcelFromText(userText)) {
+    const activeChartData = activeContent?.type === "chart" ? (activeContent.chart?.data || activeContent.ui?.data || null) : null;
     const excelInput = activeTable?.rows?.length
       ? { title, sheetName: title.slice(0, 31), rows: activeTable.rows, headers: activeTable.headers, filename: `${stem || "lucy-tablo"}.xlsx` }
-      : { title, sheetName: title.slice(0, 31), text: source, filename: `${stem || "lucy-tablo"}.xlsx` };
+      : activeChartData?.labels?.length
+        ? { title, sheetName: title.slice(0, 31), data: activeChartData, filename: `${stem || "lucy-tablo"}.xlsx` }
+        : { title, sheetName: title.slice(0, 31), text: source, filename: `${stem || "lucy-tablo"}.xlsx` };
     calls.push({ tool: "excel", input: excelInput });
   }
 
