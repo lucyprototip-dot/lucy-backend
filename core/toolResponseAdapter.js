@@ -39,6 +39,8 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     mimeType: normalized.mimeType || normalized.contentType || "",
     chartType: normalized.chartType || input.chartType || "bar",
     data: normalized.data || normalized.chartData || null,
+    labels: Array.isArray(normalized.labels) ? normalized.labels : undefined,
+    values: Array.isArray(normalized.values) ? normalized.values : undefined,
     code: normalized.code || normalized.mermaid || "",
     svg: normalized.svg || "",
     text: normalized.text || normalized.message || "",

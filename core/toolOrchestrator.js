@@ -1117,8 +1117,40 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsPdfFromText(userText)) {
-    const pdfText = activeTable?.rows?.length && isOnlyTransformCommand(userText) ? tableToMarkdown(activeTable) : source;
-    calls.push({ tool: "pdf", input: { title, text: pdfText, filename: `${stem || "lucy-rapor"}.pdf` } });
+    const pdfParts = [];
+    const basePdfText = activeTable?.rows?.length && isOnlyTransformCommand(userText) ? tableToMarkdown(activeTable) : source;
+    if (String(basePdfText || "").trim()) pdfParts.push(basePdfText);
+
+    // Tek komutta “tablo + grafik + mermaid + PDF” istendiğinde PDF, önceki planlanan
+    // chartData/mermaid çıktılarının ham kodunu değil render edilebilir widget payload'unu taşır.
+    const plannedChart = calls.find((call) => call.tool === "chartData")?.input;
+    if (plannedChart) {
+      const data = plannedChart.data || { labels: plannedChart.labels || [], datasets: [{ label: plannedChart.label || "Veri", data: plannedChart.values || [] }] };
+      pdfParts.push(widgetFence({
+        type: "chart",
+        tool: "chartData",
+        title: plannedChart.title || title || "Grafik",
+        success: true,
+        chartType: plannedChart.chartType || "bar",
+        data,
+        raw: { success: true, chartType: plannedChart.chartType || "bar", title: plannedChart.title || title || "Grafik", data },
+      }));
+    }
+
+    const plannedMermaid = calls.find((call) => call.tool === "mermaid")?.input;
+    if (plannedMermaid?.code) {
+      pdfParts.push(`\n\n\`\`\`mermaid\n${plannedMermaid.code}\n\`\`\``);
+      pdfParts.push(widgetFence({
+        type: "mermaid",
+        tool: "mermaid",
+        title: plannedMermaid.title || title || "Mermaid diyagram",
+        success: true,
+        code: plannedMermaid.code,
+        raw: { success: true, type: "mermaid", code: plannedMermaid.code },
+      }));
+    }
+
+    calls.push({ tool: "pdf", input: { title, text: pdfParts.join("\n\n").trim(), filename: `${stem || "lucy-rapor"}.pdf` } });
   }
 
   if (wantsQrFromText(userText)) {
