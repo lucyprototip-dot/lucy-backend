@@ -1,3 +1,5 @@
+const { normalizeToolOutput } = require("./toolOutputContract");
+
 function guessToolResultType(toolName, result = {}) {
   const tool = String(toolName || result.tool || "").toLowerCase();
   const mime = String(result.mimeType || result.contentType || "").toLowerCase();
@@ -24,26 +26,28 @@ function guessToolResultType(toolName, result = {}) {
 
 function normalizeToolResultForUI(toolName, result = {}, input = {}) {
   const normalized = result && typeof result === "object" ? { ...result } : { value: result };
-  const type = guessToolResultType(toolName, normalized);
-  const title = normalized.title || input.title || input.subject || input.filename || input.name || `${toolName} sonucu`;
+  const contracted = normalizeToolOutput(toolName, normalized, input);
+  const guessedType = guessToolResultType(toolName, normalized);
+  const type = contracted.type === "chart" || contracted.type === "mermaid" ? contracted.type : guessedType;
+  const title = contracted.title || normalized.title || input.title || input.subject || input.filename || input.name || `${toolName} sonucu`;
 
   return {
     type,
     tool: toolName,
     title,
-    success: normalized.success !== false,
-    url: normalized.downloadUrl || normalized.url || "",
-    downloadUrl: normalized.downloadUrl || normalized.url || "",
-    filename: normalized.filename || normalized.downloadName || normalized.storedFilename || "",
-    storedFilename: normalized.storedFilename || "",
-    mimeType: normalized.mimeType || normalized.contentType || "",
-    chartType: normalized.chartType || input.chartType || "bar",
-    data: normalized.data || normalized.chartData || null,
-    style: normalized.style || input.style || {},
-    colors: normalized.colors || normalized.palette || input.colors || input.palette || undefined,
-    palette: normalized.palette || normalized.colors || input.palette || input.colors || undefined,
-    code: normalized.code || normalized.mermaid || "",
-    text: normalized.text || normalized.message || "",
+    success: contracted.success !== false,
+    url: contracted.downloadUrl || contracted.url || normalized.downloadUrl || normalized.url || "",
+    downloadUrl: contracted.downloadUrl || contracted.url || normalized.downloadUrl || normalized.url || "",
+    filename: contracted.filename || normalized.filename || normalized.downloadName || normalized.storedFilename || "",
+    storedFilename: contracted.storedFilename || normalized.storedFilename || "",
+    mimeType: contracted.mimeType || normalized.mimeType || normalized.contentType || "",
+    chartType: contracted.chartType || normalized.chartType || input.chartType || "bar",
+    data: contracted.data || normalized.data || normalized.chartData || null,
+    code: contracted.code || normalized.code || normalized.mermaid || "",
+    text: contracted.text || normalized.text || normalized.message || "",
+    colors: contracted.colors || normalized.colors || normalized.palette || normalized.style?.colors || [],
+    palette: contracted.palette || normalized.paletteName || normalized.palette || normalized.style?.palette || "default",
+    style: contracted.style || normalized.style || {},
     files: Array.isArray(normalized.files) ? normalized.files : undefined,
     headers: Array.isArray(normalized.headers) ? normalized.headers : (Array.isArray(input.headers) ? input.headers : undefined),
     previewRows: Array.isArray(normalized.previewRows) ? normalized.previewRows : undefined,
@@ -51,7 +55,8 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     columns: normalized.columns,
     entries: Array.isArray(normalized.entries) ? normalized.entries : undefined,
     count: normalized.count,
-    raw: normalized,
+    // raw saklanır ama UI'nın raw JSON'u metin gibi basmaması için güvenli kontrat da eklenir.
+    raw: { ...normalized, __contracted: contracted },
   };
 }
 
@@ -62,8 +67,8 @@ function widgetFence(payload) {
 function summarizeToolResultLine(toolName, ui) {
   if (!ui.success) return `❌ ${toolName}: ${ui.text || ui.raw?.error || "Tool çalışmadı"}`;
   if (ui.downloadUrl) return `✅ ${toolName}: ${ui.downloadUrl}`;
-  if (ui.type === "chart") return `✅ ${toolName}: Grafik verisi hazır.`;
-  if (ui.type === "mermaid") return `✅ ${toolName}: Mermaid diyagramı hazır.`;
+  if (ui.type === "chart") return `✅ ${ui.title || toolName}: Grafik hazır.`;
+  if (ui.type === "mermaid") return `✅ ${ui.title || toolName}: Mermaid diyagramı hazır.`;
   if (ui.type === "file-list") return `✅ ${toolName}: ${ui.count || ui.files?.length || 0} dosya listelendi.`;
   if (ui.type === "mail") return `✅ ${toolName}: ${ui.text || "Mail işlemi tamamlandı."}`;
   return `✅ ${toolName}: İşlem tamamlandı.`;
