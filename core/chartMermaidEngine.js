@@ -1,4 +1,4 @@
-const { detectChartType } = require("./intentNormalizer");
+const { detectChartType, detectVisualStyle, normalizeToolIntentText } = require("./intentNormalizer");
 
 function numberFromCell(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -11,55 +11,245 @@ function numberFromCell(value) {
   return Number.isFinite(num) ? num : null;
 }
 
-function tableToChartInput(table, userText = "") {
-  if (!table?.headers?.length || !table?.rows?.length) return null;
-
-  const headers = table.headers;
-  const sampleRows = table.rows.slice(0, 20);
-
-  let labelKey = headers.find((header) =>
-    sampleRows.some((row) => String(row?.[header] ?? "").trim() && numberFromCell(row?.[header]) === null)
-  ) || headers[0];
-
-  let valueKey = headers.find((header) =>
-    sampleRows.some((row) => numberFromCell(row?.[header]) !== null)
-  );
-
-  let values;
-  if (valueKey) {
-    values = sampleRows.map((row) => numberFromCell(row?.[valueKey]) ?? 0);
-  } else {
-    valueKey = "Adet";
-    values = sampleRows.map(() => 1);
-  }
-
-  const labels = sampleRows.map((row, index) =>
-    String(row?.[labelKey] ?? `Satır ${index + 1}`).trim() || `Satır ${index + 1}`
-  );
-
-  const chartType = detectChartType(userText);
-  return { labels, values, chartType, label: valueKey || "Veri" };
+function normalizeHeader(header = "") {
+  return normalizeToolIntentText(header).replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function tableToMermaidCode(table, title = "LUCY Tablosu") {
-  if (!table?.headers?.length || !table?.rows?.length) return "";
+function isNumericColumn(rows = [], header = "") {
+  return rows.some((row) => numberFromCell(row?.[header]) !== null);
+}
 
-  const headers = table.headers;
-  const labelKey = headers[0];
-  const valueKey = headers.find((header) => table.rows.some((row) => numberFromCell(row?.[header]) !== null)) || headers[1] || headers[0];
+function numericHeaders(table) {
+  const rows = table?.rows || [];
+  return (table?.headers || []).filter((header) => isNumericColumn(rows, header));
+}
 
-  const cleanNode = (value = "") => String(value || "")
-    .replace(/[\[\]{}()<>|]/g, " ")
+function labelHeader(table) {
+  const rows = table?.rows || [];
+  const headers = table?.headers || [];
+  return headers.find((header) => rows.some((row) => String(row?.[header] ?? "").trim() && numberFromCell(row?.[header]) === null)) || headers[0];
+}
+
+function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
+  const h = normalizeHeader(header);
+  const q = normalizeToolIntentText(userText);
+  let score = 0;
+
+  if (q.includes("net") && /net|kar|kâr|kazanc|bakiye/.test(h)) score += 80;
+  if (q.includes("gider") && /gider|kira|fatura|market|ulasim|eglence|saglik|giyim|abonelik|harcama/.test(h)) score += 70;
+  if (q.includes("gelir") && /gelir|maas|maaş|freelance|kazanc/.test(h)) score += 70;
+  if (/puan|skor|deger|değer|adet|miktar|sayi|sayisi/.test(q) && /puan|skor|deger|adet|miktar|sayi/.test(h)) score += 60;
+  if (q && h && q.includes(h)) score += 90;
+
+  if (chartType === "line") {
+    if (/net|kar|kâr|toplam/.test(h)) score += 25;
+    if (/tarih|ay|gun|gün|kategori|aciklama/.test(h)) score -= 50;
+  }
+
+  if (chartType === "pie") {
+    if (/net|kar|kâr/.test(h)) score -= 10;
+    if (/gider|harcama|masraf|deger|adet|puan/.test(h)) score += 20;
+  }
+
+  return score;
+}
+
+function chooseValueHeader(table, userText = "", chartType = "bar") {
+  const nums = numericHeaders(table);
+  if (!nums.length) return null;
+  const scored = nums.map((header, index) => ({
+    header,
+    score: scoreHeaderForQuery(header, userText, chartType) + (nums.length - index) * 0.01,
+  })).sort((a, b) => b.score - a.score);
+  return scored[0]?.header || nums[0];
+}
+
+function rowLabel(row = {}, key = "", index = 0) {
+  return String(row?.[key] ?? `Satır ${index + 1}`).trim() || `Satır ${index + 1}`;
+}
+
+function rowTotalByHeaders(row = {}, headers = []) {
+  return headers.reduce((sum, header) => sum + (numberFromCell(row?.[header]) ?? 0), 0);
+}
+
+function expenseHeaders(table) {
+  const nums = numericHeaders(table);
+  return nums.filter((header) => /gider|kira|fatura|market|ulasim|eglence|saglik|giyim|abonelik|harcama|masraf/i.test(normalizeHeader(header)));
+}
+
+function incomeHeaders(table) {
+  const nums = numericHeaders(table);
+  return nums.filter((header) => /gelir|maas|maaş|freelance|kazanc/i.test(normalizeHeader(header)));
+}
+
+function compactTitle(value = "Grafik") {
+  return String(value || "Grafik").replace(/[*_`#]/g, "").replace(/\s+/g, " ").trim().slice(0, 90) || "Grafik";
+}
+
+function tableToPieInput(table, userText = "") {
+  const rows = (table?.rows || []).slice(0, 30);
+  const headers = table?.headers || [];
+  if (!headers.length || !rows.length) return null;
+  const q = normalizeToolIntentText(userText);
+  const labelKey = labelHeader(table);
+
+  // Aylık gelir/gider tablosu gibi: ilk satır/ay üzerinden kategori dağılımı istenebilir.
+  // "gider" denmişse gider sütunlarını kategori olarak topla. "gelir" denmişse gelir sütunlarını topla.
+  const exp = expenseHeaders(table);
+  const inc = incomeHeaders(table);
+  if (q.includes("gider") && exp.length >= 2) {
+    const totals = exp.map((header) => ({ label: header, value: rows.reduce((sum, row) => sum + (numberFromCell(row?.[header]) ?? 0), 0) }));
+    return { labels: totals.map((x) => x.label), values: totals.map((x) => x.value), label: "Gider Dağılımı" };
+  }
+  if (q.includes("gelir") && inc.length >= 1) {
+    const totals = inc.map((header) => ({ label: header, value: rows.reduce((sum, row) => sum + (numberFromCell(row?.[header]) ?? 0), 0) }));
+    return { labels: totals.map((x) => x.label), values: totals.map((x) => x.value), label: "Gelir Dağılımı" };
+  }
+
+  // Çok kolonlu finans tablosu: gider kolonları varsa pasta için gider dağılımı daha mantıklı.
+  if (exp.length >= 2) {
+    const totals = exp.map((header) => ({ label: header, value: rows.reduce((sum, row) => sum + (numberFromCell(row?.[header]) ?? 0), 0) }));
+    return { labels: totals.map((x) => x.label), values: totals.map((x) => x.value), label: "Gider Dağılımı" };
+  }
+
+  const valueKey = chooseValueHeader(table, userText, "pie");
+  if (!valueKey) return null;
+  return {
+    labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
+    values: rows.map((row) => numberFromCell(row?.[valueKey]) ?? 0),
+    label: valueKey,
+  };
+}
+
+function tableToLineInput(table, userText = "") {
+  const rows = (table?.rows || []).slice(0, 40);
+  const headers = table?.headers || [];
+  if (!headers.length || !rows.length) return null;
+  const labelKey = labelHeader(table);
+  const q = normalizeToolIntentText(userText);
+
+  // "gider trendi" için giderleri satır bazında topla.
+  const exp = expenseHeaders(table);
+  if (q.includes("gider") && exp.length >= 2) {
+    return {
+      labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
+      values: rows.map((row) => rowTotalByHeaders(row, exp)),
+      label: "Toplam Gider",
+    };
+  }
+
+  // "gelir trendi" için gelirleri satır bazında topla.
+  const inc = incomeHeaders(table);
+  if (q.includes("gelir") && inc.length >= 1) {
+    return {
+      labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
+      values: rows.map((row) => rowTotalByHeaders(row, inc)),
+      label: "Toplam Gelir",
+    };
+  }
+
+  const valueKey = chooseValueHeader(table, userText, "line");
+  if (!valueKey) return null;
+  return {
+    labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
+    values: rows.map((row) => numberFromCell(row?.[valueKey]) ?? 0),
+    label: valueKey,
+  };
+}
+
+function tableToBarInput(table, userText = "") {
+  const rows = (table?.rows || []).slice(0, 30);
+  const headers = table?.headers || [];
+  if (!headers.length || !rows.length) return null;
+  const labelKey = labelHeader(table);
+  const valueKey = chooseValueHeader(table, userText, "bar");
+  if (!valueKey) return null;
+  return {
+    labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
+    values: rows.map((row) => numberFromCell(row?.[valueKey]) ?? 0),
+    label: valueKey,
+  };
+}
+
+function tableToChartInput(table, userText = "") {
+  if (!table?.headers?.length || !table?.rows?.length) return null;
+  const chartType = detectChartType(userText);
+  const style = detectVisualStyle(userText);
+  const picked = chartType === "pie" ? tableToPieInput(table, userText)
+    : chartType === "line" ? tableToLineInput(table, userText)
+    : tableToBarInput(table, userText);
+  if (!picked?.labels?.length || !picked?.values?.length) return null;
+  return {
+    labels: picked.labels,
+    values: picked.values,
+    chartType,
+    label: picked.label || "Veri",
+    style,
+  };
+}
+
+function chartToChartInput(chart = {}, userText = "") {
+  const data = chart.data || chart.raw?.data || null;
+  const labels = data?.labels || chart.labels || [];
+  const values = data?.datasets?.[0]?.data || chart.values || [];
+  if (!Array.isArray(labels) || !labels.length || !Array.isArray(values) || !values.length) return null;
+  return {
+    labels,
+    values,
+    chartType: detectChartType(userText) || chart.chartType || chart.type || "bar",
+    label: data?.datasets?.[0]?.label || chart.label || chart.title || "Veri",
+    title: chart.title || "Grafik",
+    style: detectVisualStyle(userText),
+  };
+}
+
+function cleanMermaidLabel(value = "") {
+  return String(value || "")
+    .replace(/[\[\]{}<>|]/g, " ")
+    .replace(/\"/g, "'")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 52) || "Değer";
+    .slice(0, 54) || "Değer";
+}
 
-  const root = cleanNode(title);
+function tableToMermaidCode(table, title = "LUCY Tablosu", userText = "") {
+  if (!table?.headers?.length || !table?.rows?.length) return "";
+  const chartInput = tableToChartInput(table, userText) || tableToBarInput(table, userText);
+  const style = detectVisualStyle(userText);
+  const root = cleanMermaidLabel(title);
+  const lines = ["flowchart TD"];
+  if (style.colorful) {
+    const palette = Array.isArray(style.colors) && style.colors.length ? style.colors : ["#0f766e", "#7c2d12", "#1d4ed8", "#be123c", "#a16207"];
+    const rootFill = palette[1] || "#4c1d95";
+    lines.push(`classDef root fill:${rootFill},stroke:#ffffff,stroke-width:3px,color:#ffffff`);
+    for (let i = 0; i < 5; i += 1) {
+      const fill = palette[i % palette.length];
+      const textColor = fill.toLowerCase() === "#ffffff" ? "#111827" : "#ffffff";
+      lines.push(`classDef c${i + 1} fill:${fill},stroke:#ffffff,stroke-width:2px,color:${textColor}`);
+    }
+    lines.push(`A["${root}"]:::root`);
+  } else {
+    lines.push(`A["${root}"]`);
+  }
+  const labels = chartInput?.labels || [];
+  const values = chartInput?.values || [];
+  labels.slice(0, 12).forEach((label, index) => {
+    const safeLabel = cleanMermaidLabel(label);
+    const safeValue = values[index] === undefined ? "" : cleanMermaidLabel(String(values[index]));
+    const className = style.colorful ? `:::c${(index % 5) + 1}` : "";
+    lines.push(`A --> N${index + 1}["${safeLabel}${safeValue ? `\\n${safeValue}` : ""}"]${className}`);
+  });
+  return lines.join("\n");
+}
+
+function chartToMermaidCode(chart = {}, title = "Grafik", userText = "") {
+  const input = chartToChartInput(chart, userText);
+  if (!input) return "";
+  const root = cleanMermaidLabel(title || chart.title || "Grafik");
   const lines = ["flowchart TD", `A["${root}"]`];
-  table.rows.slice(0, 16).forEach((row, index) => {
-    const label = cleanNode(row?.[labelKey] ?? `Satır ${index + 1}`);
-    const value = cleanNode(row?.[valueKey] ?? "");
-    lines.push(`A --> N${index + 1}["${label}${value ? `\\n${value}` : ""}"]`);
+  input.labels.slice(0, 12).forEach((label, index) => {
+    const value = input.values[index];
+    lines.push(`A --> N${index + 1}["${cleanMermaidLabel(label)}\\n${cleanMermaidLabel(String(value ?? ""))}"]`);
   });
   return lines.join("\n");
 }
@@ -74,11 +264,13 @@ function chartUiFromMemory(chart = {}, title = "Grafik") {
     success: true,
     chartType: chart.chartType || chart.type || "bar",
     data,
+    style: chart.style || {},
     raw: {
       success: true,
       chartType: chart.chartType || chart.type || "bar",
       title: chart.title || title || "Grafik",
       data,
+      style: chart.style || {},
     },
   };
 }
@@ -99,7 +291,9 @@ function mermaidUiFromMemory(mermaid = {}, title = "Mermaid diyagram") {
 module.exports = {
   numberFromCell,
   tableToChartInput,
+  chartToChartInput,
   tableToMermaidCode,
+  chartToMermaidCode,
   chartUiFromMemory,
   mermaidUiFromMemory,
 };

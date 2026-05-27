@@ -37,7 +37,9 @@ const {
 const {
   numberFromCell,
   tableToChartInput,
+  chartToChartInput,
   tableToMermaidCode,
+  chartToMermaidCode,
   chartUiFromMemory,
   mermaidUiFromMemory,
 } = require("./chartMermaidEngine");
@@ -363,34 +365,10 @@ function enrichToolCallInput(call, req) {
     }
   }
 
-  if (toolName === "pdf") {
-    const hasPdfContent = String(input.text || input.content || input.value || input.markdown || "").trim()
-      || (Array.isArray(input.rows) && input.rows.length)
-      || input.chart || input.chartData || input.data
-      || String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim()
-      || (Array.isArray(input.widgets) && input.widgets.length);
-
-    if (!hasPdfContent) {
-      if (memory.activeContent?.type === "table" && memory.activeContent.table?.rows?.length) {
-        input.rows = memory.activeContent.table.rows;
-        input.headers = memory.activeContent.table.headers;
-        input.text = tableToMarkdown(memory.activeContent.table);
-      } else if (memory.activeContent?.type === "chart" && memory.lastChart?.data) {
-        input.chart = memory.lastChart;
-      } else if (memory.activeContent?.type === "mermaid" && memory.lastMermaid?.code) {
-        input.mermaid = memory.lastMermaid.code;
-      } else if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(memory.lastTable);
-      else if (memory.lastText) input.text = memory.lastText;
-      else if (memory.lastChart?.data) input.chart = memory.lastChart;
-      else if (memory.lastMermaid?.code) input.mermaid = memory.lastMermaid.code;
-    }
-
-    if (!input.chart && memory.lastChart?.data) input.chart = memory.lastChart;
-    if (!String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim() && memory.lastMermaid?.code) input.mermaid = memory.lastMermaid.code;
-    if (!(Array.isArray(input.rows) && input.rows.length) && memory.lastTable?.rows?.length && /tablo|excel|grid|çizelge|cizelge|hepsi|bütün|butun/i.test(userText)) {
-      input.rows = memory.lastTable.rows;
-      input.headers = memory.lastTable.headers;
-    }
+  if (toolName === "pdf" && !String(input.text || input.content || input.value || "").trim()) {
+    if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(memory.lastTable);
+    else if (memory.lastText) input.text = memory.lastText;
+    else if (memory.lastChart?.data) input.text = JSON.stringify(memory.lastChart.data, null, 2);
   }
 
   if (toolName === "chartdata") {
@@ -482,7 +460,8 @@ function requestedToolWork(req) {
 }
 
 function requestedMermaidWork(req) {
-  return wantsMermaidFromText(latestUserIntentText(req));
+  const text = normalizeIntentText(latestUserIntentText(req));
+  return /mermaid|diyagram|flowchart|akis|sema|kutular|baglantili|bagla|akisi/.test(text);
 }
 
 function stripToolOnlyBlocks(answer = "") {
@@ -536,16 +515,7 @@ function isUsableToolCall(call = {}) {
     return Array.isArray(labels) && labels.length > 0 && Array.isArray(values) && values.length > 0;
   }
   if (tool === "excel") return Boolean((Array.isArray(input.rows) && input.rows.length) || String(input.text || input.content || input.value || "").trim() || (Array.isArray(input.labels) && input.labels.length));
-  if (tool === "pdf") {
-    return Boolean(
-      String(input.text || input.content || input.value || input.markdown || "").trim() ||
-      (Array.isArray(input.rows) && input.rows.length) ||
-      (input.table && Array.isArray(input.table.rows) && input.table.rows.length) ||
-      input.chart || input.chartData || input.data ||
-      String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim() ||
-      (Array.isArray(input.widgets) && input.widgets.length)
-    );
-  }
+  if (tool === "pdf") return Boolean(String(input.text || input.content || input.value || "").trim());
   if (tool === "qr") return Boolean(String(input.text || input.url || input.value || "").trim());
   if (tool === "ocr") return Boolean(String(input.base64 || input.imageBase64 || input.fileBase64 || input.dataUrl || input.imageDataUrl || input.storedFilename || input.generatedFile || "").trim());
   return true;
@@ -587,14 +557,8 @@ function validateToolInput(call = {}, req = null) {
   }
 
   if (tool === "pdf") {
-    const hasText = String(input.text || input.content || input.value || input.markdown || "").trim();
-    const hasRows = Array.isArray(input.rows) && input.rows.length;
-    const hasChart = input.chart || input.chartData || input.data || memory.lastChart?.data;
-    const hasMermaid = String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim() || memory.lastMermaid?.code;
-    const hasWidgets = Array.isArray(input.widgets) && input.widgets.length;
-    if (!hasText && !hasRows && !hasChart && !hasMermaid && !hasWidgets && !memory.lastTable?.rows?.length && !memory.lastText) {
-      return fail("PDF için önce metin, tablo, grafik veya diyagram içeriği gerekli aşkım.", "pdf_source_required");
-    }
+    const hasText = String(input.text || input.content || input.value || "").trim();
+    if (!hasText && !memory.lastTable?.rows?.length && !memory.lastText) return fail("PDF için önce metin, tablo veya rapor içeriği gerekli aşkım.", "pdf_source_required");
   }
 
   if (tool === "ocr") {
@@ -611,6 +575,8 @@ function validateToolInput(call = {}, req = null) {
 //  ChatGPT benzeri "bunu excel/pdf/zip/grafik yap" zinciri.
 // ============================================================
 const TOOL_MEMORY_MAX = Number(process.env.LUCY_TOOL_MEMORY_MAX || 120);
+const CONTENT_HISTORY_MAX = Number(process.env.LUCY_CONTENT_HISTORY_MAX || 260);
+const HYDRATE_MESSAGE_MAX = Number(process.env.LUCY_HYDRATE_MESSAGE_MAX || 240);
 const toolMemoryByChat = new Map();
 
 function newToolMemory() {
@@ -630,6 +596,7 @@ function newToolMemory() {
     lastWeb: null,
     activeContent: null,
     contentHistory: [],
+    index: { tables: [], charts: [], mermaids: [], texts: [], files: [] },
     updatedAt: Date.now(),
   };
 }
@@ -731,11 +698,57 @@ function cloneJsonSafe(value) {
   try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
 }
 
+function contentFingerprint(content = {}) {
+  const type = String(content.type || "");
+  if (type === "table") {
+    const table = content.table || {};
+    return `table:${JSON.stringify({ headers: table.headers || [], first: table.rows?.[0] || null, rows: table.rows?.length || 0 })}`;
+  }
+  if (type === "chart") {
+    const data = content.chart?.data || content.ui?.data || content.data || {};
+    return `chart:${JSON.stringify({ labels: data.labels || [], values: data.datasets?.[0]?.data || [], title: content.title || "" })}`;
+  }
+  if (type === "mermaid") return `mermaid:${String(content.code || content.mermaid || content.ui?.code || "").replace(/\s+/g, " ").slice(0, 900)}`;
+  if (type === "file") return `file:${content.file?.storedFilename || content.file?.filename || content.storedFilename || content.filename || ""}`;
+  return `${type}:${String(content.text || content.title || "").replace(/\s+/g, " ").slice(0, 900)}`;
+}
+
+function ensureConversationIndex(memory) {
+  if (!memory.index || typeof memory.index !== "object") memory.index = {};
+  for (const key of ["tables", "charts", "mermaids", "texts", "files"]) {
+    if (!Array.isArray(memory.index[key])) memory.index[key] = [];
+  }
+  return memory.index;
+}
+
+function pushIndexed(memory, bucket, item = {}) {
+  const index = ensureConversationIndex(memory);
+  const list = index[bucket];
+  const fingerprint = item.fingerprint || contentFingerprint(item);
+  if (!fingerprint) return;
+  if (list.some((entry) => entry.fingerprint === fingerprint)) return;
+  list.push({ ...cloneJsonSafe(item), fingerprint, order: list.length + 1, rememberedAt: Date.now() });
+  if (list.length > CONTENT_HISTORY_MAX) list.splice(0, list.length - CONTENT_HISTORY_MAX);
+}
+
 function pushContentHistory(memory, content) {
   if (!memory || !content) return memory;
   if (!Array.isArray(memory.contentHistory)) memory.contentHistory = [];
-  memory.contentHistory.push({ ...cloneJsonSafe(content), rememberedAt: Date.now() });
-  if (memory.contentHistory.length > 20) memory.contentHistory = memory.contentHistory.slice(-20);
+  const clean = cloneJsonSafe(content);
+  const fingerprint = contentFingerprint(clean);
+  if (!fingerprint) return memory;
+
+  if (!memory.contentHistory.some((entry) => entry.fingerprint === fingerprint)) {
+    memory.contentHistory.push({ ...clean, fingerprint, rememberedAt: Date.now() });
+    if (memory.contentHistory.length > CONTENT_HISTORY_MAX) memory.contentHistory = memory.contentHistory.slice(-CONTENT_HISTORY_MAX);
+  }
+
+  if (clean.type === "table" && clean.table?.rows?.length) pushIndexed(memory, "tables", clean);
+  else if (clean.type === "chart" && (clean.chart?.data || clean.ui?.data)) pushIndexed(memory, "charts", clean);
+  else if (clean.type === "mermaid" && String(clean.code || clean.mermaid || clean.ui?.code || "").trim()) pushIndexed(memory, "mermaids", clean);
+  else if (clean.type === "file" || clean.file || clean.storedFilename || clean.filename) pushIndexed(memory, "files", clean);
+  else if (clean.type === "text" && String(clean.text || "").trim()) pushIndexed(memory, "texts", clean);
+
   return memory;
 }
 
@@ -773,63 +786,16 @@ function activeContentToText(content = {}, fallback = "") {
   if (content.type === "mermaid") {
     const code = content.code || content.mermaid || content.ui?.code || "";
     const ui = content.ui || mermaidUiFromMemory({ code, title: content.title }, content.title || "Mermaid diyagram");
-    const mermaidBlock = "";
+    const mermaidBlock = code ? `\n\n\`\`\`mermaid\n${code}\n\`\`\`` : "";
     return `${mermaidBlock}${ui ? widgetFence(ui) : ""}`.trim() || fallback || "";
   }
   if (content.type === "file" && content.file) return content.file.url || content.file.filename || fallback || "";
   return String(content.text || fallback || "").trim();
 }
 
-
-function wantsPreviousContent(text = "") {
-  const q = normalizeIntentText(text);
-  return /\b(onceki|bir onceki|az onceki|daha once|daha onceki|eski|sondan onceki|yukardaki|yukaridaki)\b/.test(q);
-}
-
-function relevantContentForIntent(content = {}, userText = "") {
-  if (!content || typeof content !== "object") return false;
-  if (wantsChartFromText(userText) || wantsExcelFromText(userText)) {
-    return content.type === "table" || Boolean(content.table?.rows?.length) || Boolean(activeContentTable(content)?.rows?.length);
-  }
-  if (wantsMermaidFromText(userText)) {
-    return content.type === "table" || content.type === "text" || content.type === "mermaid" || Boolean(content.table?.rows?.length) || Boolean(activeContentTable(content)?.rows?.length);
-  }
-  if (wantsPdfFromText(userText) || wantsDocumentFromText(userText) || wantsTextStatsFromText(userText)) {
-    return ["table", "text", "chart", "mermaid"].includes(String(content.type || ""));
-  }
-  return true;
-}
-
-function contentIdentity(content = {}) {
-  if (!content || typeof content !== "object") return "";
-  if (content.type === "table" && content.table?.rows?.length) return `table:${JSON.stringify(content.table.headers || [])}:${content.table.rows.length}`;
-  if (content.type === "chart") return `chart:${content.title || ""}:${JSON.stringify(content.chart?.data?.labels || content.ui?.data?.labels || [])}`;
-  if (content.type === "mermaid") return `mermaid:${String(content.code || content.mermaid || content.ui?.code || "").slice(0, 120)}`;
-  if (content.text) return `text:${String(content.text).slice(0, 160)}`;
-  return `${content.type || "unknown"}:${content.title || ""}`;
-}
-
-function selectHistoryContent(memory = {}, userText = "") {
-  if (!wantsPreviousContent(userText)) return null;
-  const history = Array.isArray(memory.contentHistory) ? memory.contentHistory.slice().reverse() : [];
-  if (!history.length) return null;
-
-  const activeKey = contentIdentity(memory.activeContent || {});
-  const seen = new Set();
-  for (const item of history) {
-    const key = contentIdentity(item);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    if (key === activeKey) continue;
-    if (relevantContentForIntent(item, userText)) return item;
-  }
-  return null;
-}
-
 function resolveActiveContent(req, answer = "") {
   const memory = hydrateMemoryFromRequest(req);
   const userText = latestUserIntentText(req);
-  const selectedHistoryContent = selectHistoryContent(memory, userText);
   const answerText = stripToolNoise(answer);
 
   // Aynı mesajda uzun içerik/metin verildiyse öncelik kullanıcının son içeriği.
@@ -848,7 +814,6 @@ function resolveActiveContent(req, answer = "") {
       : { type: "text", text: answerText, title: contentTitleFromText(answerText, "LUCY İçeriği"), source: "assistant-answer" };
   }
 
-  if (selectedHistoryContent) return selectedHistoryContent;
   if (memory.activeContent) return memory.activeContent;
   if (memory.lastTable?.rows?.length) return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "lastTable" };
   if (memory.lastChart?.data) return { type: "chart", chart: memory.lastChart, ui: chartUiFromMemory(memory.lastChart, "Grafik"), title: "Grafik", source: "lastChart" };
@@ -1001,7 +966,7 @@ function rememberToolResult(req, call = {}, result = {}) {
 function hydrateMemoryFromRequest(req) {
   const memory = getStoredToolMemory(req);
   const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (const message of messages.slice(-24)) {
+  for (const message of messages.slice(-HYDRATE_MESSAGE_MAX)) {
     const text = messageText(message);
     const role = String(message?.role || message?.sender || "").toLowerCase();
     const userInlineContent = role === "user" && (String(text).length > 90 || /\n/.test(text) || hasMarkdownTable(text));
@@ -1140,34 +1105,84 @@ function lastImageFileFromMemory(memory = {}) {
   return candidates.find((file) => isImageFileName(file?.storedFilename || file?.filename || "")) || null;
 }
 
-function buildUnifiedPdfInput({ title, stem, source, activeTable, activeContent, memory, userText }) {
-  const wantsEverything = /hepsi|bütün|butun|tamamını|tamamini|sayfayı|sayfayi|baştan sona|bastan sona|birleştir|birlestir|tek pdf|tablo.*grafik.*mermaid|grafik.*mermaid.*tablo/i.test(userText);
-  const input = {
-    title,
-    text: source || "",
-    filename: `${stem || "lucy-rapor"}.pdf`,
-  };
 
-  const table = activeTable?.rows?.length ? activeTable : memory.lastTable;
-  if (table?.rows?.length && (wantsEverything || activeContent?.type === "table" || /tablo|excel|grid|çizelge|cizelge/i.test(userText))) {
-    input.rows = table.rows;
-    input.headers = table.headers;
-    if (!String(input.text || "").trim()) input.text = tableToMarkdown(table);
+function referencedHistoryIndex(userText = "") {
+  const q = normalizeIntentText(userText);
+  if (/\b(ilk|birinci|en bastaki|en baştaki)\b/.test(q)) return "first";
+  if (/\b(ikinci|2\.|2inci)\b/.test(q)) return 1;
+  if (/\b(ucuncu|üçüncü|3\.|3uncu)\b/.test(q)) return 2;
+  if (/\b(onceki|bir onceki|az onceki|sondan bir onceki)\b/.test(q)) return "previous";
+  if (/\b(son|bunu|yukaridaki|ustteki|mevcut)\b/.test(q)) return "last";
+  return "last";
+}
+
+function tableFromHistory(memory = {}, userText = "") {
+  const tables = [];
+  ensureConversationIndex(memory);
+  if (Array.isArray(memory.index?.tables)) {
+    for (const item of memory.index.tables) {
+      const table = activeContentTable(item);
+      if (table?.rows?.length) tables.push(table);
+    }
   }
-
-  if (memory.lastChart?.data && (wantsEverything || activeContent?.type === "chart" || /grafik|chart|pasta|bar|çizgi|cizgi/i.test(userText))) {
-    input.chart = memory.lastChart;
+  if (Array.isArray(memory.contentHistory)) {
+    for (const item of memory.contentHistory) {
+      const table = activeContentTable(item);
+      if (table?.rows?.length) tables.push(table);
+    }
   }
-
-  if (memory.lastMermaid?.code && (wantsEverything || activeContent?.type === "mermaid" || /mermaid|diyagram|diagram|akış|akis/i.test(userText))) {
-    input.mermaid = memory.lastMermaid.code;
-    input.mermaidTitle = memory.lastMermaid.title || "Mermaid diyagram";
+  if (memory.lastTable?.rows?.length) tables.push(memory.lastTable);
+  const unique = [];
+  const seen = new Set();
+  for (const table of tables) {
+    const key = JSON.stringify({ headers: table.headers, first: table.rows?.[0], rows: table.rows?.length });
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(table);
   }
+  if (!unique.length) return null;
+  const ref = referencedHistoryIndex(userText);
+  if (ref === "first") return unique[0];
+  if (ref === "previous") return unique[Math.max(0, unique.length - 2)] || unique[unique.length - 1];
+  if (typeof ref === "number") return unique[ref] || unique[unique.length - 1];
+  return unique[unique.length - 1];
+}
 
-  if (activeContent?.type === "chart" && activeContent.chart?.data) input.chart = activeContent.chart;
-  if (activeContent?.type === "mermaid" && activeContent.code) input.mermaid = activeContent.code;
+function chartFromHistory(memory = {}, userText = "") {
+  const charts = [];
+  ensureConversationIndex(memory);
+  if (Array.isArray(memory.index?.charts)) {
+    for (const item of memory.index.charts) {
+      if (item?.type === "chart" && (item.chart?.data || item.ui?.data)) charts.push(item.chart || item.ui || item);
+    }
+  }
+  if (Array.isArray(memory.contentHistory)) {
+    for (const item of memory.contentHistory) {
+      if (item?.type === "chart" && (item.chart?.data || item.ui?.data)) charts.push(item.chart || item.ui || item);
+    }
+  }
+  if (memory.lastChart?.data) charts.push(memory.lastChart);
+  const unique = [];
+  const seen = new Set();
+  for (const chart of charts) {
+    const data = chart.data || chart.raw?.data;
+    const key = JSON.stringify({ labels: data?.labels, values: data?.datasets?.[0]?.data, title: chart.title });
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(chart);
+  }
+  if (!unique.length) return null;
+  const ref = referencedHistoryIndex(userText);
+  if (ref === "first") return unique[0];
+  if (ref === "previous") return unique[Math.max(0, unique.length - 2)] || unique[unique.length - 1];
+  if (typeof ref === "number") return unique[ref] || unique[unique.length - 1];
+  return unique[unique.length - 1];
+}
 
-  return input;
+function userWantsChartRestyleOnly(userText = "") {
+  const q = normalizeIntentText(userText);
+  return /\b(renkli|rengarenk|yuvarlak|pasta|pie|donut|halka|trend|cizgi|cubuk|bar|sutun)\b/.test(q)
+    && !/\b(ekle|cikar|çıkar|degistir|sil|yeni tablo|tablo yaz)\b/.test(q);
 }
 
 function buildImplicitToolCalls(answer = "", req) {
@@ -1206,16 +1221,31 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsChartFromText(userText)) {
-    const chartInput = tableToChartInput(activeTable, userText);
-    if (chartInput) calls.push({ tool: "chartData", input: { ...chartInput, title } });
+    const selectedChart = chartFromHistory(memory, userText);
+    const selectedTable = tableFromHistory(memory, userText) || activeTable;
+    const preferExistingChart = userSpecificallyReferencesChart(userText) && selectedChart?.data;
+    const chartInput = preferExistingChart
+      ? chartToChartInput(selectedChart, userText)
+      : selectedTable?.rows?.length
+        ? tableToChartInput(selectedTable, userText)
+        : chartToChartInput(selectedChart || memory.lastChart, userText);
+    if (chartInput) {
+      const chartTitle = chartTitleFromPlan(userText, chartInput, title || "Grafik");
+      calls.push({ tool: "chartData", input: { ...chartInput, title: chartTitle } });
+    }
   }
 
   if (wantsMermaidFromText(userText)) {
-    if (memory.lastMermaid?.code && /daha\s+(karmasik|detayli|genis|buyuk)|gelistir|ayrintili/.test(normalizeIntentText(userText))) {
+    const selectedTable = tableFromHistory(memory, userText) || activeTable;
+    const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
+    if (memory.lastMermaid?.code && /daha\s+(karmasik|detayli|genis|buyuk)|gelistir|ayrintili|renkli/.test(normalizeIntentText(userText)) && !selectedTable?.rows?.length && !selectedChart?.data) {
       calls.push({ tool: "mermaid", input: { code: memory.lastMermaid.code, title } });
-    } else if (activeTable?.rows?.length) {
-      const code = tableToMermaidCode(activeTable, title || "LUCY Diyagramı");
+    } else if (selectedTable?.rows?.length) {
+      const code = tableToMermaidCode(selectedTable, title || "LUCY Diyagramı", userText);
       if (code) calls.push({ tool: "mermaid", input: { code, title: title || "LUCY Diyagramı" } });
+    } else if (selectedChart?.data) {
+      const code = chartToMermaidCode(selectedChart, selectedChart.title || title || "LUCY Grafiği", userText);
+      if (code) calls.push({ tool: "mermaid", input: { code, title: selectedChart.title || title || "LUCY Grafiği" } });
     } else if (source) {
       const code = String(source).match(/```mermaid\s*([\s\S]*?)```/i)?.[1]?.trim();
       if (code) calls.push({ tool: "mermaid", input: { code, title } });
@@ -1233,8 +1263,8 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsPdfFromText(userText)) {
-    const pdfInput = buildUnifiedPdfInput({ title, stem, source, activeTable, activeContent, memory, userText });
-    calls.push({ tool: "pdf", input: pdfInput });
+    const pdfText = activeTable?.rows?.length && isOnlyTransformCommand(userText) ? tableToMarkdown(activeTable) : source;
+    calls.push({ tool: "pdf", input: { title, text: pdfText, filename: `${stem || "lucy-rapor"}.pdf` } });
   }
 
   if (wantsQrFromText(userText)) {
@@ -1303,23 +1333,11 @@ async function buildDeepSeekPlannerToolCalls(answer = "", req) {
 }
 
 
-function toolResultDedupeKey(item = {}) {
-  const ui = item?.ui || normalizeToolResultForUI(item?.tool, item?.result || {}, item?.input || {});
-  if (ui.type === "mermaid") return `mermaid:${String(ui.code || "").trim()}`;
-  if (ui.type === "chart") return `chart:${ui.chartType}:${JSON.stringify(ui.data?.labels || [])}:${JSON.stringify(ui.data?.datasets?.[0]?.data || [])}`;
-  if (ui.downloadUrl) return `file:${ui.downloadUrl}`;
-  return `${ui.tool || item?.tool}:${ui.title || ""}:${ui.type || ""}`;
-}
-
 function buildToolFinalAnswer(toolResults = []) {
   const lines = [];
   const widgets = [];
-  const seenResults = new Set();
 
   for (const item of toolResults || []) {
-    const dedupeKey = toolResultDedupeKey(item);
-    if (dedupeKey && seenResults.has(dedupeKey)) continue;
-    if (dedupeKey) seenResults.add(dedupeKey);
     const ui = item?.ui || normalizeToolResultForUI(item?.tool, item?.result || {}, item?.input || {});
     const tool = String(item?.tool || ui.tool || "tool");
 
@@ -1343,6 +1361,7 @@ function buildToolFinalAnswer(toolResults = []) {
 
     if (ui.type === "mermaid") {
       lines.push(`✅ ${ui.title || "Diyagram"} hazırlandı.`);
+      if (ui.code) lines.push(`\n\`\`\`mermaid\n${ui.code}\n\`\`\``);
       widgets.push(widgetFence(ui));
       continue;
     }
