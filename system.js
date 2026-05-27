@@ -8,6 +8,7 @@ const pdfParseModule = require("pdf-parse");
 const mammoth = require("mammoth");
 const ExcelJS = require("exceljs");
 const PDFDocument = require("pdfkit");
+const { renderPdfBuffer, renderPdfKitBuffer } = require("./core/render/pdfRenderEngine");
 
 const {
   publicBaseUrl,
@@ -1477,31 +1478,23 @@ function pdfEscape(value = "") {
 }
 
 async function exporterPdf(title, messages) {
-  const chunks = [];
-  const safeTitle = cleanUnicodePdfText(title || "Lucy sohbet").trim() || "Lucy sohbet";
-  const text = cleanUnicodePdfText(exporterPlainText(safeTitle, messages));
-  const doc = new PDFDocument({ margin: 50, size: "A4", info: { Title: safeTitle, Creator: "LUCY Exporter" } });
+  const safeTitle = exporterChatTitle(title || "Lucy sohbet");
+  const markdown = exporterMarkdown(safeTitle, messages);
 
-  return await new Promise((resolve) => {
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
+  try {
+    const buffer = exporterPdfToBuffer(await renderPdfBuffer({
+      title: safeTitle,
+      text: markdown,
+      filename: `${safeTitle.replace(/\s+/g, "-") || "lucy-sohbet"}.pdf`,
+    }));
+    if (buffer) return buffer;
+  } catch (error) {
+    console.error("[lucy-exporter-pdf] unified renderer failed:", error?.message || error);
+  }
 
-    const fontPath = findUnicodePdfFont();
-    if (fontPath) {
-      doc.registerFont("LucyUnicode", fontPath);
-      doc.font("LucyUnicode");
-    } else {
-      doc.font("Helvetica");
-    }
-
-    doc.fontSize(20).text(safeTitle, { underline: true });
-    doc.moveDown(0.6);
-    doc.fontSize(10).fillColor("#555").text(`LUCY Exporter - ${messages.length} mesaj`);
-    doc.moveDown(1);
-    doc.fillColor("#111").fontSize(10).text(text, { align: "left", lineGap: 3 });
-    doc.end();
-  });
+  return exporterPdfToBuffer(await renderPdfKitBuffer({ title: safeTitle, text: exporterPlainText(safeTitle, messages) }));
 }
+
 
 
 // ============================================================

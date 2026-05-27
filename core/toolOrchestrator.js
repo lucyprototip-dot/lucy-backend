@@ -363,10 +363,34 @@ function enrichToolCallInput(call, req) {
     }
   }
 
-  if (toolName === "pdf" && !String(input.text || input.content || input.value || "").trim()) {
-    if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(memory.lastTable);
-    else if (memory.lastText) input.text = memory.lastText;
-    else if (memory.lastChart?.data) input.text = JSON.stringify(memory.lastChart.data, null, 2);
+  if (toolName === "pdf") {
+    const hasPdfContent = String(input.text || input.content || input.value || input.markdown || "").trim()
+      || (Array.isArray(input.rows) && input.rows.length)
+      || input.chart || input.chartData || input.data
+      || String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim()
+      || (Array.isArray(input.widgets) && input.widgets.length);
+
+    if (!hasPdfContent) {
+      if (memory.activeContent?.type === "table" && memory.activeContent.table?.rows?.length) {
+        input.rows = memory.activeContent.table.rows;
+        input.headers = memory.activeContent.table.headers;
+        input.text = tableToMarkdown(memory.activeContent.table);
+      } else if (memory.activeContent?.type === "chart" && memory.lastChart?.data) {
+        input.chart = memory.lastChart;
+      } else if (memory.activeContent?.type === "mermaid" && memory.lastMermaid?.code) {
+        input.mermaid = memory.lastMermaid.code;
+      } else if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(memory.lastTable);
+      else if (memory.lastText) input.text = memory.lastText;
+      else if (memory.lastChart?.data) input.chart = memory.lastChart;
+      else if (memory.lastMermaid?.code) input.mermaid = memory.lastMermaid.code;
+    }
+
+    if (!input.chart && memory.lastChart?.data) input.chart = memory.lastChart;
+    if (!String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim() && memory.lastMermaid?.code) input.mermaid = memory.lastMermaid.code;
+    if (!(Array.isArray(input.rows) && input.rows.length) && memory.lastTable?.rows?.length && /tablo|excel|grid|çizelge|cizelge|hepsi|bütün|butun/i.test(userText)) {
+      input.rows = memory.lastTable.rows;
+      input.headers = memory.lastTable.headers;
+    }
   }
 
   if (toolName === "chartdata") {
@@ -513,7 +537,16 @@ function isUsableToolCall(call = {}) {
     return Array.isArray(labels) && labels.length > 0 && Array.isArray(values) && values.length > 0;
   }
   if (tool === "excel") return Boolean((Array.isArray(input.rows) && input.rows.length) || String(input.text || input.content || input.value || "").trim() || (Array.isArray(input.labels) && input.labels.length));
-  if (tool === "pdf") return Boolean(String(input.text || input.content || input.value || "").trim());
+  if (tool === "pdf") {
+    return Boolean(
+      String(input.text || input.content || input.value || input.markdown || "").trim() ||
+      (Array.isArray(input.rows) && input.rows.length) ||
+      (input.table && Array.isArray(input.table.rows) && input.table.rows.length) ||
+      input.chart || input.chartData || input.data ||
+      String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim() ||
+      (Array.isArray(input.widgets) && input.widgets.length)
+    );
+  }
   if (tool === "qr") return Boolean(String(input.text || input.url || input.value || "").trim());
   if (tool === "ocr") return Boolean(String(input.base64 || input.imageBase64 || input.fileBase64 || input.dataUrl || input.imageDataUrl || input.storedFilename || input.generatedFile || "").trim());
   return true;
@@ -555,8 +588,14 @@ function validateToolInput(call = {}, req = null) {
   }
 
   if (tool === "pdf") {
-    const hasText = String(input.text || input.content || input.value || "").trim();
-    if (!hasText && !memory.lastTable?.rows?.length && !memory.lastText) return fail("PDF için önce metin, tablo veya rapor içeriği gerekli aşkım.", "pdf_source_required");
+    const hasText = String(input.text || input.content || input.value || input.markdown || "").trim();
+    const hasRows = Array.isArray(input.rows) && input.rows.length;
+    const hasChart = input.chart || input.chartData || input.data || memory.lastChart?.data;
+    const hasMermaid = String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim() || memory.lastMermaid?.code;
+    const hasWidgets = Array.isArray(input.widgets) && input.widgets.length;
+    if (!hasText && !hasRows && !hasChart && !hasMermaid && !hasWidgets && !memory.lastTable?.rows?.length && !memory.lastText) {
+      return fail("PDF için önce metin, tablo, grafik veya diyagram içeriği gerekli aşkım.", "pdf_source_required");
+    }
   }
 
   if (tool === "ocr") {
@@ -1054,6 +1093,36 @@ function lastImageFileFromMemory(memory = {}) {
   return candidates.find((file) => isImageFileName(file?.storedFilename || file?.filename || "")) || null;
 }
 
+function buildUnifiedPdfInput({ title, stem, source, activeTable, activeContent, memory, userText }) {
+  const wantsEverything = /hepsi|bütün|butun|tamamını|tamamini|sayfayı|sayfayi|baştan sona|bastan sona|birleştir|birlestir|tek pdf|tablo.*grafik.*mermaid|grafik.*mermaid.*tablo/i.test(userText);
+  const input = {
+    title,
+    text: source || "",
+    filename: `${stem || "lucy-rapor"}.pdf`,
+  };
+
+  const table = activeTable?.rows?.length ? activeTable : memory.lastTable;
+  if (table?.rows?.length && (wantsEverything || activeContent?.type === "table" || /tablo|excel|grid|çizelge|cizelge/i.test(userText))) {
+    input.rows = table.rows;
+    input.headers = table.headers;
+    if (!String(input.text || "").trim()) input.text = tableToMarkdown(table);
+  }
+
+  if (memory.lastChart?.data && (wantsEverything || activeContent?.type === "chart" || /grafik|chart|pasta|bar|çizgi|cizgi/i.test(userText))) {
+    input.chart = memory.lastChart;
+  }
+
+  if (memory.lastMermaid?.code && (wantsEverything || activeContent?.type === "mermaid" || /mermaid|diyagram|diagram|akış|akis/i.test(userText))) {
+    input.mermaid = memory.lastMermaid.code;
+    input.mermaidTitle = memory.lastMermaid.title || "Mermaid diyagram";
+  }
+
+  if (activeContent?.type === "chart" && activeContent.chart?.data) input.chart = activeContent.chart;
+  if (activeContent?.type === "mermaid" && activeContent.code) input.mermaid = activeContent.code;
+
+  return input;
+}
+
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
@@ -1117,40 +1186,8 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsPdfFromText(userText)) {
-    const pdfParts = [];
-    const basePdfText = activeTable?.rows?.length && isOnlyTransformCommand(userText) ? tableToMarkdown(activeTable) : source;
-    if (String(basePdfText || "").trim()) pdfParts.push(basePdfText);
-
-    // Tek komutta “tablo + grafik + mermaid + PDF” istendiğinde PDF, önceki planlanan
-    // chartData/mermaid çıktılarının ham kodunu değil render edilebilir widget payload'unu taşır.
-    const plannedChart = calls.find((call) => call.tool === "chartData")?.input;
-    if (plannedChart) {
-      const data = plannedChart.data || { labels: plannedChart.labels || [], datasets: [{ label: plannedChart.label || "Veri", data: plannedChart.values || [] }] };
-      pdfParts.push(widgetFence({
-        type: "chart",
-        tool: "chartData",
-        title: plannedChart.title || title || "Grafik",
-        success: true,
-        chartType: plannedChart.chartType || "bar",
-        data,
-        raw: { success: true, chartType: plannedChart.chartType || "bar", title: plannedChart.title || title || "Grafik", data },
-      }));
-    }
-
-    const plannedMermaid = calls.find((call) => call.tool === "mermaid")?.input;
-    if (plannedMermaid?.code) {
-      pdfParts.push(`\n\n\`\`\`mermaid\n${plannedMermaid.code}\n\`\`\``);
-      pdfParts.push(widgetFence({
-        type: "mermaid",
-        tool: "mermaid",
-        title: plannedMermaid.title || title || "Mermaid diyagram",
-        success: true,
-        code: plannedMermaid.code,
-        raw: { success: true, type: "mermaid", code: plannedMermaid.code },
-      }));
-    }
-
-    calls.push({ tool: "pdf", input: { title, text: pdfParts.join("\n\n").trim(), filename: `${stem || "lucy-rapor"}.pdf` } });
+    const pdfInput = buildUnifiedPdfInput({ title, stem, source, activeTable, activeContent, memory, userText });
+    calls.push({ tool: "pdf", input: pdfInput });
   }
 
   if (wantsQrFromText(userText)) {
