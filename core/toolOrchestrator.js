@@ -24,17 +24,18 @@ const {
   isOnlyTransformCommand,
   stripToolNoise,
 } = require("./toolIntentDetector");
+const {
+  listLoadedTools,
+  getLoadedTool,
+  executeLucyTool,
+} = require("./toolExecutor");
+const {
+  normalizeToolResultForUI,
+  widgetFence,
+  summarizeToolResultLine,
+} = require("./toolResponseAdapter");
 
 dotenv.config();
-
-let toolRegistry = null;
-let lucyTools = {};
-try {
-  toolRegistry = require("../tools/toolRegistry");
-  lucyTools = toolRegistry.loadTools();
-} catch (error) {
-  console.warn("Lucy tool registry yüklenemedi:", error.message);
-}
 
 function envValue(name) {
   const value = process.env[name];
@@ -58,83 +59,6 @@ function ensureGeneratedDir() {
     fs.mkdirSync(GENERATED_DIR, { recursive: true });
   }
 }
-
-function listLoadedTools() {
-  if (toolRegistry?.listTools) return toolRegistry.listTools();
-  return Object.values(lucyTools || {}).map((tool) => ({
-    name: tool.name,
-    description: tool.description || "",
-  }));
-}
-
-const TOOL_NAME_ALIASES = {
-  chartdata: "chartData",
-  chart_data: "chartData",
-  "chart-data": "chartData",
-  chart: "chartData",
-  grafik: "chartData",
-  textstats: "textStats",
-  text_stats: "textStats",
-  "text-stats": "textStats",
-  webfetch: "webFetch",
-  web_fetch: "webFetch",
-  "web-fetch": "webFetch",
-  filemanager: "fileManager",
-  file_manager: "fileManager",
-  "file-manager": "fileManager",
-};
-
-function canonicalToolName(name) {
-  const raw = String(name || "").trim();
-  if (!raw) return "";
-  const compact = raw.replace(/\s+/g, "");
-  const lower = compact.toLowerCase();
-  return TOOL_NAME_ALIASES[lower] || TOOL_NAME_ALIASES[compact] || compact;
-}
-
-function getLoadedTool(name) {
-  const cleanName = String(name || "").trim();
-  if (!cleanName) return null;
-  const canonicalName = canonicalToolName(cleanName);
-  return (
-    toolRegistry?.getTool?.(canonicalName) ||
-    toolRegistry?.getTool?.(cleanName) ||
-    lucyTools?.[canonicalName] ||
-    lucyTools?.[cleanName] ||
-    null
-  );
-}
-
-function withTimeout(promise, ms = 30000) {
-  let timer = null;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Tool timeout: ${ms}ms`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-async function executeLucyTool(toolName, input = {}, timeoutMs = 30000) {
-  const canonicalName = canonicalToolName(toolName);
-  const tool = getLoadedTool(canonicalName);
-  if (!tool || typeof tool.execute !== "function") {
-    return {
-      success: false,
-      error: "tool_not_found",
-      message: `Tool bulunamadı: ${toolName}`,
-    };
-  }
-
-  try {
-    return await withTimeout(Promise.resolve(tool.execute(input || {})), timeoutMs);
-  } catch (error) {
-    return {
-      success: false,
-      error: "tool_execute_failed",
-      message: error.message,
-    };
-  }
-}
-
 
 function safeJsonParse(text) {
   try {
@@ -359,75 +283,6 @@ function persistToolFileResult(result = {}, req) {
 
   delete publicResult.base64;
   return publicResult;
-}
-
-
-function guessToolResultType(toolName, result = {}) {
-  const tool = String(toolName || result.tool || "").toLowerCase();
-  const mime = String(result.mimeType || result.contentType || "").toLowerCase();
-
-  if (result.downloadUrl || result.url || result.storedFilename || result.filename || result.base64) {
-    if (mime.includes("pdf") || String(result.filename || "").toLowerCase().endsWith(".pdf")) return "file-pdf";
-    if (mime.includes("spreadsheet") || String(result.filename || "").match(/\.xlsx?$/i)) return "file-excel";
-    if (mime.includes("zip") || String(result.filename || "").match(/\.zip$/i)) return "file-zip";
-    if (mime.startsWith("image/") || String(result.filename || "").match(/\.(png|jpe?g|webp|gif|svg)$/i)) return "image";
-    return "file";
-  }
-
-  if (tool === "chartdata" || result.chartType || result.data?.labels) return "chart";
-  if (tool === "mermaid" || result.type === "mermaid" || result.code) return "mermaid";
-  if (tool === "qr" || result.qr || result.svg || result.png) return "qr";
-  if (tool === "filemanager" || result.type === "file-list" || Array.isArray(result.files)) return "file-list";
-  if (tool === "calculator") return "calculation";
-  if (tool === "textstats") return "text-stats";
-  if (tool === "webfetch") return "web-fetch";
-  if (tool === "time") return "time";
-  if (tool === "mail") return "mail";
-  return "tool";
-}
-
-function normalizeToolResultForUI(toolName, result = {}, input = {}) {
-  const normalized = result && typeof result === "object" ? { ...result } : { value: result };
-  const type = guessToolResultType(toolName, normalized);
-  const title = normalized.title || input.title || input.subject || input.filename || input.name || `${toolName} sonucu`;
-
-  return {
-    type,
-    tool: toolName,
-    title,
-    success: normalized.success !== false,
-    url: normalized.downloadUrl || normalized.url || "",
-    downloadUrl: normalized.downloadUrl || normalized.url || "",
-    filename: normalized.filename || normalized.downloadName || normalized.storedFilename || "",
-    storedFilename: normalized.storedFilename || "",
-    mimeType: normalized.mimeType || normalized.contentType || "",
-    chartType: normalized.chartType || input.chartType || "bar",
-    data: normalized.data || normalized.chartData || null,
-    code: normalized.code || normalized.mermaid || "",
-    text: normalized.text || normalized.message || "",
-    files: Array.isArray(normalized.files) ? normalized.files : undefined,
-    headers: Array.isArray(normalized.headers) ? normalized.headers : (Array.isArray(input.headers) ? input.headers : undefined),
-    previewRows: Array.isArray(normalized.previewRows) ? normalized.previewRows : undefined,
-    rows: normalized.rows,
-    columns: normalized.columns,
-    entries: Array.isArray(normalized.entries) ? normalized.entries : undefined,
-    count: normalized.count,
-    raw: normalized,
-  };
-}
-
-function widgetFence(payload) {
-  return `\n\n\`\`\`lucy-widget\n${JSON.stringify(payload)}\n\`\`\``;
-}
-
-function summarizeToolResultLine(toolName, ui) {
-  if (!ui.success) return `❌ ${toolName}: ${ui.text || ui.raw?.error || "Tool çalışmadı"}`;
-  if (ui.downloadUrl) return `✅ ${toolName}: ${ui.downloadUrl}`;
-  if (ui.type === "chart") return `✅ ${toolName}: Grafik verisi hazır.`;
-  if (ui.type === "mermaid") return `✅ ${toolName}: Mermaid diyagramı hazır.`;
-  if (ui.type === "file-list") return `✅ ${toolName}: ${ui.count || ui.files?.length || 0} dosya listelendi.`;
-  if (ui.type === "mail") return `✅ ${toolName}: ${ui.text || "Mail işlemi tamamlandı."}`;
-  return `✅ ${toolName}: İşlem tamamlandı.`;
 }
 
 
