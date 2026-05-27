@@ -53,10 +53,15 @@ module.exports = {
     const colors = paletteFor(input, labels.length);
     const title = input.title || input.label || (chartType === "pie" ? "Pasta Grafiği" : chartType === "line" ? "Trend Grafiği" : "Grafik");
 
+    const colorful = Boolean(style.colorful || chartType === "pie" || input.colorful || Array.isArray(input.colors) || Array.isArray(style.colors));
+    const paletteName = style.palette || input.palette || (colorful ? "colorful" : "default");
+
     return {
       success: true,
       chartType,
-      style: { ...style, colors, colorful: style.colorful || chartType === "pie" || Boolean(input.colorful) || Array.isArray(input.colors) },
+      colorful,
+      paletteName,
+      style: { ...style, colors, colorful, palette: paletteName },
       colors,
       palette: colors,
       title,

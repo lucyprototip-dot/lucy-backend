@@ -1164,9 +1164,22 @@ function userExplicitlyWantsMermaidOnly(userText = "") {
 }
 
 function shouldRouteStyleMutationToMermaid(userText = "", activeContent = null, memory = {}) {
-  return userStyleOnlyMutation(userText)
-    && !userExplicitlyReferencesChart(userText)
-    && (activeContent?.type === "mermaid" || Boolean(memory.lastMermaid?.code));
+  if (!userStyleOnlyMutation(userText)) return false;
+
+  // Grafik dili açıkça geçiyorsa renk/stil komutunu Mermaid'e kaçırma.
+  // Örn: "renklerini değiştir", "renkli pasta dedim", "trend yap" son grafiği mutasyona sokmalı.
+  if (userExplicitlyReferencesChart(userText)) return false;
+
+  // Şema/diyagram/mermaid açıkça isteniyorsa Mermaid tarafında kal.
+  if (userExplicitlyWantsMermaidOnly(userText)) return true;
+
+  const activeType = activeContent?.type || memory.activeContent?.type || "";
+  if (activeType === "chart") return false;
+  if (activeType === "mermaid") return true;
+
+  // İkisi de varsa ve kullanıcı sadece renk/stil diyorsa varsayılan güvenli hedef son chart olsun.
+  if (memory.lastChart?.data) return false;
+  return Boolean(memory.lastMermaid?.code);
 }
 
 function referencedHistoryIndex(userText = "") {
@@ -1247,6 +1260,55 @@ function userWantsChartRestyleOnly(userText = "") {
   return /\b(renkli|rengarenk|yuvarlak|pasta|pie|donut|halka|trend|cizgi|cubuk|bar|sutun)\b/.test(q)
     && !/\b(ekle|cikar|çıkar|degistir|sil|yeni tablo|tablo yaz)\b/.test(q);
 }
+
+function chartTitleFromPlan(userText = "", chartInput = {}, fallback = "Grafik") {
+  const q = normalizeIntentText(userText);
+  const base = String(fallback || chartInput.title || chartInput.label || "Grafik")
+    .replace(/[*_`#]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 70) || "Grafik";
+  const chartType = chartInput.chartType || detectChartType(userText);
+  const style = chartInput.style || {};
+  const colorful = style.colorful || /renkli|rengarenk|renk/.test(q);
+  if (chartType === "pie") return `${base.replace(/grafiği|grafik|dağılımı/gi, "").trim()} ${colorful ? "(Renkli Pasta) 🎨" : "(Pasta Grafiği)"}`.replace(/\s+/g, " ").trim();
+  if (chartType === "line") return `${base.replace(/grafiği|grafik/gi, "").trim()} (Trend Grafiği)`.replace(/\s+/g, " ").trim();
+  return `${base}${colorful ? " (Renkli) 🎨" : ""}`.replace(/\s+/g, " ").trim();
+}
+
+function arbitrateToolCallsForIntent(toolCalls = [], req = null) {
+  const calls = Array.isArray(toolCalls) ? toolCalls.filter(Boolean) : [];
+  if (!calls.length) return calls;
+  const userText = latestUserIntentText(req);
+  const memory = hydrateMemoryFromRequest(req);
+  const wantsChart = wantsChartFromText(userText);
+  const wantsMermaid = userExplicitlyWantsMermaidOnly(userText);
+  const hasChartContext = Boolean(memory.lastChart?.data || memory.lastTable?.rows?.length || memory.activeContent?.type === "chart");
+
+  // AI/DS bazen stil komutunu Mermaid tool_call'a çeviriyor. Kullanıcı chart/pasta/trend dili kullanıyorsa
+  // ve açıkça şema/mermaid demediyse explicit Mermaid çağrısını bırakıp deterministic implicit chart path'e düş.
+  if (wantsChart && !wantsMermaid && hasChartContext) {
+    const chartCalls = calls.filter((call) => String(call.tool || "").toLowerCase() === "chartdata");
+    if (chartCalls.length) return chartCalls.slice(0, 1);
+    if (calls.some((call) => String(call.tool || "").toLowerCase() === "mermaid")) return [];
+  }
+
+  if (wantsMermaid) {
+    const mermaidCalls = calls.filter((call) => String(call.tool || "").toLowerCase() === "mermaid");
+    if (mermaidCalls.length) return mermaidCalls.slice(0, 1);
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for (const call of calls) {
+    const key = `${String(call.tool || "").toLowerCase()}:${JSON.stringify(call.input || {})}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(call);
+  }
+  return unique.slice(0, 5);
+}
+
 
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
@@ -1456,6 +1518,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
 
   // Öncelik: explicit model tool_call -> kod tabanlı direct intent -> opsiyonel DS fallback.
   let toolCalls = rawToolCalls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall);
+  toolCalls = arbitrateToolCallsForIntent(toolCalls, req);
 
   if (!toolCalls.length && allowAnyTool) {
     const implicitCalls = buildImplicitToolCalls(answer, req);
