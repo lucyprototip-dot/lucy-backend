@@ -19,6 +19,13 @@ function envValue(name) {
   return String(value).trim().replace(/^[\'\"]|[\'\"]$/g, "");
 }
 
+function numberEnv(name, fallback) {
+  const raw = envValue(name);
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 const PORT = process.env.PORT || 5050;
 const GENERATED_DIR = process.env.LUCY_GENERATED_DIR || path.resolve(__dirname, "..", "generated");
 const GENERATED_PUBLIC_PATH = "/generated";
