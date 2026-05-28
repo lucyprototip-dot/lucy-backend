@@ -7,7 +7,7 @@ function numberFromCell(value) {
   if (!raw) return null;
   const clean = raw
     .replace(/[₺$€£]/g, "")
-    .replace(/(tl|try|lira|kg|gr|g|lt|l|adet|paket|koli|li|lik)/gi, "")
+    .replace(/\b(tl|try|lira|kg|gr|g|lt|l|adet|paket|koli|li|lik)\b/gi, "")
     .replace(/[’']/g, "")
     .replace(/%/g, "")
     .replace(/\s/g, "")
@@ -44,9 +44,10 @@ function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
   let score = 0;
 
   if (/^(#|no|sira|sıra|id)$/i.test(h)) score -= 120;
-  if (/(miktar|adet|quantity|qty|birim)/.test(h)) score += chartType === "pie" ? -45 : -15;
-  if (/(toplam|tutar|fiyat|ucret|ücret|bedel|maliyet|deger|değer|price|amount|total)/.test(h)) score += chartType === "pie" ? 95 : 65;
-  if (/(birim fiyat|unit price)/.test(h)) score += 35;
+  if (/\b(miktar|adet|quantity|qty|birim)\b/.test(h)) score += chartType === "pie" ? -45 : -15;
+  if (/\b(toplam|tutar|total|amount)\b/.test(h)) score += chartType === "pie" ? 130 : 120;
+  if (/\b(fiyat|ucret|ücret|bedel|maliyet|deger|değer|price)\b/.test(h)) score += chartType === "pie" ? 80 : 55;
+  if (/\b(birim fiyat|unit price)\b/.test(h)) score -= /\b(birim fiyat|unit price)\b/.test(q) ? -60 : 50;
 
   if (q.includes("net") && /net|kar|kâr|kazanc|bakiye/.test(h)) score += 80;
   if (q.includes("gider") && /gider|kira|fatura|market|ulasim|eglence|saglik|giyim|abonelik|harcama/.test(h)) score += 70;
@@ -115,7 +116,12 @@ function monthLikeHeaders(table) {
   const nums = numericHeaders(table);
   const monthPattern = /ocak|subat|şubat|mart|nisan|mayis|mayıs|haziran|temmuz|agustos|ağustos|eylul|eylül|ekim|kasim|kasım|aralik|aralık|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|ay\s*\d+/i;
   const matching = nums.filter((header) => monthPattern.test(normalizeHeader(header)) || monthPattern.test(String(header || "")));
-  return matching.length >= 2 ? matching : (nums.length >= 3 ? nums : []);
+
+  // 12E-3: Çok sayısal kolon var diye kolonları otomatik veri noktası yapma.
+  // Pazar/ürün tablosunda Miktar + Birim Fiyat + Toplam gibi kolonlar bulunur;
+  // grafik istenince veri noktaları satırlar olmalı: Ürün -> Toplam.
+  // Sadece gerçek ay başlıkları varsa kolon toplamı mantığına geç.
+  return matching.length >= 2 ? matching : [];
 }
 
 function columnTotalsByHeaders(table, headers = []) {
