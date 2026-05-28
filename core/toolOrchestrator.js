@@ -479,6 +479,9 @@ function enrichToolCallInput(call, req) {
 
 
 function latestUserIntentText(req) {
+  if (req && typeof req.__lucyEffectiveUserText === "string" && req.__lucyEffectiveUserText.trim()) {
+    return req.__lucyEffectiveUserText.trim();
+  }
   const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i] || {};
@@ -503,7 +506,7 @@ function requestedMermaidWork(req) {
 
 function styleMutationText(userText = "") {
   const q = normalizeIntentText(userText);
-  return /\b(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|premium|modern|canli|farkli ton|tonlarda)\b/.test(q);
+  return /\b(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|pastel|premium|modern|canli|farkli ton|tonlarda)\b/.test(q);
 }
 
 function explicitChartTypeFromText(userText = "") {
@@ -596,7 +599,12 @@ function isUsableToolCall(call = {}) {
     return Array.isArray(labels) && labels.length > 0 && Array.isArray(values) && values.length > 0;
   }
   if (tool === "excel") return Boolean((Array.isArray(input.rows) && input.rows.length) || String(input.text || input.content || input.value || "").trim() || (Array.isArray(input.labels) && input.labels.length));
-  if (tool === "pdf") return Boolean(String(input.text || input.content || input.value || "").trim());
+  if (tool === "pdf") return Boolean(
+    String(input.text || input.content || input.value || "").trim()
+    || input.chart || input.chartData || input.data?.labels
+    || input.mermaid || input.code
+    || (Array.isArray(input.rows) && input.rows.length)
+  );
   if (tool === "qr") return Boolean(String(input.text || input.url || input.value || "").trim());
   if (tool === "ocr") return Boolean(String(input.base64 || input.imageBase64 || input.fileBase64 || input.dataUrl || input.imageDataUrl || input.storedFilename || input.generatedFile || "").trim());
   return true;
@@ -1738,6 +1746,8 @@ function fillPdfInputFromProducedContent(call = {}, producedContents = [], userT
   const latestWeb = [...producedContents].reverse().find((item) => item?.type === "web" && item.text);
   if (latestChart && /grafik|chart|pasta|trend|cizgi|bar|sutun|rapor/.test(q)) {
     input.chart = latestChart.chart;
+    input.data = latestChart.chart?.data || input.data;
+    input.chartType = latestChart.chart?.chartType || input.chartType;
     input.title = input.title || latestChart.title || "LUCY Grafiği";
   }
   if (latestMermaid && /diyagram|mermaid|akis|akış|sema|şema/.test(q)) {
@@ -1899,8 +1909,20 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsPdfFromText(userText)) {
-    const pdfText = activeTable?.rows?.length && isOnlyTransformCommand(userText) ? tableToMarkdown(activeTable) : source;
-    calls.push({ tool: "pdf", input: { title, text: pdfText, filename: `${stem || "lucy-rapor"}.pdf` } });
+    const pdfInput = { title, filename: `${stem || "lucy-rapor"}.pdf` };
+    if (activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data)) {
+      const chart = activeContent.chart || activeContent.ui;
+      pdfInput.chart = chart;
+      pdfInput.data = chart.data;
+      pdfInput.chartType = chart.chartType || chart.type || "bar";
+      pdfInput.text = "";
+    } else if (activeContent?.type === "mermaid" && String(activeContent.code || activeContent.mermaid || "").trim()) {
+      pdfInput.mermaid = activeContent.code || activeContent.mermaid;
+      pdfInput.text = "";
+    } else {
+      pdfInput.text = activeTable?.rows?.length && isOnlyTransformCommand(userText) ? tableToMarkdown(activeTable) : source;
+    }
+    calls.push({ tool: "pdf", input: pdfInput });
   }
 
   if (wantsQrFromText(userText)) {
@@ -1936,6 +1958,94 @@ function buildImplicitToolCalls(answer = "", req) {
     .filter((call) => isToolCallAllowedByCurrentIntent(call, req))
     .filter(isUsableToolCall)
     .slice(0, maxCalls);
+}
+
+
+function previousUserIntentText(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  let seenLatest = false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || message.sender || "").toLowerCase();
+    if (role && role !== "user") continue;
+    const text = String(message.content || message.text || message.message || "").trim();
+    if (!text) continue;
+    if (!seenLatest) { seenLatest = true; continue; }
+    return text;
+  }
+  return "";
+}
+
+function latestAssistantAskedClarification(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || message.sender || "").toLowerCase();
+    if (role === "user") continue;
+    if (role && role !== "assistant") continue;
+    const text = normalizeIntentText(messageText(message));
+    if (!text) continue;
+    return /hangisini|hangisini kastettin|hangi veriyi|ne yapmami|ne yapmam|netlestir|netleştir|daha detay|spesifik|tam olarak/.test(text);
+  }
+  return false;
+}
+
+function actionSuffixFromText(text = "") {
+  const q = normalizeIntentText(text);
+  if (wantsPdfFromText(q)) return "pdf yap";
+  if (wantsExcelFromText(q)) return "excel yap";
+  if (wantsZipFromText(q)) return "zip yap";
+  if (wantsDocumentFromText(q)) return documentFormatFromText(q) === "docx" ? "word yap" : `${documentFormatFromText(q)} dosyası yap`;
+  if (/\btablo\b.*\b(yap|goster|göster|cevir|çevir|donustur|dönüştür)\b|\btablo yap\b/.test(q)) return "tablo yap";
+  if (wantsChartFromText(q)) return "grafik yap";
+  if (wantsMermaidFromText(q)) return "diyagram yap";
+  return "";
+}
+
+function sourcePrefixFromText(text = "") {
+  const q = normalizeIntentText(text);
+  if (/\b(grafik|grafiği|grafigi|chart|pasta|pie|cizgi|çizgi|bar|sutun|sütun)\b/.test(q)) return "son grafiği";
+  if (/\b(tablo|tabloyu|tablom)\b/.test(q)) return "son tabloyu";
+  if (/\b(dosya|dosyayi|dosyayı|pdf|excel|zip|word|docx)\b/.test(q)) return "son dosyayı";
+  if (/\b(metin|yazi|yazı|siir|şiir)\b/.test(q)) return "son metni";
+  if (/\b(son|en son|az onceki|az önceki|bunu|onu|şunu|sunu|yaptigini|yaptığını)\b/.test(q)) return "son çıktıyı";
+  return "";
+}
+
+function currentUserHasClearAction(text = "") {
+  const q = normalizeIntentText(text);
+  return wantsPdfFromText(q) || wantsExcelFromText(q) || wantsZipFromText(q) || wantsDocumentFromText(q)
+    || wantsChartFromText(q) || wantsMermaidFromText(q)
+    || /\btablo\b.*\b(yap|goster|göster|cevir|çevir|donustur|dönüştür)\b|\btablo yap\b/.test(q);
+}
+
+function resolveClarificationFollowUpText(req) {
+  if (!latestAssistantAskedClarification(req)) return "";
+  const current = latestUserIntentText(req);
+  const previous = previousUserIntentText(req);
+  if (!current || !previous) return "";
+
+  // Kullanıcı zaten hem kaynak hem aksiyon verdi ise aynen kullan.
+  if (sourcePrefixFromText(current) && currentUserHasClearAction(current)) return current;
+
+  const source = sourcePrefixFromText(current) || sourcePrefixFromText(previous);
+  const action = currentUserHasClearAction(current) ? actionSuffixFromText(current) : actionSuffixFromText(previous);
+  if (source && action) return `${source} ${action}`;
+  return "";
+}
+
+function requestHasResolvableTypedReference(req) {
+  const text = normalizeIntentText(latestUserIntentText(req));
+  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyayı|dosyayi|metin|yazi|yazı|diyagram|şema|sema)\b/.test(text);
+  const hasAction = currentUserHasClearAction(text);
+  return hasTypedSource && hasAction;
+}
+
+function shouldBypassPlannerClarification(decision = {}, req = null) {
+  if (decision?.decision !== "ASK_CLARIFICATION") return false;
+  if (requestHasResolvableTypedReference(req)) return true;
+  if (resolveClarificationFollowUpText(req)) return true;
+  return false;
 }
 
 function deepSeekPlannerEnabled() {
@@ -2080,10 +2190,12 @@ function buildToolFinalAnswer(toolResults = []) {
 
 async function executeToolCallsFromAnswer(answer = "", req) {
   hydrateMemoryFromRequest(req);
+  const clarifiedIntent = resolveClarificationFollowUpText(req);
+  if (clarifiedIntent) req.__lucyEffectiveUserText = clarifiedIntent;
   const userText = latestUserIntentText(req);
   const aiDecision = await buildAiPlannerDecision(req);
 
-  if (aiDecision?.decision === "ASK_CLARIFICATION") {
+  if (aiDecision?.decision === "ASK_CLARIFICATION" && !shouldBypassPlannerClarification(aiDecision, req)) {
     return {
       toolCalls: [],
       toolResults: [],
@@ -2093,7 +2205,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   }
 
   const fallbackClarification = !aiDecision ? shouldAskClarificationWithoutAi(req) : "";
-  if (fallbackClarification) {
+  if (fallbackClarification && !requestHasResolvableTypedReference(req) && !resolveClarificationFollowUpText(req)) {
     return { toolCalls: [], toolResults: [], finalAnswer: fallbackClarification };
   }
 

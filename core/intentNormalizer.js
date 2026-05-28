@@ -108,7 +108,7 @@ function detectVisualStyle(value = "") {
   const text = normalizeToolIntentText(value);
   return {
     colorful: /\b(renkli|rengarenk|colorful|renk)\b/.test(text),
-    premium: /\b(premium|sik|modern|profesyonel|neon|cyberpunk)\b/.test(text),
+    premium: /\b(premium|sik|modern|profesyonel|neon|cyberpunk|pastel)\b/.test(text),
     round: /\b(yuvarlak|daire|pasta|pie|donut|halka)\b/.test(text),
     compact: /\b(kisa|kompakt|minimal)\b/.test(text),
   };
@@ -129,6 +129,14 @@ function detectColorPalette(value = "") {
     return {
       name: "mono",
       colors: ["#ffffff", "#9ca3af", "#111827"],
+      requested: true,
+    };
+  }
+
+  if (/\b(pastel|soft renk|yumusak renk|yumuşak renk)\b/.test(text)) {
+    return {
+      name: "pastel",
+      colors: ["#c4b5fd", "#a5f3fc", "#fbcfe8", "#fde68a", "#bbf7d0", "#fecaca"],
       requested: true,
     };
   }
