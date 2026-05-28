@@ -47,9 +47,13 @@ function wantsChartFromText(text = "") {
 
 function wantsDocumentFromText(text = "") {
   const q = normalizeIntentText(text);
-  // Sadece net "belge/dosya" kastı olanlar — "word", "json", "html" gibi genel kelimelerden kaçın
-  return /\b(txt dosya|markdown dosya|md dosya|docx belge|belge olustur|metin belgesi|dosya yap|dosya olarak kaydet|csv dosya|json dosya|html dosya)\b|dosya olarak ver/.test(q)
-    && !wantsPdfFromText(q) && !wantsExcelFromText(q) && !wantsZipFromText(q);
+  // Genel kelimeler tek başına tool tetiklemesin; ama "yap/olustur/kaydet/ver/indir" gibi
+  // net çıktı fiilleriyle gelirse document tool çalışsın.
+  return (
+    /\b(txt dosya|markdown dosya|md dosya|docx belge|belge olustur|belge hazirla|metin belgesi|dosya yap|dosya hazirla|dosya olarak kaydet|dosya olarak ver|csv dosya|json dosya|html dosya)\b/.test(q)
+    || /\b(word|docx|belge|txt|markdown|md|csv|json|html)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|cikar|çıkar|donustur|cevir)\b/.test(q)
+    || /\b(bunu|sunlari|metni|icerigi|tabloyu|onceki|son)\b.*\b(word|docx|belge|txt|markdown|md|csv|json|html)\b/.test(q)
+  ) && !wantsPdfFromText(q) && !wantsExcelFromText(q) && !wantsZipFromText(q);
 }
 
 function wantsQrFromText(text = "") {
@@ -64,8 +68,10 @@ function wantsOcrFromText(text = "") {
 
 function wantsMermaidFromText(text = "") {
   const q = normalizeIntentText(text);
-  // Sadece net diyagram/akış kastı olanlar — "sema", "bagla", "node" gibi çok geniş kelimeler çıkarıldı
-  return /mermaid|diyagram|diagram|flowchart|akis diagrami|akis semasi|is akisi|proses akisi|blok diyagram|kutularla goster|sequencediagram|classDiagram|statediagram|erdiagram|gantt/.test(q);
+  // "sema" tek başına geniş; fakat "sema yap/goster/ciz" ve "akis semasi" net diyagram kastı.
+  return /mermaid|diyagram|diagram|flowchart|akis diagrami|akis semasi|is akisi|proses akisi|blok diyagram|blok sema|kutularla goster|baglantili goster|sequencediagram|classDiagram|statediagram|erdiagram|gantt/.test(q)
+    || /\b(sema|şema)\b.*\b(yap|olustur|hazirla|goster|ciz|kur)\b/.test(q)
+    || /\b(bunu|sunlari|metni|icerigi|tabloyu|onceki|son)\b.*\b(sema|şema|diyagram|diagram)\b/.test(q);
 }
 
 function wantsTextStatsFromText(text = "") {
@@ -84,9 +90,9 @@ function wantsCalculatorFromText(text = "") {
 
 function wantsTimeFromText(text = "") {
   const q = normalizeIntentText(text);
-  // "saat kaç?", "tarih nedir?", "zaman ne?" — sadece açık zaman sorguları
-  return /\b(saat kac|saat nedir|simdi saat|guncel saat|saat ne|kacinci saat|tarih nedir|bugunun tarihi|bugun kac|bugunun saati|simdi kac|zaman nedir|gunun tarihi)\b/.test(q)
-    || /^(saat|zaman)\b/.test(q.trim());
+  // "saat/tarih" tek başına geniş; soru kalıbı veya bugün/şimdi bağlamı varsa time tool.
+  return /\b(saat kac|saat nedir|simdi saat|guncel saat|saat ne|kacinci saat|tarih nedir|bugunun tarihi|bugun tarih|bugun kac|bugunun saati|simdi kac|zaman nedir|gunun tarihi|tarih ne)\b/.test(q)
+    || /^(saat|zaman)$/.test(q.trim());
 }
 
 function wantsWebFetchFromText(text = "") {
@@ -108,7 +114,7 @@ function wantsMailFromText(text = "") {
 
 function wantsWhatsappFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /whatsapp gonder|whatsapp at|wp mesaj gonder|whatsapp yaz/.test(q);
+  return /whatsapp gonder|whatsapp mesaj gonder|whatsapp mesaj at|whatsapp at|wp mesaj gonder|wp gonder|whatsapp yaz/.test(q);
 }
 
 function wantsTelegramFromText(text = "") {

@@ -2,12 +2,15 @@ const fs = require("fs");
 const path = require("path");
 
 const tools = {};
+const loadErrors = {};
 let loaded = false;
 
 function loadTools({ force = false } = {}) {
   if (loaded && !force) return tools;
 
   Object.keys(tools).forEach((key) => delete tools[key]);
+  Object.keys(loadErrors).forEach((key) => delete loadErrors[key]);
+
   const toolsPath = __dirname;
   const files = fs
     .readdirSync(toolsPath)
@@ -16,17 +19,26 @@ function loadTools({ force = false } = {}) {
 
   for (const file of files) {
     const fullPath = path.join(toolsPath, file);
-    delete require.cache[require.resolve(fullPath)];
-    const tool = require(fullPath);
-    const toolName = tool.name || file.replace(/\.js$/i, "");
 
-    if (!toolName || typeof tool.execute !== "function") {
-      console.warn(`⚠️ Tool atlandı: ${file} execute() yok`);
-      continue;
+    try {
+      const resolvedPath = require.resolve(fullPath);
+      delete require.cache[resolvedPath];
+
+      const tool = require(fullPath);
+      const toolName = tool.name || file.replace(/\.js$/i, "");
+
+      if (!toolName || typeof tool.execute !== "function") {
+        loadErrors[file] = "execute() yok";
+        console.warn(`⚠️ Tool atlandı: ${file} execute() yok`);
+        continue;
+      }
+
+      tools[toolName] = tool;
+      console.log(`✅ Tool yüklendi: ${toolName}`);
+    } catch (error) {
+      loadErrors[file] = error?.message || String(error);
+      console.warn(`⚠️ Tool yüklenemedi: ${file} - ${loadErrors[file]}`);
     }
-
-    tools[toolName] = tool;
-    console.log(`✅ Tool yüklendi: ${toolName}`);
   }
 
   loaded = true;
@@ -46,11 +58,18 @@ function listTools() {
   }));
 }
 
+function listToolLoadErrors() {
+  if (!loaded) loadTools();
+  return { ...loadErrors };
+}
+
 loadTools();
 
 module.exports = {
   tools,
+  loadErrors,
   loadTools,
   getTool,
   listTools,
+  listToolLoadErrors,
 };

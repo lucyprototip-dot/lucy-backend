@@ -26,6 +26,7 @@ const {
 } = require("./toolIntentDetector");
 const {
   listLoadedTools,
+  listToolLoadErrors,
   getLoadedTool,
   executeLucyTool,
 } = require("./toolExecutor");
@@ -34,6 +35,11 @@ const {
   widgetFence,
   summarizeToolResultLine,
 } = require("./toolResponseAdapter");
+const {
+  compactText,
+  shouldRenderUi,
+  cleanSummaryLine,
+} = require("./toolRenderGuard");
 const {
   numberFromCell,
   tableToChartInput,
@@ -1300,10 +1306,10 @@ function buildImplicitToolCalls(answer = "", req) {
     // Turkce matematik kelimelerini sembollere cevir
     let expression = String(userText || "")
       .replace(/hesaplayin|hesapla|calculator|matematik|kac eder|sonucu ne|toplami|carpimi|bolumu/gi, "")
-      .replace(/bolu|bolü/gi, "/")
-      .replace(/carpi|kere|kat/gi, "*")
-      .replace(/arti|topla/gi, "+")
-      .replace(/eksi|cikar/gi, "-")
+      .replace(/\bbolu\b|\bbölü\b/gi, "/")
+      .replace(/\bcarpi\b|\bçarpı\b|\bkere\b|\bkat\b/gi, "*")
+      .replace(/\barti\b|\bartı\b|\btopla\b/gi, "+")
+      .replace(/\beksi\b|\bcikar\b|\bçıkar\b/gi, "-")
       .replace(/[^0-9+\-*/.()%,\s]/g, " ")
       .replace(/,/g, ".")
       .replace(/\s+/g, " ")
@@ -1450,57 +1456,66 @@ async function buildDeepSeekPlannerToolCalls(answer = "", req) {
 }
 
 
+function pushCleanSummaryLine(lines, line = "") {
+  const clean = cleanSummaryLine(line);
+  if (!clean) return;
+  if (lines.includes(clean)) return;
+  lines.push(clean);
+}
+
 function buildToolFinalAnswer(toolResults = []) {
   const lines = [];
   const widgets = [];
+  const seenUi = new Set();
 
   for (const item of toolResults || []) {
     const ui = item?.ui || normalizeToolResultForUI(item?.tool, item?.result || {}, item?.input || {});
+    if (!ui || typeof ui !== "object") continue;
+
     const tool = String(item?.tool || ui.tool || "tool");
+    const canRenderWidget = shouldRenderUi(ui, seenUi);
+    const pushWidget = () => {
+      if (canRenderWidget) widgets.push(widgetFence(ui));
+    };
 
     if (!ui.success) {
       const errorCode = ui.raw?.error || ui.raw?.raw?.error || "";
       const errorMsg = ui.text || ui.raw?.message || ui.raw?.raw?.message || "Tool çalışmadı.";
-      // Konfigürasyon gerektiren hatalar için daha açıklayıcı mesaj
       const configErrors = ["mail_config_required", "whatsapp_config_required", "telegram_config_required"];
-      if (configErrors.includes(errorCode)) {
-        lines.push(`⚙️ ${ui.title || tool}: ${errorMsg}`);
-      } else {
-        lines.push(`❌ ${ui.title || tool}: ${errorMsg}`);
-      }
-      widgets.push(widgetFence(ui));
+      pushCleanSummaryLine(lines, `${configErrors.includes(errorCode) ? "⚙️" : "❌"} ${ui.title || tool}: ${errorMsg}`);
+      pushWidget();
       continue;
     }
 
     if (ui.downloadUrl) {
-      lines.push("✅ İndirme hazırlandı. Aşağıdan indirebilirsin.");
-      widgets.push(widgetFence(ui));
+      pushCleanSummaryLine(lines, "✅ İndirme hazırlandı. Aşağıdan indirebilirsin.");
+      pushWidget();
       continue;
     }
 
     if (ui.type === "chart") {
-      lines.push(`✅ ${ui.title || "Grafik"} hazırlandı.`);
-      widgets.push(widgetFence(ui));
+      pushCleanSummaryLine(lines, `✅ ${ui.title || "Grafik"} hazırlandı.`);
+      pushWidget();
       continue;
     }
 
     if (ui.type === "mermaid") {
-      lines.push(`✅ ${ui.title || "Diyagram"} hazırlandı.`);
-      widgets.push(widgetFence(ui));
+      pushCleanSummaryLine(lines, `✅ ${ui.title || "Diyagram"} hazırlandı.`);
+      pushWidget();
       continue;
     }
 
     if (ui.text) {
-      lines.push(ui.text);
-      widgets.push(widgetFence(ui));
+      pushCleanSummaryLine(lines, ui.text);
+      pushWidget();
       continue;
     }
 
-    lines.push(summarizeToolResultLine(tool, ui));
-    widgets.push(widgetFence(ui));
+    pushCleanSummaryLine(lines, summarizeToolResultLine(tool, ui));
+    pushWidget();
   }
 
-  const cleanLines = lines.filter(Boolean).join("\n").trim();
+  const cleanLines = compactText(lines.filter(Boolean).join("\n")).trim();
   const cleanWidgets = widgets.filter(Boolean).join("");
   return `${cleanLines}${cleanWidgets}`.trim();
 }
@@ -1574,6 +1589,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
 module.exports = {
   publicBaseUrl,
   listLoadedTools,
+  listToolLoadErrors,
   getLoadedTool,
   executeLucyTool,
   persistToolFileResult,

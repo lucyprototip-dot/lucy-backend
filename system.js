@@ -13,6 +13,7 @@ const { renderPdfBuffer, renderPdfKitBuffer } = require("./core/render/pdfRender
 const {
   publicBaseUrl,
   listLoadedTools,
+  listToolLoadErrors,
   getLoadedTool,
   executeLucyTool,
   persistToolFileResult,
@@ -108,6 +109,7 @@ const MODE_TO_DEEPSEEK_MODEL = {
 
   // Düşün: v4 Flash / thinking
   think: DEEPSEEK_MODEL_THINKING,
+  thinking: DEEPSEEK_MODEL_THINKING,
   reasoning: DEEPSEEK_MODEL_THINKING,
   düşün: DEEPSEEK_MODEL_THINKING,
   dusun: DEEPSEEK_MODEL_THINKING,
@@ -124,6 +126,8 @@ const MODE_TO_DEEPSEEK_MODEL = {
 
   // Pro Düşün: v4 Pro / thinking
   pro_think: DEEPSEEK_MODEL_PRO,
+  pro_thinking: DEEPSEEK_MODEL_PRO,
+  "pro-thinking": DEEPSEEK_MODEL_PRO,
   pro_dusun: DEEPSEEK_MODEL_PRO,
   pro_düşün: DEEPSEEK_MODEL_PRO,
   "pro-dusun": DEEPSEEK_MODEL_PRO,
@@ -141,11 +145,14 @@ const MODE_TO_DEEPSEEK_MODEL = {
 
 const THINKING_MODE_IDS = new Set([
   "think",
+  "thinking",
   "reasoning",
   "düşün",
   "dusun",
   "düşünme",
   "pro_think",
+  "pro_thinking",
+  "pro-thinking",
   "pro_dusun",
   "pro_düşün",
   "pro-dusun",
@@ -1519,7 +1526,7 @@ async function exporterPdf(title, messages) {
 // ============================================================
 registerGeneratedRoutes(app, { fs, path, GENERATED_DIR, GENERATED_PUBLIC_PATH, ensureGeneratedDir, publicBaseUrl });
 registerStoreRoutes(app, { readLucyStore, writeLucyStore, STORE_PATH, PORT });
-registerToolRoutes(app, { listLoadedTools, getLoadedTool, executeLucyTool, persistToolFileResult });
+registerToolRoutes(app, { listLoadedTools, listToolLoadErrors, getLoadedTool, executeLucyTool, persistToolFileResult });
 registerChatRoutes(app, {
   isWebMode,
   buildLiveWebBody,

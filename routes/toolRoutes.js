@@ -1,11 +1,14 @@
 function registerToolRoutes(app, deps) {
-  const { listLoadedTools, getLoadedTool, executeLucyTool, persistToolFileResult } = deps;
+  const { listLoadedTools, listToolLoadErrors, getLoadedTool, executeLucyTool, persistToolFileResult } = deps;
 
   app.get("/api/tools", (req, res) => {
+    const tools = listLoadedTools();
+    const loadErrors = typeof listToolLoadErrors === "function" ? listToolLoadErrors() : {};
     res.json({
       success: true,
-      count: listLoadedTools().length,
-      tools: listLoadedTools(),
+      count: tools.length,
+      tools,
+      loadErrors,
     });
   });
 

@@ -32,6 +32,11 @@ function listLoadedTools() {
   }));
 }
 
+function listToolLoadErrors() {
+  if (toolRegistry?.listToolLoadErrors) return toolRegistry.listToolLoadErrors();
+  return {};
+}
+
 function canonicalToolName(name) {
   const raw = String(name || "").trim();
   if (!raw) return "";
@@ -87,6 +92,7 @@ module.exports = {
   TOOL_NAME_ALIASES,
   canonicalToolName,
   listLoadedTools,
+  listToolLoadErrors,
   getLoadedTool,
   executeLucyTool,
 };

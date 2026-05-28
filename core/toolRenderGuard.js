@@ -3,9 +3,20 @@
 // ve boş/yanlış widget tekrarlarını engellemek.
 // SRC / PDF / Lucy Exporter'a dokunmaz.
 
+function sortStable(value) {
+  if (Array.isArray(value)) return value.map(sortStable);
+  if (value && typeof value === "object") {
+    return Object.keys(value).sort().reduce((out, key) => {
+      out[key] = sortStable(value[key]);
+      return out;
+    }, {});
+  }
+  return value;
+}
+
 function stableString(value) {
   try {
-    return JSON.stringify(value, Object.keys(value || {}).sort());
+    return JSON.stringify(sortStable(value));
   } catch {
     return String(value || "");
   }
