@@ -405,9 +405,10 @@ function enrichToolCallInput(call, req) {
     input.chartType = explicitChartTypeFromText(userText) || input.chartType || input.type || "bar";
 
     if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
+      const inlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
       const selectedChart = chartFromHistory(memory, userText);
-      const selectedTable = tableFromHistory(memory, userText) || memory.lastTable;
-      const preferExistingChart = userSpecificallyReferencesChart(userText) && selectedChart?.data;
+      const selectedTable = inlineTable || tableFromHistory(memory, userText) || memory.lastTable;
+      const preferExistingChart = !inlineTable && userSpecificallyReferencesChart(userText) && selectedChart?.data;
       const chartInput = preferExistingChart
         ? chartToChartInput(selectedChart, userText)
         : selectedTable?.rows?.length
@@ -811,6 +812,38 @@ function parseFirstMarkdownTableObject(text = "") {
   return null;
 }
 
+
+
+function parseInlineKeyValueTableObject(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  // "Ocak 12000, Şubat 18000, Mart 9000" gibi doğrudan veri girilen grafik/tablo istekleri.
+  // Bu parser komut ezberi değildir; etiket+sayı çiftlerini güvenli şekilde çıkarır.
+  const work = raw
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/\b(verilerinden|verileriyle|verilerle|degerlerinden|değerlerinden|masraflarini|masraflarını|masraf|grafik|chart|pasta|cizgi|çizgi|bar|sutun|sütun|tablo|rapor|pdf|excel|zip|yap|hazirla|hazırla|olustur|oluştur|goster|göster|neon|pastel|renkli|mor|mavi|kirmizi|kırmızı|siyah|beyaz|tonlarda|tonlari|tonları)\b/gi, " ");
+
+  const pairs = [];
+  const seen = new Set();
+  const regex = /(^|[,;\n])\s*([A-Za-zÇĞİÖŞÜçğıöşü][A-Za-zÇĞİÖŞÜçğıöşü0-9 ._\-/]{0,42}?)\s+(-?\d+(?:[.,]\d+)?(?:\.\d{3})*)\b/g;
+  let match;
+  while ((match = regex.exec(work))) {
+    let label = String(match[2] || "").replace(/^[\s,;:-]+|[\s,;:-]+$/g, "").trim();
+    let value = String(match[3] || "").trim();
+    if (!label || !value) continue;
+    label = label.split(/\s+/).slice(-4).join(" ").trim();
+    const key = `${label.toLowerCase()}:${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pairs.push({ label, value });
+  }
+
+  if (pairs.length < 2) return null;
+  const headers = ["Etiket", "Değer"];
+  const rows = pairs.slice(0, 30).map((p) => ({ Etiket: p.label, "Değer": p.value }));
+  return { headers, rows, source: "inline-key-value" };
+}
 
 function parseLooseInlineTableObject(text = "") {
   const raw = String(text || "").trim();
@@ -1771,8 +1804,9 @@ function buildImplicitToolCalls(answer = "", req) {
   const memory = hydrateMemoryFromRequest(req);
   const activeContent = resolveActiveContent(req, answer);
   const source = activeContentToText(activeContent, sourceFromMemory(req, answer));
-  const inlineTable = parseFirstMarkdownTableObject(source) || parseLooseInlineTableObject(userText) || parseLooseInlineTableObject(source);
-  const activeTable = activeContentTable(activeContent) || inlineTable || memory.lastTable;
+  const inlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText) || parseFirstMarkdownTableObject(source) || parseLooseInlineTableObject(source) || parseInlineKeyValueTableObject(source);
+  // Kullanıcı mesajındaki yeni veri her zaman eski context'ten önce gelir.
+  const activeTable = inlineTable || activeContentTable(activeContent) || memory.lastTable;
   const title = activeContent?.title || contentTitleFromText(source, activeTable ? "LUCY Tablosu" : "LUCY Çıktısı");
   const stem = safeOutputStem(title);
   const calls = [];
@@ -1821,9 +1855,10 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsChartFromText(userText)) {
+    const freshInlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
     const selectedChart = chartFromHistory(memory, userText);
-    const selectedTable = tableFromHistory(memory, userText) || activeTable;
-    const preferExistingChart = userSpecificallyReferencesChart(userText) && selectedChart?.data;
+    const selectedTable = freshInlineTable || tableFromHistory(memory, userText) || activeTable;
+    const preferExistingChart = !freshInlineTable && userSpecificallyReferencesChart(userText) && selectedChart?.data;
     const chartInput = preferExistingChart
       ? chartToChartInput(selectedChart, userText)
       : selectedTable?.rows?.length
@@ -2081,6 +2116,12 @@ async function executeToolCallsFromAnswer(answer = "", req) {
       .filter(isUsableToolCall);
   }
 
+  const implicitCallsForCurrentIntent = (allowAnyTool || shouldForceChartRenderer(req)) ? buildImplicitToolCalls(answer, req) : [];
+
+  if (!toolCalls.length && implicitCallsForCurrentIntent.length) {
+    toolCalls = implicitCallsForCurrentIntent;
+  }
+
   if (!toolCalls.length) {
     toolCalls = shouldForceChartRenderer(req)
       ? []
@@ -2096,8 +2137,6 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   if (wantsFileManagerFromText(latestUserIntentText(req)) && !toolCalls.some((call) => String(call.tool || "").toLowerCase() === "filemanager")) {
     toolCalls = [];
   }
-
-  const implicitCallsForCurrentIntent = (allowAnyTool || shouldForceChartRenderer(req)) ? buildImplicitToolCalls(answer, req) : [];
 
   if (!toolCalls.length && implicitCallsForCurrentIntent.length) {
     toolCalls = implicitCallsForCurrentIntent;
@@ -2141,7 +2180,12 @@ async function executeToolCallsFromAnswer(answer = "", req) {
       continue;
     }
 
-    const rawResult = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
+    let rawResult;
+    try {
+      rawResult = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
+    } catch (error) {
+      rawResult = { success: false, error: "tool_execution_error", message: error?.message || "Tool çalışırken hata oluştu." };
+    }
     const persistedResult = persistToolFileResult(rawResult, req);
     rememberToolResult(req, call, persistedResult);
     const produced = producedFileCandidate(call.tool, persistedResult);
