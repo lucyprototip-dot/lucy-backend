@@ -20,6 +20,28 @@ function escapeHtml(value = '') {
 
 function escapeAttr(value = '') { return escapeHtml(value).replace(/`/g, '&#96;'); }
 
+function emojiToken(label = '', kind = 'neutral') {
+  const safe = escapeHtml(label);
+  const cls = `emoji-token emoji-${kind}`;
+  return `<span class="${cls}">${safe}</span>`;
+}
+
+function renderEmojiFallback(value = '') {
+  return String(value ?? '')
+    .replace(/❤️‍🔥|❤‍🔥/g, emojiToken('♥', 'heart') + emojiToken('🔥', 'fire'))
+    .replace(/❤️|❤|♥/g, emojiToken('♥', 'heart'))
+    .replace(/🔥/g, emojiToken('🔥', 'fire'))
+    .replace(/✅/g, emojiToken('✓', 'ok'))
+    .replace(/❌/g, emojiToken('×', 'bad'))
+    .replace(/📊|📈|📉/g, emojiToken('▣', 'chart'))
+    .replace(/📄|📝|📃/g, emojiToken('▤', 'doc'))
+    .replace(/📦|🗜️|🗜/g, emojiToken('ZIP', 'zip'))
+    .replace(/💡/g, emojiToken('!', 'idea'))
+    .replace(/⭐|✨/g, emojiToken('★', 'star'))
+    .replace(/💙/g, emojiToken('♥', 'blue'))
+    .replace(/➡️|➡|→/g, '&rarr;');
+}
+
 function stripMarkdown(value = '') {
   return String(value ?? '')
     .replace(/^#{1,6}\s+/gm, '')
@@ -31,11 +53,12 @@ function stripMarkdown(value = '') {
 function normalizeCurrency(value = '') { return String(value ?? '').replace(/₺/g, 'TL'); }
 
 function inlineMarkdownToHtml(value = '') {
-  return escapeHtml(normalizeCurrency(value))
+  const html = escapeHtml(normalizeCurrency(value))
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/_([^_]+)_/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1">$1</a>');
+  return renderEmojiFallback(html);
 }
 
 function parseMaybeJson(raw = '') {
@@ -201,7 +224,8 @@ function extractMermaidNodes(code = '') {
     if (/^end\b/i.test(line)) { currentSubgraph = null; return; }
     if (/^(style|classDef|class|linkStyle)\b/i.test(line)) return;
 
-    const parts = line.split(/\s*(?:-->|---|==>|-.->|--[^-]*-->)\s*/).filter(Boolean);
+    const edgeLine = line.replace(/\|[^|]*\|/g, ' ');
+    const parts = edgeLine.split(/\s*(?:-->|---|==>|-.->|--[^-]*-->)\s*/).filter(Boolean);
     if (parts.length >= 2) {
       let previous = parseNode(parts[0]);
       for (let i = 1; i < parts.length; i += 1) {
@@ -363,7 +387,7 @@ function buildDocumentMarkdown(input = {}) {
 }
 
 function getCss() {
-  return `@page{size:A4;margin:34px}*{box-sizing:border-box}body{font-family:'Segoe UI Emoji','Noto Color Emoji','Apple Color Emoji','DejaVu Sans','Noto Sans',Arial,sans-serif;color:#111827;font-size:14px;line-height:1.58;margin:0;background:#fff}h1{font-size:25px;margin:0 0 20px;font-weight:850;letter-spacing:-.02em;color:#050505;border-bottom:2px solid #111827;padding-bottom:10px}h2{font-size:18px;margin:0 0 12px;font-weight:850}h3{font-size:16px;margin:16px 0 6px}p{margin:7px 0;white-space:pre-wrap}.spacer{height:7px}ul{margin:8px 0 12px 20px;padding:0}li{margin:4px 0}code{font-family:Consolas,monospace;background:#f3f4f6;padding:1px 4px;border-radius:4px}pre{background:#111827;color:#f9fafb;border-radius:10px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}table{border-collapse:separate;border-spacing:0;width:100%;margin:10px 0 8px;font-size:12.5px;border:1px solid #94a3b8;border-radius:12px;overflow:hidden}tr{page-break-inside:avoid;page-break-after:auto}th,td{border-right:1px solid #94a3b8;border-bottom:1px solid #94a3b8;padding:8px 9px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th:last-child,td:last-child{border-right:0}tbody tr:last-child td{border-bottom:0}th{background:#111827;color:#fff;font-weight:800}tbody tr:nth-child(even) td{background:#f8fafc}a{color:#075985;text-decoration:none}.footer{margin-top:28px;font-size:10px;color:#64748b;border-top:1px solid #e5e7eb;padding-top:8px}.page-avoid{break-inside:avoid;page-break-inside:avoid}.chart-card,.diagram-card,.file-card,.table-card{border:1px solid #cbd5e1;border-radius:16px;padding:16px 18px;margin:16px 0 20px;background:#f8fafc;box-shadow:0 8px 20px rgba(15,23,42,.07)}.chart-grid{display:grid;grid-template-columns:260px 1fr;gap:18px;align-items:center}.chart-svg{width:100%;height:auto;background:#fff;border:1px solid #e2e8f0;border-radius:14px}.pie-svg{max-width:260px}.legend{display:flex;flex-direction:column;gap:8px}.legend-row{display:grid;grid-template-columns:16px 1fr 76px;gap:8px;align-items:center}.swatch{width:14px;height:14px;border-radius:4px}.legend-row strong{text-align:right}.svg-label{font:700 14px 'DejaVu Sans',Arial,sans-serif;fill:#0f172a}.svg-value{font:800 13px 'DejaVu Sans',Arial,sans-serif;fill:#0f172a}.axis{stroke:#94a3b8;stroke-width:2}.mermaid-svg{width:100%;height:auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px}.edge{fill:none;stroke:#64748b;stroke-width:2.2}.node{fill:#ffffff;stroke:#64748b;stroke-width:2}.node.start{fill:#111827;stroke:#111827}.node-text{font:800 13px 'Segoe UI Emoji','Noto Color Emoji','DejaVu Sans',Arial,sans-serif;fill:#111827}.start-text{fill:#fff}.file-card{display:flex;align-items:center;gap:12px}.file-icon{width:44px;height:44px;border-radius:12px;background:#111827;color:#fff;display:flex;align-items:center;justify-content:center;font-size:23px}.file-card p{margin:2px 0 0;color:#64748b}`;
+  return `@page{size:A4;margin:34px}*{box-sizing:border-box}body{font-family:'Segoe UI Emoji','Noto Color Emoji','Apple Color Emoji','DejaVu Sans','Noto Sans',Arial,sans-serif;color:#111827;font-size:14px;line-height:1.58;margin:0;background:#fff}h1{font-size:25px;margin:0 0 20px;font-weight:850;letter-spacing:-.02em;color:#050505;border-bottom:2px solid #111827;padding-bottom:10px}h2{font-size:18px;margin:0 0 12px;font-weight:850}h3{font-size:16px;margin:16px 0 6px}p{margin:7px 0;white-space:pre-wrap}.spacer{height:7px}ul{margin:8px 0 12px 20px;padding:0}li{margin:4px 0}code{font-family:Consolas,monospace;background:#f3f4f6;padding:1px 4px;border-radius:4px}pre{background:#111827;color:#f9fafb;border-radius:10px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}table{border-collapse:separate;border-spacing:0;width:100%;margin:10px 0 8px;font-size:12.5px;border:1px solid #94a3b8;border-radius:12px;overflow:hidden}tr{page-break-inside:avoid;page-break-after:auto}th,td{border-right:1px solid #94a3b8;border-bottom:1px solid #94a3b8;padding:8px 9px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th:last-child,td:last-child{border-right:0}tbody tr:last-child td{border-bottom:0}th{background:#111827;color:#fff;font-weight:800}tbody tr:nth-child(even) td{background:#f8fafc}a{color:#075985;text-decoration:none}.footer{margin-top:28px;font-size:10px;color:#64748b;border-top:1px solid #e5e7eb;padding-top:8px}.emoji-token{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 4px;margin:0 2px;border-radius:999px;font-size:11px;font-weight:900;line-height:18px;vertical-align:middle;color:#fff;background:#64748b}.emoji-heart{background:#e11d48}.emoji-fire{background:#f97316}.emoji-ok{background:#16a34a}.emoji-bad{background:#dc2626}.emoji-chart{background:#2563eb}.emoji-doc{background:#475569}.emoji-zip{background:#7c3aed}.emoji-idea{background:#ca8a04}.emoji-star{background:#9333ea}.emoji-blue{background:#0891b2}.page-avoid{break-inside:avoid;page-break-inside:avoid}.chart-card,.diagram-card,.file-card,.table-card{border:1px solid #cbd5e1;border-radius:16px;padding:16px 18px;margin:16px 0 20px;background:#f8fafc;box-shadow:0 8px 20px rgba(15,23,42,.07)}.chart-grid{display:grid;grid-template-columns:260px 1fr;gap:18px;align-items:center}.chart-svg{width:100%;height:auto;background:#fff;border:1px solid #e2e8f0;border-radius:14px}.pie-svg{max-width:260px}.legend{display:flex;flex-direction:column;gap:8px}.legend-row{display:grid;grid-template-columns:16px 1fr 76px;gap:8px;align-items:center}.swatch{width:14px;height:14px;border-radius:4px}.legend-row strong{text-align:right}.svg-label{font:700 14px 'DejaVu Sans',Arial,sans-serif;fill:#0f172a}.svg-value{font:800 13px 'DejaVu Sans',Arial,sans-serif;fill:#0f172a}.axis{stroke:#94a3b8;stroke-width:2}.mermaid-svg{width:100%;height:auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px}.edge{fill:none;stroke:#64748b;stroke-width:2.2}.node{fill:#ffffff;stroke:#64748b;stroke-width:2}.node.start{fill:#111827;stroke:#111827}.node-text{font:800 13px 'Segoe UI Emoji','Noto Color Emoji','DejaVu Sans',Arial,sans-serif;fill:#111827}.start-text{fill:#fff}.file-card{display:flex;align-items:center;gap:12px}.file-icon{width:44px;height:44px;border-radius:12px;background:#111827;color:#fff;display:flex;align-items:center;justify-content:center;font-size:23px}.file-card p{margin:2px 0 0;color:#64748b}`;
 }
 
 function buildHtml({ title, markdown }) {

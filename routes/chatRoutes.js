@@ -21,6 +21,22 @@ function registerChatRoutes(app, deps) {
       const body = req.body || {};
 
       if (isWebMode(body)) {
+        // Web açıkken bile kullanıcı PDF/TXT/ZIP/Excel/QR gibi gerçek tool işi istiyorsa
+        // live-web cevap motoruna gitmeden deterministic tool engine çalışsın.
+        // Böylece ham tool_call JSON görünmez ve son dosya hafızası ezilmez.
+        const directToolPayload = await executeToolCallsFromAnswer("", req);
+        if (directToolPayload.toolCalls?.length) {
+          if (directToolPayload.finalAnswer) writeSse(res, { delta: directToolPayload.finalAnswer });
+          writeSse(res, {
+            done: true,
+            answer: directToolPayload.finalAnswer,
+            toolCalls: directToolPayload.toolCalls,
+            toolResults: directToolPayload.toolResults,
+            provider: "tool-engine",
+          });
+          return res.end();
+        }
+
         const liveWeb = await buildLiveWebBody(body);
         if (liveWeb.instantAnswer) {
           writeSse(res, { delta: liveWeb.instantAnswer });
@@ -49,6 +65,19 @@ function registerChatRoutes(app, deps) {
 
   app.post("/api/chat", async (req, res) => {
     try {
+      if (isWebMode(req.body || {})) {
+        const directToolPayload = await executeToolCallsFromAnswer("", req);
+        if (directToolPayload.toolCalls?.length) {
+          return res.json({
+            success: true,
+            provider: "tool-engine",
+            answer: directToolPayload.finalAnswer,
+            toolCalls: directToolPayload.toolCalls,
+            toolResults: directToolPayload.toolResults,
+          });
+        }
+      }
+
       const liveAnswer = await answerLiveWebIfNeeded(req.body || {});
       if (liveAnswer) {
         return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });

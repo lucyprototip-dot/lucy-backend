@@ -1702,13 +1702,44 @@ function fillPdfInputFromProducedContent(call = {}, producedContents = [], userT
   const q = normalizeIntentText(userText);
   const latestChart = [...producedContents].reverse().find((item) => item?.type === "chart" && item.chart);
   const latestMermaid = [...producedContents].reverse().find((item) => item?.type === "mermaid" && item.code);
-  if (latestChart && /grafik|chart|pasta|trend|cizgi|bar|sutun/.test(q)) {
+  const latestWeb = [...producedContents].reverse().find((item) => item?.type === "web" && item.text);
+  if (latestChart && /grafik|chart|pasta|trend|cizgi|bar|sutun|rapor/.test(q)) {
     input.chart = latestChart.chart;
     input.title = input.title || latestChart.title || "LUCY Grafiği";
   }
   if (latestMermaid && /diyagram|mermaid|akis|akış|sema|şema/.test(q)) {
     input.mermaid = latestMermaid.code;
     input.title = input.title || latestMermaid.title || "LUCY Diyagramı";
+  }
+  if (latestWeb && (!String(input.text || input.content || "").trim() || /oku|sayfa|web|link|url|ozet|özet/.test(q))) {
+    input.text = latestWeb.text;
+    input.title = input.title || latestWeb.title || "Web Özeti";
+  }
+  return { ...call, input };
+}
+
+function fillDocumentInputFromProducedContent(call = {}, producedContents = [], userText = "") {
+  const tool = String(call.tool || "").toLowerCase();
+  if (tool !== "document") return call;
+  const input = call.input && typeof call.input === "object" ? { ...call.input } : {};
+  const q = normalizeIntentText(userText);
+  const latestWeb = [...producedContents].reverse().find((item) => item?.type === "web" && item.text);
+  const latestChart = [...producedContents].reverse().find((item) => item?.type === "chart" && item.chart);
+  const latestMermaid = [...producedContents].reverse().find((item) => item?.type === "mermaid" && item.code);
+  const current = String(input.content || input.text || input.markdown || "").trim();
+  const currentLooksLikePrompt = /(bunu|sonra|dosyas[ıi]|yap|haz[ıi]rla|oku|sayfa|link|url)/.test(normalizeIntentText(current));
+  if (latestWeb && (!current || currentLooksLikePrompt || /oku|sayfa|web|link|url|ozet|özet/.test(q))) {
+    input.content = latestWeb.text;
+    input.title = input.title || latestWeb.title || "Web Özeti";
+    input.filename = input.filename || `${safeOutputStem(input.title || "web-ozeti")}.${input.format || "txt"}`;
+  } else if (latestChart && /grafik|chart|pasta|trend|cizgi|bar/.test(q) && !current) {
+    input.content = `${latestChart.title || "Grafik"}
+
+${JSON.stringify(latestChart.chart?.data || latestChart.chart, null, 2)}`;
+    input.title = input.title || latestChart.title || "Grafik";
+  } else if (latestMermaid && /diyagram|mermaid|akis|akış|sema|şema/.test(q) && !current) {
+    input.content = latestMermaid.code;
+    input.title = input.title || latestMermaid.title || "Diyagram";
   }
   return { ...call, input };
 }
@@ -1718,6 +1749,11 @@ function producedContentCandidate(tool = "", result = {}) {
   if (!result || result.success === false) return null;
   if (t === "chartdata" && result.data) return { type: "chart", chart: result, title: result.title || "Grafik" };
   if (t === "mermaid" && (result.code || result.mermaid)) return { type: "mermaid", code: result.code || result.mermaid, title: result.title || "Diyagram" };
+  if (t === "webfetch" && (result.text || result.title)) {
+    const title = result.title || result.url || "Web Özeti";
+    const text = [result.title ? `Başlık: ${result.title}` : "", result.text ? `Özet: ${result.text}` : "", result.url ? `Kaynak: ${result.url}` : ""].filter(Boolean).join("\n\n");
+    return { type: "web", text, title, url: result.url || "" };
+  }
   return null;
 }
 
@@ -1995,9 +2031,16 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     toolCalls = [];
   }
 
-  if (!toolCalls.length && (allowAnyTool || shouldForceChartRenderer(req))) {
-    const implicitCalls = buildImplicitToolCalls(answer, req);
-    if (implicitCalls.length) toolCalls = implicitCalls;
+  const implicitCallsForCurrentIntent = (allowAnyTool || shouldForceChartRenderer(req)) ? buildImplicitToolCalls(answer, req) : [];
+
+  if (!toolCalls.length && implicitCallsForCurrentIntent.length) {
+    toolCalls = implicitCallsForCurrentIntent;
+  } else if (toolCalls.length && implicitCallsForCurrentIntent.length && userAskedMultiOutputChain(latestUserIntentText(req))) {
+    // Model bazen zincirin son halkasını (özellikle ZIP veya document) atlıyor.
+    // Kullanıcının açık istediği deterministic çağrıları eksikse tamamla.
+    const existing = new Set(toolCalls.map((call) => String(canonicalChainToolName(call.tool)).toLowerCase()));
+    const additions = implicitCallsForCurrentIntent.filter((call) => !existing.has(String(canonicalChainToolName(call.tool)).toLowerCase()));
+    if (additions.length) toolCalls = orderToolCallsForChaining([...toolCalls, ...additions], latestUserIntentText(req));
   }
 
   if (!toolCalls.length && allowAnyTool && deepSeekPlannerEnabled()) {
@@ -2022,6 +2065,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
 
   for (const originalCall of toolCalls) {
     let call = fillPdfInputFromProducedContent(originalCall, producedContentsThisTurn, latestUserIntentText(req));
+    call = fillDocumentInputFromProducedContent(call, producedContentsThisTurn, latestUserIntentText(req));
     call = fillZipInputFromProducedFiles(call, producedFilesThisTurn, { preferProduced: preferProducedZip });
     const validation = validateToolInput(call, req);
     if (!validation.ok) {
