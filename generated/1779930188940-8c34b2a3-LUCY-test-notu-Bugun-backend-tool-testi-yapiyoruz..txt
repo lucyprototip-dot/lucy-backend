@@ -1,1 +1,0 @@
-LUCY test notu: Bugün backend tool testi yapıyoruz.
