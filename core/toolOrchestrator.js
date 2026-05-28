@@ -15,6 +15,7 @@ const {
   wantsOcrFromText,
   wantsMermaidFromText,
   wantsTextStatsFromText,
+  wantsFileManagerFromText,
   wantsCalculatorFromText,
   wantsTimeFromText,
   wantsWebFetchFromText,
@@ -1010,6 +1011,7 @@ function rememberFile(memory, result = {}, toolName = "") {
   if (toolName === "pdf" || lower.endsWith(".pdf")) memory.lastPdf = file;
   if (toolName === "excel" || /\.xlsx?$/.test(lower)) memory.lastExcel = file;
   if (toolName === "zip" || lower.endsWith(".zip")) memory.lastZip = file;
+  if (toolName === "document" || /\.(txt|md|json|csv|html)$/i.test(lower)) memory.lastDocument = file;
   return memory;
 }
 
@@ -1291,6 +1293,64 @@ function userWantsChartRestyleOnly(userText = "") {
     && !/\b(ekle|cikar|çıkar|degistir|sil|yeni tablo|tablo yaz)\b/.test(q);
 }
 
+
+function calculatorExpressionFromText(userText = "") {
+  let expression = normalizeIntentText(userText)
+    .replace(/\b(hesaplayin|hesapla|calculator|matematik|kac eder|sonucu ne|toplami ne|toplami|carpimi ne|carpimi|bolumu ne|bolumu|sonuc ne)\b/g, " ")
+    .replace(/\bbolu\b/g, " / ")
+    .replace(/\bcarpi\b|\bkere\b|\bkat\b/g, " * ")
+    .replace(/\barti\b|\btopla\b/g, " + ")
+    .replace(/\beksi\b|\bcikar\b/g, " - ")
+    .replace(/\bx\b/gi, " * ")
+    .replace(/,/g, ".")
+    .replace(/[^0-9+\-*/.()%,\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[+*/.]+|[+\-*/.]+$/g, "")
+    .trim();
+  // MathJS "5 / 2" kabul eder; yan yana sayıları ise reddetmeden önce düzeltmeye çalışma.
+  return expression;
+}
+
+function documentFormatFromText(userText = "") {
+  const q = normalizeIntentText(userText);
+  if (/\bcsv\b/.test(q)) return "csv";
+  if (/\bjson\b/.test(q)) return "json";
+  if (/\bhtml\b/.test(q)) return "html";
+  if (/\btxt\b|metin dosyasi|text dosyasi/.test(q)) return "txt";
+  return "md";
+}
+
+function documentInlineContentFromText(userText = "") {
+  let text = String(userText || "").trim();
+  // "Not: ... Bunu txt dosyası yap" gibi doğrudan içerik verilen komutlarda aktif eski içeriğe değil bu metne öncelik ver.
+  text = text
+    .replace(/\b(bunu|sunlari|şunları|sunları|metni|aynı notu|ayni notu)\b\s*/gi, "")
+    .replace(/\b(txt|markdown|md|json|csv|html|word|docx)\s+dosyas[ıi]\s+(yap|olustur|hazirla|kaydet|ver|indir)\b/gi, "")
+    .replace(/\b(dosya olarak|dosyas[ıi] olarak)\s+(kaydet|ver|indir)\b/gi, "")
+    .replace(/\b(yap|olustur|hazirla|kaydet|ver|indir|cevir|donustur)\s*$/gi, "")
+    .trim();
+  // Kısa transform komutları içerik sayılmasın.
+  if (!text || normalizeIntentText(text).length < 18) return "";
+  if (isOnlyTransformCommand(text)) return "";
+  return text;
+}
+
+function fileManagerInputFromText(userText = "", memory = {}, req = null) {
+  const q = normalizeIntentText(userText);
+  if (/listele|listesi|dosyalari|dosyaları|generated/.test(q) && !/oku|sil|delete/.test(q)) {
+    return { action: "list" };
+  }
+  if (/oku|icerik|içerik|ac|aç/.test(q)) {
+    const refs = collectConversationGeneratedFileRefs(req || {}).filter((ref) => ref?.storedFilename);
+    const lastRef = refs[refs.length - 1];
+    const file = memory.lastFile || memory.lastDocument || memory.lastPdf || memory.lastExcel || lastRef;
+    if (file?.storedFilename) return { action: "read", storedFilename: file.storedFilename, filename: file.filename || file.storedFilename };
+    return { action: "read" };
+  }
+  return { action: "list" };
+}
+
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
@@ -1302,21 +1362,9 @@ function buildImplicitToolCalls(answer = "", req) {
   const stem = safeOutputStem(title);
   const calls = [];
 
-  if (wantsCalculatorFromText(userText) && !wantsExcelFromText(userText) && !wantsPdfFromText(userText)) {
-    // Turkce matematik kelimelerini sembollere cevir
-    let expression = String(userText || "")
-      .replace(/hesaplayin|hesapla|calculator|matematik|kac eder|sonucu ne|toplami|carpimi|bolumu/gi, "")
-      .replace(/\bbolu\b|\bbölü\b/gi, "/")
-      .replace(/\bcarpi\b|\bçarpı\b|\bkere\b|\bkat\b/gi, "*")
-      .replace(/\barti\b|\bartı\b|\btopla\b/gi, "+")
-      .replace(/\beksi\b|\bcikar\b|\bçıkar\b/gi, "-")
-      .replace(/[^0-9+\-*/.()%,\s]/g, " ")
-      .replace(/,/g, ".")
-      .replace(/\s+/g, " ")
-      .trim()
-      .replace(/^[+\-*/.]+|[+\-*/.]+$/g, "")
-      .trim();
-    if (/[0-9]/.test(expression) && expression.length > 0) {
+  if (wantsCalculatorFromText(userText) && !wantsDocumentFromText(userText) && !wantsExcelFromText(userText) && !wantsPdfFromText(userText) && !wantsZipFromText(userText)) {
+    const expression = calculatorExpressionFromText(userText);
+    if (/[0-9]/.test(expression) && /[+\-*/%]/.test(expression) && expression.length > 0) {
       calls.push({ tool: "calculator", input: { expression } });
     }
   }
@@ -1328,6 +1376,10 @@ function buildImplicitToolCalls(answer = "", req) {
   if (wantsWebFetchFromText(userText)) {
     const url = String(userText).match(/https?:\/\/\S+/i)?.[0]?.replace(/[),.;]+$/g, "");
     if (url) calls.push({ tool: "webFetch", input: { url } });
+  }
+
+  if (wantsFileManagerFromText(userText)) {
+    calls.push({ tool: "fileManager", input: fileManagerInputFromText(userText, memory, req) });
   }
 
   if (wantsOcrFromText(userText)) {
@@ -1400,10 +1452,12 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsDocumentFromText(userText)) {
-    const q = normalizeIntentText(userText);
-    const format = q.includes("csv") ? "csv" : q.includes("json") ? "json" : q.includes("html") ? "html" : q.includes("txt") ? "txt" : "md";
-    const content = activeTable?.rows?.length && format !== "json" && format !== "csv" ? tableToMarkdown(activeTable) : source;
-    if (String(content || "").trim()) calls.push({ tool: "document", input: { title, content, rows: activeTable?.rows, format, filename: `${stem || "lucy-belge"}.${format}` } });
+    const format = documentFormatFromText(userText);
+    const inlineContent = documentInlineContentFromText(userText);
+    const content = inlineContent || (activeTable?.rows?.length && format !== "json" && format !== "csv" ? tableToMarkdown(activeTable) : source);
+    const docTitle = inlineContent ? contentTitleFromText(inlineContent, "LUCY Test Notu") : title;
+    const docStem = safeOutputStem(docTitle || stem || "lucy-belge");
+    if (String(content || "").trim()) calls.push({ tool: "document", input: { title: docTitle, content, rows: inlineContent ? undefined : activeTable?.rows, format, filename: `${docStem || "lucy-belge"}.${format}` } });
   }
 
   if (wantsZipFromText(userText)) {

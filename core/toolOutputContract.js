@@ -113,10 +113,34 @@ function normalizeFile(result = {}, input = {}, toolName = "tool") {
   };
 }
 
+
+function normalizeCalculator(result = {}, input = {}) {
+  const expression = asText(result.expression || input.expression || "");
+  const rawResult = result.result !== undefined ? result.result : (result.value !== undefined ? result.value : "");
+  const ok = asBool(result.success, rawResult !== "" && rawResult !== undefined && rawResult !== null);
+  const text = ok
+    ? `${expression ? `${expression} = ` : ""}${String(rawResult)}`.trim()
+    : asText(result.message || result.error || "Hesaplama başarısız oldu.");
+  return {
+    success: ok,
+    type: "calculation",
+    tool: "calculator",
+    title: result.title || input.title || "calculator sonucu",
+    expression,
+    result: rawResult,
+    text,
+    error: result.error,
+  };
+}
+
 function normalizeToolOutput(toolName = "tool", result = {}, input = {}) {
   const tool = String(toolName || result.tool || "tool");
   const lower = tool.toLowerCase();
   const value = result && typeof result === "object" ? result : { value: result, text: String(result ?? "") };
+
+  if (lower === "calculator") {
+    return normalizeCalculator(value, input);
+  }
 
   if (lower === "chartdata" || value.chartType || value.data?.labels || input.chartType) {
     return normalizeChartData(value, input);
@@ -143,5 +167,6 @@ module.exports = {
   normalizeChartData,
   normalizeMermaid,
   normalizeFile,
+  normalizeCalculator,
   stripMermaidFence,
 };

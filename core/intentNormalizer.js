@@ -156,7 +156,7 @@ function detectColorPalette(value = "") {
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
   // Genel kelimeler tek başına tool tetiklemesin; açık çıktı fiili veya net tool kalıbı varsa tetiklensin.
-  return /\b(pdf|zip|excel|xlsx|xls|docx|qr|ocr|webfetch|hesap|calculator|hesapla|mail gonder|telegram gonder|whatsapp gonder|whatsapp mesaj|textstats|filemanager)\b|grafik|chart|pasta grafik|yuvarlak grafik|daire grafik|dilimli|trend grafik|cizgi grafik|cubuk grafik|sutun grafik|diyagram|mermaid|akis diagrami|akis semasi|blok diyagram|kutularla goster|indir|arsivle|rapor pdf|excel yap|pdf yap|zip yap|qr kod/.test(text)
+  return /\b(pdf|zip|excel|xlsx|xls|docx|qr|ocr|webfetch|hesap|calculator|hesapla|mail gonder|telegram gonder|whatsapp gonder|whatsapp mesaj|textstats|filemanager)\b|grafik|chart|pasta grafik|yuvarlak grafik|daire grafik|dilimli|trend grafik|cizgi grafik|cubuk grafik|sutun grafik|diyagram|mermaid|akis diagrami|akis semasi|blok diyagram|kutularla goster|indir|arsivle|rapor pdf|excel yap|pdf yap|zip yap|qr kod|dosyalari listele|dosyalari oku|dosyayi oku|son dosyayi oku|son olusturulan dosyayi oku|olusturulan dosyalari|filemanager/.test(text)
     || /\b(word|docx|belge|txt|markdown|md|csv|json|html)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|donustur|cevir)\b/.test(text)
     || /\b(sema|şema)\b.*\b(yap|olustur|hazirla|goster|ciz|kur)\b/.test(text)
     || /\b(saat kac|saat nedir|saat ne|tarih nedir|tarih ne|bugun tarih|bugunun tarihi|simdi kac|zaman nedir)\b/.test(text);

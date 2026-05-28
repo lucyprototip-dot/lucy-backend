@@ -1,0 +1,1 @@
+LUCY test : Bugün backend tool testi yapıyoruz. txt dosyası

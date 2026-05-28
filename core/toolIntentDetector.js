@@ -79,6 +79,12 @@ function wantsTextStatsFromText(text = "") {
   return /textstats|metin istatistik|kelime say|karakter say|satir say|satır say/.test(q);
 }
 
+
+function wantsFileManagerFromText(text = "") {
+  const q = normalizeIntentText(text);
+  return /\b(olusturulan dosyalari listele|oluşturulan dosyaları listele|dosyalari listele|dosyaları listele|generated dosyalari|generated dosyaları|son olusturulan dosyayi oku|son oluşturulan dosyayı oku|son dosyayi oku|son dosyayı oku|dosyayi oku|dosyayı oku|filemanager)\b/.test(q);
+}
+
 function wantsCalculatorFromText(text = "") {
   const q = normalizeIntentText(text);
   // Sayı içeren hesap isteği — sadece "hesapla", "kaç eder" gibi açık math kastı
@@ -150,6 +156,7 @@ module.exports = {
   wantsOcrFromText,
   wantsMermaidFromText,
   wantsTextStatsFromText,
+  wantsFileManagerFromText,
   wantsCalculatorFromText,
   wantsTimeFromText,
   wantsWebFetchFromText,

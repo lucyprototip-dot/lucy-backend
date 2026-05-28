@@ -22,6 +22,16 @@ function safeResolve(name = "") {
   return full;
 }
 
+
+function cleanReadableText(text = "") {
+  return String(text || "")
+    .replace(/LUCY_FILE_REF\s+storedFilename=[^\n]+/gi, "")
+    .replace(/```lucy-widget[\s\S]*?```/gi, "")
+    .replace(/\{\s*"tool_call"\s*:\s*\{[\s\S]*?\}\s*\}/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function toUrl(name) {
   const base = publicBase();
   if (!base) return `/generated/${encodeURIComponent(name)}`;
@@ -65,7 +75,7 @@ module.exports = {
       if (!full || !fs.existsSync(full)) return { success: false, error: "file_not_found", message: "Dosya bulunamadı." };
       const stat = fs.statSync(full);
       if (stat.size > 1024 * 1024) return { success: false, error: "file_too_large", message: "1MB üstü dosya sohbet içinde okunmaz; indirilebilir link kullan." };
-      return { success: true, filename: path.basename(full), text: fs.readFileSync(full, "utf8") };
+      return { success: true, filename: path.basename(full), text: cleanReadableText(fs.readFileSync(full, "utf8")) };
     }
 
     if (action === "delete") {
