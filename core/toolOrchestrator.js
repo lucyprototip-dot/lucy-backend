@@ -380,7 +380,12 @@ function enrichToolCallInput(call, req) {
   }
 
   if (toolName === "pdf" && !String(input.text || input.content || input.value || "").trim()) {
-    if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(memory.lastTable);
+    const active = resolveActiveContent(req);
+    const activeText = activeContentToText(active, "");
+    if (active?.type === "chart" && active.chart) input.chart = active.chart;
+    else if (active?.type === "mermaid" && active.code) input.mermaid = active.code;
+    else if (activeText) input.text = activeText;
+    else if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(memory.lastTable);
     else if (memory.lastText) input.text = memory.lastText;
     else if (memory.lastChart?.data) input.text = JSON.stringify(memory.lastChart.data, null, 2);
   }
@@ -397,7 +402,7 @@ function enrichToolCallInput(call, req) {
       input.colors = palette.colors;
     }
     input.style = style;
-    input.chartType = detectChartType(userText) || input.chartType || input.type || "bar";
+    input.chartType = explicitChartTypeFromText(userText) || input.chartType || input.type || "bar";
 
     if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
       const selectedChart = chartFromHistory(memory, userText);
@@ -500,6 +505,14 @@ function styleMutationText(userText = "") {
   return /\b(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|premium|modern|canli|farkli ton|tonlarda)\b/.test(q);
 }
 
+function explicitChartTypeFromText(userText = "") {
+  const q = normalizeIntentText(userText);
+  if (/\b(pasta|pie|dilim|daire|yuvarlak|doughnut|donut|halka)\b/.test(q)) return "pie";
+  if (/\b(cizgi|line|trend|zaman|aylik|gelisim|degisim)\b/.test(q)) return "line";
+  if (/\b(cubuk|bar|sutun|kolon|normal grafik|karsilastir)\b/.test(q)) return "bar";
+  return "";
+}
+
 function userSpecificallyReferencesChart(userText = "") {
   const q = normalizeIntentText(userText);
   return /grafik|chart|pasta|pie|trend|cizgi|line|cubuk|bar|sutun|yuvarlak|daire|dilim|donut|dagilim|renkli pasta|renklerini degistir|renkleri degistir|renklendir|palet|tema|stil/.test(q)
@@ -523,7 +536,7 @@ function shouldForceChartRenderer(req) {
 
 function chartTitleFromPlan(userText = "", chartInput = {}, fallback = "Grafik") {
   const q = normalizeIntentText(userText);
-  const type = chartInput.chartType || detectChartType(userText);
+  const type = chartInput.chartType || explicitChartTypeFromText(userText) || detectChartType(userText);
   const base = String(chartInput.title || fallback || "Grafik").replace(/\s*\((Renkli|Pasta|Trend|Grafik)\)\s*$/i, "").trim() || "Grafik";
   const prefix = /renk|renkli|renklendir|palet|tema|stil|sari|lacivert|beyaz|neon|premium/.test(q) ? "Renkli " : "";
   if (type === "pie") return `${base.includes("Pasta") ? base : `${prefix}${base} (Pasta Grafiği)`}`.replace(/^Renkli Renkli /, "Renkli ");
@@ -998,7 +1011,18 @@ function resolveActiveContent(req, answer = "") {
       : { type: "text", text: answerText, title: contentTitleFromText(answerText, "LUCY İçeriği"), source: "assistant-answer" };
   }
 
-  if (memory.activeContent) return memory.activeContent;
+  const preferred = transformPrefersTypedSource(userText);
+  const typed = typedContentFromMemory(memory, preferred);
+  if (typed) return typed;
+
+  // "bunu pdf/docx/txt yap" gibi genel dönüşümlerde en son gerçek asistan metni
+  // aktif tool tablosundan daha değerlidir. Bu, textStats çıktısının şiiri ezmesini engeller.
+  const latestAssistant = latestAssistantContentObject(req);
+  if (latestAssistant && (isOnlyTransformCommand(userText) || wantsPdfFromText(userText) || wantsDocumentFromText(userText) || wantsTextStatsFromText(userText))) {
+    return latestAssistant;
+  }
+
+  if (memory.activeContent && !isToolGeneratedAnswerText(activeContentToText(memory.activeContent, ""))) return memory.activeContent;
   if (memory.lastTable?.rows?.length) return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "lastTable" };
   if (memory.lastChart?.data) return { type: "chart", chart: memory.lastChart, ui: chartUiFromMemory(memory.lastChart, "Grafik"), title: "Grafik", source: "lastChart" };
   if (memory.lastMermaid?.code) return { type: "mermaid", code: memory.lastMermaid.code, ui: mermaidUiFromMemory(memory.lastMermaid, "Mermaid diyagram"), title: "Mermaid diyagram", source: "lastMermaid" };
@@ -1051,10 +1075,71 @@ function isGeneratedStatusOnlyText(text = "") {
   return clean.length < 180 && /(indirme hazirlandi|asagidan indirebilirsin|dosya hazirlandi|pdf hazirlandi|excel.*hazir|xlsx.*hazir|zip.*hazir|grafik hazirlandi|diyagram hazirlandi)/.test(clean);
 }
 
+
+function isToolGeneratedAnswerText(text = "") {
+  const raw = String(text || "");
+  const clean = normalizeIntentText(stripToolNoise(raw));
+  if (!clean) return false;
+  if (isGeneratedStatusOnlyText(raw)) return true;
+
+  // Tool sonuçları aktif içerik olarak ezmesin. Örn. şiir yazıldıktan sonra
+  // "bunu pdf yap" denince eski textStats tablosu değil şiir PDF olmalı.
+  const statsLike = /\b(iste metnin istatistikleri|metnin istatistikleri|olcut deger|kelime sayisi|karakter sayisi|satir sayisi|textstats)\b/.test(clean);
+  if (statsLike) return true;
+
+  const generatedRefLike = /\b(lucyfileref|storedfilename|downloadurl|generated\/|indirme hazirlandi|asagidan indirebilirsin)\b/.test(clean);
+  if (generatedRefLike) return true;
+
+  const rawMermaidLike = /^\s*(flowchart|graph)\s+(td|lr|bt|rl)\b/i.test(raw) || /\bclassdef\b/i.test(raw);
+  if (rawMermaidLike) return true;
+
+  return false;
+}
+
+function transformPrefersTypedSource(userText = "") {
+  const q = normalizeIntentText(userText);
+  if (/\b(son tablo|tabloyu|tablo|excel|xlsx|xls)\b/.test(q)) return "table";
+  if (/\b(son grafik|grafik|chart|pasta|pie|cizgi|line|bar|sutun|renkli|renklendir|palet|tema)\b/.test(q) && !wantsMermaidFromText(q)) return "chart";
+  if (/\b(son diyagram|diyagram|mermaid|akis|akış|sema|şema|flowchart)\b/.test(q)) return "mermaid";
+  if (/\b(son dosya|dosyayi|dosyayı|pdfi|exceli|zipi)\b/.test(q)) return "file";
+  return "text";
+}
+
+function latestAssistantContentObject(req) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || message.sender || "").toLowerCase();
+    if (role !== "assistant") continue;
+    const text = stripToolNoise(messageText(message));
+    if (!text || isToolGeneratedAnswerText(text)) continue;
+    const table = parseFirstMarkdownTableObject(text) || parseLooseInlineTableObject(text);
+    if (table?.rows?.length) return { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(text, "LUCY Tablosu"), source: "latest-assistant" };
+    return { type: "text", text, title: contentTitleFromText(text, "LUCY İçeriği"), source: "latest-assistant" };
+  }
+  return null;
+}
+
+function typedContentFromMemory(memory = {}, preferred = "text") {
+  if (preferred === "table" && memory.lastTable?.rows?.length) {
+    return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "typed-lastTable" };
+  }
+  if (preferred === "chart" && memory.lastChart?.data) {
+    return { type: "chart", chart: memory.lastChart, ui: chartUiFromMemory(memory.lastChart, memory.lastChart.title || "Grafik"), title: memory.lastChart.title || "Grafik", source: "typed-lastChart" };
+  }
+  if (preferred === "mermaid" && memory.lastMermaid?.code) {
+    return { type: "mermaid", code: memory.lastMermaid.code, ui: mermaidUiFromMemory(memory.lastMermaid, memory.lastMermaid.title || "Mermaid diyagram"), title: memory.lastMermaid.title || "Mermaid diyagram", source: "typed-lastMermaid" };
+  }
+  if (preferred === "file" && memory.lastFile) {
+    return { type: "file", file: memory.lastFile, title: memory.lastFile.filename || "LUCY Dosyası", source: "typed-lastFile" };
+  }
+  return null;
+}
+
 function rememberText(memory, text = "") {
   const clean = stripToolNoise(text);
   if (!clean || clean.length < 2) return memory;
-  if (isGeneratedStatusOnlyText(text)) return memory;
+  if (isGeneratedStatusOnlyText(text) || isToolGeneratedAnswerText(text)) return memory;
   memory.lastText = clean;
   const table = parseFirstMarkdownTableObject(clean) || parseLooseInlineTableObject(clean);
   if (table) {
@@ -1201,16 +1286,7 @@ function messageText(message = {}) {
 }
 
 function latestAssistantContent(req) {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] || {};
-    const role = String(message.role || message.sender || "").toLowerCase();
-    if (role === "assistant") {
-      const text = stripToolNoise(messageText(message));
-      if (text) return text;
-    }
-  }
-  return "";
+  return latestAssistantContentObject(req)?.text || "";
 }
 
 function latestUsefulConversationContent(req, answer = "") {
