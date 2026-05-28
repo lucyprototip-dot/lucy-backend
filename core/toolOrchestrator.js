@@ -530,6 +530,18 @@ function userStyleMutationOnly(userText = "") {
   return !/\b(tablo|excel|pdf|zip|dosya|metin|yazi|yazı)\b/.test(q);
 }
 
+function hasFreshInlineChartData(userText = "") {
+  return Boolean(parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText));
+}
+
+function isChartExportOnlyRequest(userText = "") {
+  const q = normalizeIntentText(userText);
+  return wantsPdfFromText(q)
+    && userSpecificallyReferencesChart(q)
+    && !hasFreshInlineChartData(userText)
+    && !/\b(yeni|olustur|oluştur|ciz|çiz|hazirla|hazırla)\b.*\b(grafik|chart|pasta|pie|cizgi|çizgi|bar|sutun|sütun)\b/.test(q);
+}
+
 function shouldForceChartRenderer(req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
@@ -625,7 +637,7 @@ function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
   if (tool === "time") return wantsTimeFromText(userText);
   if (tool === "webfetch") return wantsWebFetchFromText(userText);
   if (tool === "ocr") return wantsOcrFromText(userText);
-  if (tool === "chartdata") return wantsChartFromText(userText);
+  if (tool === "chartdata") return wantsChartFromText(userText) && !isChartExportOnlyRequest(userText);
   if (tool === "mermaid") return wantsMermaidFromText(userText);
   if (tool === "excel") return wantsExcelFromText(userText);
   if (tool === "pdf") return wantsPdfFromText(userText);
@@ -1864,7 +1876,7 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsChartFromText(userText)) {
+  if (wantsChartFromText(userText) && !isChartExportOnlyRequest(userText)) {
     const freshInlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
     const selectedChart = chartFromHistory(memory, userText);
     const selectedTable = freshInlineTable || tableFromHistory(memory, userText) || activeTable;
@@ -1909,8 +1921,17 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsPdfFromText(userText)) {
-    const pdfInput = { title, filename: `${stem || "lucy-rapor"}.pdf` };
-    if (activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data)) {
+    const selectedChartForPdf = userSpecificallyReferencesChart(userText)
+      ? (chartFromHistory(memory, userText) || memory.lastChart)
+      : null;
+    const pdfTitle = selectedChartForPdf?.title || title;
+    const pdfInput = { title: pdfTitle, filename: `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf` };
+    if (selectedChartForPdf?.data) {
+      pdfInput.chart = selectedChartForPdf;
+      pdfInput.data = selectedChartForPdf.data;
+      pdfInput.chartType = selectedChartForPdf.chartType || selectedChartForPdf.type || "bar";
+      pdfInput.text = "";
+    } else if (activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data)) {
       const chart = activeContent.chart || activeContent.ui;
       pdfInput.chart = chart;
       pdfInput.data = chart.data;
@@ -2008,7 +2029,7 @@ function sourcePrefixFromText(text = "") {
   if (/\b(tablo|tabloyu|tablom)\b/.test(q)) return "son tabloyu";
   if (/\b(dosya|dosyayi|dosyayı|pdf|excel|zip|word|docx)\b/.test(q)) return "son dosyayı";
   if (/\b(metin|yazi|yazı|siir|şiir)\b/.test(q)) return "son metni";
-  if (/\b(son|en son|az onceki|az önceki|bunu|onu|şunu|sunu|yaptigini|yaptığını)\b/.test(q)) return "son çıktıyı";
+  if (/\b(son|en son|az onceki|az önceki|bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|yaptigini|yaptığını)\b/.test(q)) return "son çıktıyı";
   return "";
 }
 
@@ -2036,9 +2057,13 @@ function resolveClarificationFollowUpText(req) {
 
 function requestHasResolvableTypedReference(req) {
   const text = normalizeIntentText(latestUserIntentText(req));
+  const memory = hydrateMemoryFromRequest(req);
   const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyayı|dosyayi|metin|yazi|yazı|diyagram|şema|sema)\b/.test(text);
+  const hasVagueCurrentSource = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|son|en son|mevcut)\b/.test(text);
   const hasAction = currentUserHasClearAction(text);
-  return hasTypedSource && hasAction;
+  if (hasTypedSource && hasAction) return true;
+  if (hasVagueCurrentSource && hasAction && memory.activeContent?.type === "chart" && memory.lastChart?.data) return true;
+  return false;
 }
 
 function shouldBypassPlannerClarification(decision = {}, req = null) {
@@ -2073,6 +2098,8 @@ function shouldAskClarificationWithoutAi(req) {
   const mutation = /\b(renk|renkli|pastel|neon|kalin|kalın|cizgili|çizgili|degistir|değiştir|duzenle|düzenle|pdf yap|excel yap|word yap|zip yap|grafik yap|tablo yap)\b/.test(text);
   if (!vagueRef || !mutation) return "";
   const memory = hydrateMemoryFromRequest(req);
+  if (memory.activeContent?.type === "chart" && memory.lastChart?.data && userStyleMutationOnly(text)) return "";
+  if (isChartExportOnlyRequest(text) && memory.lastChart?.data) return "";
   const count = [memory.lastTable?.rows?.length, memory.lastChart?.data, memory.lastMermaid?.code, memory.lastFile?.storedFilename, memory.lastText].filter(Boolean).length;
   if (count <= 1) return "";
   return buildClarificationMessage({}, req);

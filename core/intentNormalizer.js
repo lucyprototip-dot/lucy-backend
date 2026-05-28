@@ -117,18 +117,28 @@ function detectVisualStyle(value = "") {
 function detectColorPalette(value = "") {
   const text = normalizeToolIntentText(value);
 
-  if (/\b(sari|lacivert|beyaz)\b/.test(text)) {
+  // More specific palettes must come first. Otherwise "siyah beyaz" was
+  // captured by the generic yellow/navy/white rule because it contains "beyaz".
+  if (/\b(siyah beyaz|black white|monokrom|monochrome|gri ton|gri tonlarda)\b/.test(text)) {
     return {
-      name: "yellow-navy-white",
-      colors: ["#facc15", "#001f5b", "#ffffff"],
+      name: "mono",
+      colors: ["#050505", "#4b5563", "#9ca3af", "#f8fafc"],
       requested: true,
     };
   }
 
-  if (/\b(siyah beyaz|black white|monokrom|monochrome)\b/.test(text)) {
+  if (/\b(koyu pastel|daha koyu pastel|pastel.*koyu|dark pastel)\b/.test(text)) {
     return {
-      name: "mono",
-      colors: ["#ffffff", "#9ca3af", "#111827"],
+      name: "dark-pastel",
+      colors: ["#8b5cf6", "#0891b2", "#db2777", "#ca8a04", "#16a34a", "#dc2626"],
+      requested: true,
+    };
+  }
+
+  if (/\b(sari|lacivert|beyaz)\b/.test(text)) {
+    return {
+      name: "yellow-navy-white",
+      colors: ["#facc15", "#001f5b", "#ffffff"],
       requested: true,
     };
   }
