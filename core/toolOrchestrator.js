@@ -405,16 +405,11 @@ function enrichToolCallInput(call, req) {
     }
 
     // Style-only chart requests must never re-plan the data or chart type.
-    // Example: “Bunun renklerini pastel yap” keeps the current pie as pie and only changes colors.
+    // “Bunu X renkte yap” önce X'in stil/renk olduğunu anlar; chart tipi korunur.
     if (styleOnly && selectedChart?.data) {
       const chartInput = chartToChartInput(selectedChart, userText);
       if (chartInput) {
-        Object.assign(input, chartInput);
-        input.chartType = selectedChart.chartType || selectedChart.type || chartInput.chartType || "bar";
-        input.title = selectedChart.title || chartInput.title || "Grafik";
-        input.label = chartInput.label || selectedChart.label || input.title;
-        input.style = { ...(chartInput.style || {}), ...style, colors: palette.requested ? palette.colors : (style.colors || chartInput.colors || []) };
-        input.colors = palette.requested ? palette.colors : (style.colors || chartInput.colors || []);
+        Object.assign(input, applyStyleToChartInput(chartInput, userText, selectedChart));
       }
       return { ...call, input };
     }
@@ -425,14 +420,23 @@ function enrichToolCallInput(call, req) {
     input.chartType = explicitChartTypeFromText(userText) || input.chartType || input.type || "bar";
 
     if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
-      const selectedTable = inlineTable || tableFromHistory(memory, userText) || memory.lastTable;
-      const preferExistingChart = !inlineTable && userSpecificallyReferencesChart(userText) && selectedChart?.data;
+      const selectedTableRaw = inlineTable || tableFromHistory(memory, userText) || memory.lastTable;
+      const tablePalette = paletteFromTable(selectedTableRaw);
+      const selectedTable = tablePalette && selectedChart?.data ? null : selectedTableRaw;
+      const preferExistingChart = !inlineTable && (userSpecificallyReferencesChart(userText) || tablePalette || isStyleOnlyChartModify(userText, memory)) && selectedChart?.data;
       const chartInput = preferExistingChart
         ? chartToChartInput(selectedChart, userText)
         : selectedTable?.rows?.length
           ? tableToChartInput(selectedTable, userText)
           : chartToChartInput(selectedChart || memory.lastChart, userText);
-      if (chartInput) Object.assign(input, chartInput, { style: { ...(chartInput.style || {}), ...style }, colors: input.colors || chartInput.colors });
+      if (chartInput) {
+        const merged = applyStyleToChartInput(chartInput, userText, preferExistingChart ? selectedChart : chartInput);
+        if (tablePalette?.colors?.length && !palette.requested) {
+          merged.colors = tablePalette.colors;
+          merged.style = { ...(merged.style || {}), colorful: true, palette: tablePalette.name, colors: tablePalette.colors };
+        }
+        Object.assign(input, merged);
+      }
     }
   }
 
@@ -546,6 +550,73 @@ function userStyleMutationOnly(userText = "") {
   if (!styleMutationText(q)) return false;
   if (wantsPdfFromText(q) || wantsExcelFromText(q) || wantsZipFromText(q) || wantsMermaidFromText(q)) return false;
   return !/\b(tablo|excel|pdf|zip|dosya|metin|yazi|yazı)\b/.test(q);
+}
+
+
+function classifyBunuXIntent(userText = "") {
+  const q = normalizeIntentText(userText);
+  if (wantsPdfFromText(q) || wantsExcelFromText(q) || wantsZipFromText(q) || wantsDocumentFromText(q)) return "file_format";
+  if (/\btablo\b.*\b(yap|goster|göster|cevir|çevir|donustur|dönüştür)\b|\btablo yap\b/.test(q)) return "output_table";
+  if (wantsChartFromText(q) || explicitChartTypeFromText(q)) return "output_chart";
+  if (styleMutationText(q)) return "style_change";
+  if (/\b(profesyonel|premium|modern|daha iyi|duzenle|düzenle|iyilestir|iyileştir)\b/.test(q)) return "quality_change";
+  return "unknown";
+}
+
+function isStyleOnlyChartModify(userText = "", memory = {}) {
+  if (!memory?.lastChart?.data) return false;
+  if (classifyBunuXIntent(userText) !== "style_change") return false;
+  const q = normalizeIntentText(userText);
+  if (wantsPdfFromText(q) || wantsExcelFromText(q) || wantsZipFromText(q) || wantsDocumentFromText(q) || wantsMermaidFromText(q)) return false;
+  if (/\b(tablo|excel|pdf|zip|dosya|metin|yazi|yazı|word|docx)\b/.test(q)) return false;
+  return true;
+}
+
+function isColorPaletteTable(table = null) {
+  if (!table || !Array.isArray(table.rows) || !table.rows.length) return false;
+  const headers = (Array.isArray(table.headers) ? table.headers : []).map((h) => normalizeIntentText(h));
+  if (headers.some((h) => /\brenk|color|palet|palette\b/.test(h))) return true;
+  const text = table.rows.slice(0, 8).map((row) => Object.values(row || {}).join(" ")).join(" ");
+  const palette = detectColorPalette(text);
+  return Boolean(palette.requested && palette.colors?.length && /\b(sari|sarı|lacivert|beyaz|siyah|kirmizi|kırmızı|mavi|mor|pembe|gri|yesil|yeşil|turuncu|renk)\b/.test(normalizeIntentText(text)));
+}
+
+function paletteFromTable(table = null) {
+  if (!isColorPaletteTable(table)) return null;
+  const text = table.rows.map((row) => Object.values(row || {}).join(" ")).join(" ");
+  const palette = detectColorPalette(text);
+  return palette.requested && palette.colors?.length ? palette : null;
+}
+
+function applyStyleToChartInput(chartInput = {}, userText = "", baseChart = {}) {
+  const palette = detectColorPalette(userText);
+  const style = { ...(chartInput.style || {}), ...(baseChart.style || {}), ...detectVisualStyle(userText) };
+  if (palette.requested) {
+    style.colorful = true;
+    style.palette = palette.name;
+    style.colors = palette.colors;
+  }
+  return {
+    ...chartInput,
+    chartType: baseChart.chartType || baseChart.type || chartInput.chartType || explicitChartTypeFromText(userText) || "bar",
+    title: chartTitleForStyleMutation(userText, baseChart.title || chartInput.title || "Grafik", baseChart.chartType || chartInput.chartType),
+    label: chartInput.label || baseChart.label || baseChart.title || chartInput.title || "Veri",
+    style,
+    colors: palette.requested ? palette.colors : (chartInput.colors || baseChart.colors || style.colors || []),
+    palette: palette.requested ? palette.name : (baseChart.palette || chartInput.palette),
+  };
+}
+
+function chartTitleForStyleMutation(userText = "", currentTitle = "Grafik", chartType = "") {
+  const q = normalizeIntentText(userText);
+  const typeLabel = (chartType === "pie" || /\bpasta|pie\b/.test(q)) ? "Pasta Grafik" : chartType === "line" ? "Çizgi Grafik" : chartType === "bar" ? "Grafik" : "Grafik";
+  const cleanCurrent = String(currentTitle || "").replace(/\b(Renkli\s*){2,}/gi, "Renkli ").replace(/✅/g, "").trim();
+  if (/\bdaha koyu pastel|koyu pastel\b/.test(q)) return cleanCurrent.replace(/Neon[^-–—()]*/i, "Koyu Pastel").replace(/Pasta Grafik.*/i, typeLabel) || `Koyu Pastel ${typeLabel}`;
+  if (/\bpastel\b/.test(q)) return cleanCurrent.replace(/Neon[^-–—()]*/i, "Pastel").replace(/Pasta Grafik.*/i, typeLabel) || `Pastel ${typeLabel}`;
+  if (/\bsiyah beyaz|monokrom|gri ton\b/.test(q)) return cleanCurrent.replace(/Neon[^-–—()]*/i, "Siyah Beyaz").replace(/Pasta Grafik.*/i, typeLabel) || `Siyah Beyaz ${typeLabel}`;
+  const palette = detectColorPalette(userText);
+  if (palette.requested && palette.name !== "default") return cleanCurrent.replace(/Neon[^-–—()]*/i, "Renkli").replace(/Pasta Grafik.*/i, typeLabel) || `Renkli ${typeLabel}`;
+  return cleanCurrent || typeLabel;
 }
 
 function hasFreshInlineChartData(userText = "") {
@@ -1894,19 +1965,42 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsChartFromText(userText) && !isChartExportOnlyRequest(userText)) {
+  const selectedChartForStyle = chartFromHistory(memory, userText) || memory.lastChart;
+  if (isStyleOnlyChartModify(userText, memory) && selectedChartForStyle?.data) {
+    const chartInput = chartToChartInput(selectedChartForStyle, userText);
+    if (chartInput) calls.push({ tool: "chartData", input: applyStyleToChartInput(chartInput, userText, selectedChartForStyle) });
+  } else if (wantsChartFromText(userText) && !isChartExportOnlyRequest(userText)) {
     const freshInlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
-    const selectedChart = chartFromHistory(memory, userText);
-    const selectedTable = freshInlineTable || tableFromHistory(memory, userText) || activeTable;
-    const preferExistingChart = !freshInlineTable && userSpecificallyReferencesChart(userText) && selectedChart?.data;
+    const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
+    const selectedTableRaw = freshInlineTable || tableFromHistory(memory, userText) || activeTable;
+    const tablePalette = paletteFromTable(selectedTableRaw);
+    const selectedTable = tablePalette && selectedChart?.data ? null : selectedTableRaw;
+    const preferExistingChart = !freshInlineTable && (userSpecificallyReferencesChart(userText) || tablePalette) && selectedChart?.data;
     const chartInput = preferExistingChart
       ? chartToChartInput(selectedChart, userText)
       : selectedTable?.rows?.length
         ? tableToChartInput(selectedTable, userText)
         : chartToChartInput(selectedChart || memory.lastChart, userText);
     if (chartInput) {
-      const chartTitle = chartTitleFromPlan(userText, chartInput, title || "Grafik");
-      calls.push({ tool: "chartData", input: { ...chartInput, title: chartTitle } });
+      const chartTitle = preferExistingChart && styleMutationText(userText)
+        ? chartTitleForStyleMutation(userText, selectedChart.title || chartInput.title || title || "Grafik", selectedChart.chartType || chartInput.chartType)
+        : chartTitleFromPlan(userText, chartInput, title || "Grafik");
+      const input = { ...chartInput, title: chartTitle };
+      const palette = detectColorPalette(userText);
+      const style = { ...(input.style || {}), ...detectVisualStyle(userText) };
+      if (palette.requested) {
+        input.colors = palette.colors;
+        input.palette = palette.name;
+        input.style = { ...style, colorful: true, palette: palette.name, colors: palette.colors };
+      } else if (tablePalette?.colors?.length) {
+        input.colors = tablePalette.colors;
+        input.palette = tablePalette.name;
+        input.style = { ...style, colorful: true, palette: tablePalette.name, colors: tablePalette.colors };
+      } else {
+        input.style = style;
+      }
+      if (preferExistingChart) input.chartType = selectedChart.chartType || chartInput.chartType || input.chartType;
+      calls.push({ tool: "chartData", input });
     }
   }
 
@@ -2274,6 +2368,13 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   }
 
   const implicitCallsForCurrentIntent = (allowAnyTool || shouldForceChartRenderer(req)) ? buildImplicitToolCalls(answer, req) : [];
+
+  const forceStyleChart = isStyleOnlyChartModify(userText, hydrateMemoryFromRequest(req));
+  const implicitChartCall = implicitCallsForCurrentIntent.find((call) => String(call.tool || "").toLowerCase() === "chartdata");
+  if (forceStyleChart && implicitChartCall) {
+    // DS cevabı tablo/HTML/metin üretse bile, semantik olarak bu bir chart style mutation ise chartData kazanır.
+    toolCalls = [implicitChartCall];
+  }
 
   if (!toolCalls.length && implicitCallsForCurrentIntent.length) {
     toolCalls = implicitCallsForCurrentIntent;

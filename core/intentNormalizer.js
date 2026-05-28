@@ -114,11 +114,92 @@ function detectVisualStyle(value = "") {
   };
 }
 
+function uniqueColors(colors = []) {
+  const seen = new Set();
+  return colors.filter((color) => {
+    const key = String(color || "").toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function expandPalette(colors = [], min = 4) {
+  const base = uniqueColors(colors);
+  if (!base.length) return [];
+  const out = [...base];
+  let i = 0;
+  while (out.length < min && i < min * 3) {
+    out.push(base[i % base.length]);
+    i += 1;
+  }
+  return out;
+}
+
+function detectNamedColors(text = "") {
+  const colorMap = [
+    [/(saf\s+)?siyah|black/g, "#050505", "siyah"],
+    [/(saf\s+)?beyaz|white/g, "#f8fafc", "beyaz"],
+    [/gri|gray|grey|gumus|gümüş/g, "#9ca3af", "gri"],
+    [/kirmizi|kırmızı|red/g, "#ef4444", "kirmizi"],
+    [/bordo|burgundy/g, "#7f1d1d", "bordo"],
+    [/sari|sarı|altin|altın|yellow|gold/g, "#facc15", "sari"],
+    [/turuncu|orange/g, "#f97316", "turuncu"],
+    [/yesil|yeşil|green/g, "#22c55e", "yesil"],
+    [/turkuaz|turquoise/g, "#14b8a6", "turkuaz"],
+    [/camgobegi|camgöbeği|cyan/g, "#22d3ee", "cyan"],
+    [/lacivert|navy/g, "#001f5b", "lacivert"],
+    [/mavi|blue/g, "#2563eb", "mavi"],
+    [/mor|purple|violet/g, "#8b5cf6", "mor"],
+    [/pembe|pink/g, "#ec4899", "pembe"],
+    [/fuşya|fusya|fuchsia|magenta/g, "#d946ef", "fusya"],
+    [/kahverengi|brown/g, "#92400e", "kahverengi"],
+  ];
+
+  const hits = [];
+  for (const [pattern, color, name] of colorMap) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(text))) {
+      hits.push({ index: match.index, color, name });
+    }
+  }
+  hits.sort((a, b) => a.index - b.index);
+  return {
+    names: hits.map((hit) => hit.name),
+    colors: uniqueColors(hits.map((hit) => hit.color)),
+  };
+}
+
 function detectColorPalette(value = "") {
   const text = normalizeToolIntentText(value);
 
-  // More specific palettes must come first. Otherwise "siyah beyaz" was
-  // captured by the generic yellow/navy/white rule because it contains "beyaz".
+  const named = detectNamedColors(text);
+
+  // Takım/marka/tema ifadeleri sabit komut değil, semantik kısa yol olarak yorumlanır.
+  if (/\bfenerbahce|fenerbahçe\b/.test(text)) {
+    return { name: "fenerbahce", colors: ["#facc15", "#001f5b"], requested: true, dynamic: true };
+  }
+  if (/\bgalatasaray\b/.test(text)) {
+    return { name: "galatasaray", colors: ["#f59e0b", "#a90432"], requested: true, dynamic: true };
+  }
+  if (/\bbesiktas|beşiktaş\b/.test(text)) {
+    return { name: "besiktas", colors: ["#050505", "#f8fafc", "#ef4444"], requested: true, dynamic: true };
+  }
+
+  // Açık renk adları verilmişse en güçlü niyet budur: hangi renkler yazıldıysa o sırada kullan.
+  // Örn: “sarı lacivert beyaz kırmızı”, “mor mavi”, “siyah gri beyaz”.
+  if (named.colors.length >= 2) {
+    const wantsMono = named.names.includes("siyah") && named.names.includes("beyaz") && named.colors.length <= 3;
+    return {
+      name: wantsMono ? "mono-explicit" : "explicit",
+      colors: expandPalette(named.colors, 4),
+      requested: true,
+      dynamic: true,
+      names: named.names,
+    };
+  }
+
   if (/\b(siyah beyaz|black white|monokrom|monochrome|gri ton|gri tonlarda)\b/.test(text)) {
     return {
       name: "mono",
@@ -135,19 +216,21 @@ function detectColorPalette(value = "") {
     };
   }
 
-  if (/\b(sari|lacivert|beyaz)\b/.test(text)) {
-    return {
-      name: "yellow-navy-white",
-      colors: ["#facc15", "#001f5b", "#ffffff"],
-      requested: true,
-    };
-  }
-
   if (/\b(pastel|soft renk|yumusak renk|yumuşak renk)\b/.test(text)) {
     return {
       name: "pastel",
       colors: ["#c4b5fd", "#a5f3fc", "#fbcfe8", "#fde68a", "#bbf7d0", "#fecaca"],
       requested: true,
+    };
+  }
+
+  if (/\b(neon|cyberpunk|premium)\b/.test(text)) {
+    const neonFromNamed = named.colors.length ? named.colors : ["#a855f7", "#22d3ee", "#f472b6", "#facc15"];
+    return {
+      name: "neon",
+      colors: expandPalette(neonFromNamed, 4),
+      requested: true,
+      dynamic: Boolean(named.colors.length),
     };
   }
 
@@ -159,11 +242,13 @@ function detectColorPalette(value = "") {
     };
   }
 
-  if (/\b(neon|cyberpunk|premium)\b/.test(text)) {
+  if (named.colors.length === 1) {
     return {
-      name: "neon",
-      colors: ["#a855f7", "#22d3ee", "#f472b6", "#facc15"],
+      name: "single-explicit",
+      colors: expandPalette(named.colors, 4),
       requested: true,
+      dynamic: true,
+      names: named.names,
     };
   }
 
