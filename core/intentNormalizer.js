@@ -262,8 +262,15 @@ function detectColorPalette(value = "") {
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
   const metaOrStyle = /\b(nedir|ne demek|ne ise yarar|nasil calisir|mantigi|anlat|acikla|ornek ver|farki ne|gibi|tarzi|tarzinda|formatinda|uslubunda|tonunda)\b/.test(text);
-  const action = /\b(yap|olustur|hazirla|uret|ver|indir|kaydet|donustur|cevir|gonder|at|ilet|oku|listele|hesapla|ciz|goster|arsivle|sikistir)\b/.test(text);
+  const action = /\b(yap|olustur|hazirla|uret|ver|indir|kaydet|donustur|cevir|degistir|değiştir|gonder|at|ilet|oku|listele|hesapla|ciz|goster|arsivle|sikistir|kullan|uygula|olsun)\b/.test(text);
+  const palette = detectColorPalette(value);
+  const artifactReference = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|son|en son|onceki|önceki|mevcut|daha|grafik|chart|tablo|dosya|renkleri|renklerini)\b/.test(text);
+  const chartReference = /\b(grafik|chart|pasta|pie|cizgi|bar|sutun|cubuk|dilim|daire|yuvarlak)\b/.test(text);
   if (metaOrStyle && !action) return false;
+  // “Bunu X renk yap / X renkleri kullan” gibi istekler tool işidir; X dinamik çıkarılır.
+  // Salt “saat tarzı premium olsun” gibi stil referanslarını ise tool niyeti sanma.
+  if (palette.requested && (artifactReference || chartReference || (palette.dynamic && action))) return true;
+  if (/\b(tablo)\b.*\b(yap|olustur|hazirla|goster|cevir|donustur)\b|\b(bunu|son|grafik|chart)\b.*\btablo\b/.test(text)) return true;
   // Tool hakkında açıklama/eğitim soruları tool çalıştırmaz: "PDF nasıl yapılır", "Excel örneği anlat" vb.
   if (/\b(pdf|excel|xlsx|xls|zip|qr|ocr|webfetch|mail|telegram|whatsapp|mermaid|diyagram|grafik|chart|calculator|hesap|textstats)\b/.test(text)
       && /\b(nasil|nedir|ne demek|ne ise yarar|mantigi|anlat|acikla|ornek|farki)\b/.test(text)
