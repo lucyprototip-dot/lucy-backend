@@ -501,7 +501,7 @@ function requestedMermaidWork(req) {
 
 function styleMutationText(userText = "") {
   const q = normalizeIntentText(userText);
-  return /(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|premium|modern|canli|farkli ton|tonlarda)/.test(q);
+  return /\b(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|premium|modern|canli|farkli ton|tonlarda)\b/.test(q);
 }
 
 function userSpecificallyReferencesChart(userText = "") {
@@ -514,7 +514,7 @@ function userStyleMutationOnly(userText = "") {
   const q = normalizeIntentText(userText);
   if (!styleMutationText(q)) return false;
   if (wantsPdfFromText(q) || wantsExcelFromText(q) || wantsZipFromText(q) || wantsMermaidFromText(q)) return false;
-  return !/(tablo|excel|pdf|zip|dosya|metin|yazi|yazı)/.test(q);
+  return !/\b(tablo|excel|pdf|zip|dosya|metin|yazi|yazı)\b/.test(q);
 }
 
 function shouldForceChartRenderer(req) {
@@ -591,6 +591,28 @@ function isUsableToolCall(call = {}) {
   if (tool === "ocr") return Boolean(String(input.base64 || input.imageBase64 || input.fileBase64 || input.dataUrl || input.imageDataUrl || input.storedFilename || input.generatedFile || "").trim());
   return true;
 }
+
+function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
+  const tool = String(call.tool || "").toLowerCase();
+  const userText = latestUserIntentText(req);
+
+  // If user explicitly asks to read/list generated files, fileManager has absolute priority.
+  // This prevents the model from interpreting "oku" as webFetch.
+  if (wantsFileManagerFromText(userText)) {
+    return tool === "filemanager";
+  }
+
+  // Guard high false-positive tools. The model may emit these from generic words
+  // like "saat" or "web" even when the user means style/UI, not the tool.
+  if (tool === "time") return wantsTimeFromText(userText);
+  if (tool === "webfetch") return wantsWebFetchFromText(userText);
+
+  // OCR should only run on explicit OCR/image-reading intent.
+  if (tool === "ocr") return wantsOcrFromText(userText);
+
+  return true;
+}
+
 
 
 function validateToolInput(call = {}, req = null) {
@@ -1590,7 +1612,16 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   // modelin yanlışlıkla ürettiği mermaid/text tool_call'larını bastırıp chart renderer'a döneriz.
   let toolCalls = shouldForceChartRenderer(req)
     ? []
-    : rawToolCalls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall);
+    : rawToolCalls
+      .map((call) => enrichToolCallInput(call, req))
+      .filter((call) => isToolCallAllowedByCurrentIntent(call, req))
+      .filter(isUsableToolCall);
+
+  // File read/list commands are deterministic. If the model guessed another tool,
+  // discard it and let the implicit router build the correct fileManager call.
+  if (wantsFileManagerFromText(latestUserIntentText(req)) && !toolCalls.some((call) => String(call.tool || "").toLowerCase() === "filemanager")) {
+    toolCalls = [];
+  }
 
   if (!toolCalls.length && (allowAnyTool || shouldForceChartRenderer(req))) {
     const implicitCalls = buildImplicitToolCalls(answer, req);
