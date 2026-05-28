@@ -3,7 +3,7 @@ const path = require("path");
 const crypto = require("crypto");
 const dotenv = require("dotenv");
 const { normalizeToolIntentText, detectChartType, detectVisualStyle, detectColorPalette, likelyToolIntent } = require("./intentNormalizer");
-const { planToolCallsWithDeepSeek } = require("./toolPlanner");
+const { planToolCallsWithDeepSeek, planLucyActionWithDeepSeek, aiPlannerEnabled } = require("./toolPlanner");
 const {
   normalizeIntentText,
   wantsPdfFromText,
@@ -1904,9 +1904,49 @@ function buildImplicitToolCalls(answer = "", req) {
 }
 
 function deepSeekPlannerEnabled() {
-  // LUCY_DS_TOOL_PLANNER_ENABLED VEYA LUCY_DS_TOOL_PLANNER env var'larından birini kontrol et
-  const flag = envValue("LUCY_DS_TOOL_PLANNER_ENABLED") || envValue("LUCY_DS_TOOL_PLANNER");
-  return /^(1|true|yes|on|acik|aktif)$/i.test(flag);
+  return aiPlannerEnabled();
+}
+
+function buildClarificationMessage(decision = {}, req = null) {
+  const explicit = String(decision?.clarification || "").trim();
+  if (explicit) return explicit;
+  const memory = hydrateMemoryFromRequest(req);
+  const options = [];
+  if (memory.lastTable?.rows?.length) options.push("son tabloyu");
+  if (memory.lastChart?.data) options.push("son grafiği");
+  if (memory.lastMermaid?.code) options.push("son diyagramı");
+  if (memory.lastFile?.storedFilename) options.push("son dosyayı");
+  if (memory.lastText) options.push("son metni");
+  if (options.length) return `Aşkım tam olarak hangisini kastettin: ${options.slice(0, 4).join(", ")} mı?`;
+  return "Aşkım bunu tam anlayamadım. Biraz daha detay verir misin?";
+}
+
+function shouldAskClarificationWithoutAi(req) {
+  const text = normalizeIntentText(latestUserIntentText(req));
+  if (!text) return "";
+  const vagueRef = /\b(bunu|onu|şunu|sunu|bu|o|son|en son|az onceki|az önceki|ilk|onceki|önceki)\b/.test(text);
+  const mutation = /\b(renk|renkli|pastel|neon|kalin|kalın|cizgili|çizgili|degistir|değiştir|duzenle|düzenle|pdf yap|excel yap|word yap|zip yap|grafik yap|tablo yap)\b/.test(text);
+  if (!vagueRef || !mutation) return "";
+  const memory = hydrateMemoryFromRequest(req);
+  const count = [memory.lastTable?.rows?.length, memory.lastChart?.data, memory.lastMermaid?.code, memory.lastFile?.storedFilename, memory.lastText].filter(Boolean).length;
+  if (count <= 1) return "";
+  return buildClarificationMessage({}, req);
+}
+
+async function buildAiPlannerDecision(req) {
+  if (!deepSeekPlannerEnabled()) return null;
+  const userText = latestUserIntentText(req);
+  if (!String(userText || "").trim()) return null;
+  try {
+    return await planLucyActionWithDeepSeek({
+      userText,
+      memory: hydrateMemoryFromRequest(req),
+      availableTools: listLoadedTools().map((tool) => tool.name || tool),
+    });
+  } catch (error) {
+    console.warn("Lucy generic AI planner devre dışı:", error.message);
+    return null;
+  }
 }
 
 async function buildDeepSeekPlannerToolCalls(answer = "", req) {
@@ -2005,25 +2045,51 @@ function buildToolFinalAnswer(toolResults = []) {
 
 async function executeToolCallsFromAnswer(answer = "", req) {
   hydrateMemoryFromRequest(req);
+  const userText = latestUserIntentText(req);
+  const aiDecision = await buildAiPlannerDecision(req);
+
+  if (aiDecision?.decision === "ASK_CLARIFICATION") {
+    return {
+      toolCalls: [],
+      toolResults: [],
+      finalAnswer: buildClarificationMessage(aiDecision, req),
+      plannerDecision: aiDecision,
+    };
+  }
+
+  const fallbackClarification = !aiDecision ? shouldAskClarificationWithoutAi(req) : "";
+  if (fallbackClarification) {
+    return { toolCalls: [], toolResults: [], finalAnswer: fallbackClarification };
+  }
+
   const explicitCalls = [
     ...extractToolCallsFromAnswer(answer),
     ...extractToolCallsFromHtmlButtons(answer),
   ];
   const allowMermaid = requestedMermaidWork(req);
-  const allowAnyTool = requestedToolWork(req);
+  const allowAnyTool = requestedToolWork(req) || aiDecision?.decision === "TOOL_REQUIRED";
   const mermaidCalls = explicitCalls.length || !allowMermaid ? [] : extractMermaidBlocksFromAnswer(answer);
-  const rawToolCalls = orderToolCallsForChaining([...explicitCalls, ...mermaidCalls], latestUserIntentText(req));
+  const rawToolCalls = orderToolCallsForChaining([...explicitCalls, ...mermaidCalls], userText);
 
-  // Öncelik: explicit model tool_call -> kod tabanlı direct intent -> opsiyonel DS fallback.
-  // Ancak kullanıcı grafik/stil mutasyonu istiyorsa ve elimizde aktif grafik varsa,
-  // modelin yanlışlıkla ürettiği mermaid/text tool_call'larını bastırıp chart renderer'a döneriz.
-  let toolCalls = shouldForceChartRenderer(req)
-    ? []
-    : rawToolCalls
+  let toolCalls = [];
+
+  if (aiDecision?.decision === "TOOL_REQUIRED" && Array.isArray(aiDecision.toolCalls) && aiDecision.toolCalls.length) {
+    toolCalls = rankAndDedupeToolCalls(aiDecision.toolCalls, userText)
       .map((call) => ({ ...call, tool: normalizeToolName(call.tool) }))
       .map((call) => enrichToolCallInput(call, req))
       .filter((call) => isToolCallAllowedByCurrentIntent(call, req))
       .filter(isUsableToolCall);
+  }
+
+  if (!toolCalls.length) {
+    toolCalls = shouldForceChartRenderer(req)
+      ? []
+      : rawToolCalls
+        .map((call) => ({ ...call, tool: normalizeToolName(call.tool) }))
+        .map((call) => enrichToolCallInput(call, req))
+        .filter((call) => isToolCallAllowedByCurrentIntent(call, req))
+        .filter(isUsableToolCall);
+  }
 
   // File read/list commands are deterministic. If the model guessed another tool,
   // discard it and let the implicit router build the correct fileManager call.

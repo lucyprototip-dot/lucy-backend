@@ -140,6 +140,107 @@ function plannerEnabled() {
   return Boolean(envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT"));
 }
 
+
+function normalizeDecisionValue(value = "") {
+  const v = String(value || "").trim().toUpperCase().replace(/[^A-Z_]/g, "_");
+  if (["TOOL_REQUIRED", "NO_TOOL", "ASK_CLARIFICATION"].includes(v)) return v;
+  if (["TOOL", "TOOLS", "RUN_TOOL", "RUN_TOOLS"].includes(v)) return "TOOL_REQUIRED";
+  if (["ASK", "CLARIFY", "CLARIFICATION", "UNCLEAR", "AMBIGUOUS"].includes(v)) return "ASK_CLARIFICATION";
+  return "NO_TOOL";
+}
+
+function normalizePlannerDecision(payload = {}, userText = "") {
+  const calls = normalizePlannerResponse(payload, userText);
+  const decision = normalizeDecisionValue(payload.decision || payload.action || payload.intentDecision || (calls.length ? "TOOL_REQUIRED" : "NO_TOOL"));
+  const clarification = String(payload.clarification || payload.question || payload.ask || "").trim();
+  const reason = String(payload.reason || payload.explanation || "").trim();
+  const confidenceRaw = Number(payload.confidence);
+  const confidence = Number.isFinite(confidenceRaw) ? Math.max(0, Math.min(1, confidenceRaw)) : (decision === "TOOL_REQUIRED" && calls.length ? 0.75 : 0.6);
+
+  if (decision === "TOOL_REQUIRED" && !calls.length) {
+    return { decision: "ASK_CLARIFICATION", toolCalls: [], clarification: clarification || "Aşkım bunu yapabilmem için biraz daha detay verir misin?", reason: reason || "tool_required_without_plan", confidence: Math.min(confidence, 0.55) };
+  }
+
+  if (decision === "ASK_CLARIFICATION") {
+    return { decision, toolCalls: [], clarification: clarification || "Aşkım bunu tam anlayamadım. Biraz daha detay verir misin?", reason, confidence };
+  }
+
+  return { decision, toolCalls: calls, clarification: "", reason, confidence };
+}
+
+function aiPlannerEnabled() {
+  const flag = (envValue("LUCY_AI_PLANNER") || envValue("LUCY_GENERIC_AI_PLANNER") || envValue("LUCY_DS_TOOL_PLANNER") || envValue("LUCY_DS_TOOL_PLANNER_ENABLED")).toLowerCase();
+  if (["0", "false", "off", "no", "kapali", "kapalı"].includes(flag)) return false;
+  return Boolean(envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT"));
+}
+
+async function planLucyActionWithDeepSeek({ userText = "", memory = {}, availableTools = [] } = {}) {
+  if (!aiPlannerEnabled()) return null;
+  const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
+  const model = envValue("LUCY_TOOL_PLANNER_MODEL") || envValue("DEEPSEEK_MODEL_FAST") || "deepseek-v4-flash";
+  const normalizedUserText = normalizeToolIntentText(userText);
+  const summary = memorySummary(memory);
+
+  const systemPrompt = [
+    "Sen LUCY WEB için generic AI planner'sın. Komut ezberleme; kullanıcının gerçek niyetini semantik olarak anla.",
+    "Önce karar ver: TOOL_REQUIRED, NO_TOOL veya ASK_CLARIFICATION.",
+    "NO_TOOL: Kullanıcı bilgi soruyor, sohbet ediyor, stil örneği istiyor veya gerçek işlem istemiyor.",
+    "TOOL_REQUIRED: Kullanıcı dosya/grafik/pdf/excel/zip/qr/web okuma/hesap/gönderim gibi gerçek işlem istiyor.",
+    "ASK_CLARIFICATION: 'bunu/onu/son/ilk tablo/az önceki' gibi referans belirsizse veya hangi çıktı istendiği net değilse.",
+    "Belirsiz durumda asla eski context'i kafana göre seçme; kısa bir soru üret.",
+    "Asla yapılmayan iş için 'yaptım' deme. Raw JSON, raw HTML veya tool_call kullanıcıya gösterme.",
+    "Kullanıcı kaç çıktı istiyorsa o kadar tool planla. Örn: txt, md, pdf, word, excel, zip istiyorsa hepsini sırala.",
+    "ZIP istenirse aynı turda üretilen dosyaları ZIP'e alacak şekilde en sona zip planla.",
+    "Tool gerekmiyorsa toolCalls boş olmalı.",
+    "Cevap sadece JSON olsun. Markdown yok.",
+    "JSON şeması: {\"decision\":\"TOOL_REQUIRED|NO_TOOL|ASK_CLARIFICATION\",\"clarification\":\"kısa soru veya boş\",\"toolCalls\":[{\"tool\":\"excel\",\"source\":\"lastTable\",\"input\":{}}],\"confidence\":0.0,\"reason\":\"kısa\"}",
+  ].join("\n");
+
+  const userPrompt = JSON.stringify({
+    userText,
+    normalizedUserText,
+    availableTools,
+    artifactRegistry: summary,
+    semanticRules: [
+      "'pdf nedir', 'excel nasıl yapılır', 'mail gibi yaz' => NO_TOOL",
+      "'bunu pdf yap', 'excel hazırla', 'zip yap', 'siteyi oku' => TOOL_REQUIRED",
+      "'bunu pastel yap' ve son hedef net değilse => ASK_CLARIFICATION",
+      "'ilk tablom', 'son grafik', 'az önceki dosya' gibi ifadeleri artifactRegistry ile çöz; emin değilsen sor",
+      "tablo/grafik/dosya stil değiştirme isteklerinde raw HTML/code değil render hedefi planla",
+    ],
+  });
+
+  const payload = {
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0,
+    max_tokens: numberEnv("LUCY_TOOL_PLANNER_MAX_TOKENS", 1100),
+    stream: false,
+  };
+
+  const request = fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${deepSeekKey}`,
+    },
+    body: JSON.stringify(payload),
+  }).then(async (response) => {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error?.message || data?.message || `DeepSeek planner API hatası: ${response.status}`);
+    return data;
+  });
+
+  const data = await withTimeout(request, numberEnv("LUCY_TOOL_PLANNER_TIMEOUT_MS", 12000));
+  const content = data?.choices?.[0]?.message?.content || "";
+  const parsed = extractJsonObject(content);
+  if (!parsed) return null;
+  return normalizePlannerDecision(parsed, userText);
+}
+
 async function planToolCallsWithDeepSeek({ userText = "", memory = {}, availableTools = [] } = {}) {
   if (!plannerEnabled()) return [];
   if (!likelyToolIntent(userText)) return [];
@@ -208,6 +309,9 @@ async function planToolCallsWithDeepSeek({ userText = "", memory = {}, available
 
 module.exports = {
   planToolCallsWithDeepSeek,
+  planLucyActionWithDeepSeek,
   normalizePlannerResponse,
+  normalizePlannerDecision,
+  aiPlannerEnabled,
   plannerEnabled,
 };
