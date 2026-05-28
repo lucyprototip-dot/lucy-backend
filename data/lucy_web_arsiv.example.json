@@ -1,0 +1,47 @@
+{
+  "version": "lucy-multi-user-v1",
+  "schema": "multi-user-json-store",
+  "updatedAt": "2026-05-28T00:00:00.000Z",
+  "users": {
+    "omer": {
+      "version": "lucy-v11.9.0",
+      "updatedAt": "2026-05-28T00:00:00.000Z",
+      "chats": [],
+      "gpts": [],
+      "academy": [],
+      "projects": [],
+      "work": [],
+      "folders": [],
+      "memory": "",
+      "exporter": [],
+      "live": {},
+      "activeChatId": "",
+      "activeGptId": "lucy-standard",
+      "activeProjectId": "",
+      "activeWorkId": "",
+      "settings": { "theme": "dark", "sidebarOpen": true, "sidebarWidth": 293, "fontScale": "normal", "activeModeId": "fast", "webSearchEnabled": false }
+    },
+    "ozer": {
+      "version": "lucy-v11.9.0",
+      "updatedAt": "2026-05-28T00:00:00.000Z",
+      "chats": [], "gpts": [], "academy": [], "projects": [], "work": [], "folders": [], "memory": "", "exporter": [], "live": {},
+      "activeChatId": "", "activeGptId": "lucy-standard", "activeProjectId": "", "activeWorkId": "",
+      "settings": { "theme": "dark", "sidebarOpen": true, "sidebarWidth": 293, "fontScale": "normal", "activeModeId": "fast", "webSearchEnabled": false }
+    },
+    "vedat": {
+      "version": "lucy-v11.9.0",
+      "updatedAt": "2026-05-28T00:00:00.000Z",
+      "chats": [], "gpts": [], "academy": [], "projects": [], "work": [], "folders": [], "memory": "", "exporter": [], "live": {},
+      "activeChatId": "", "activeGptId": "lucy-standard", "activeProjectId": "", "activeWorkId": "",
+      "settings": { "theme": "dark", "sidebarOpen": true, "sidebarWidth": 293, "fontScale": "normal", "activeModeId": "fast", "webSearchEnabled": false }
+    },
+    "murat": {
+      "version": "lucy-v11.9.0",
+      "updatedAt": "2026-05-28T00:00:00.000Z",
+      "chats": [], "gpts": [], "academy": [], "projects": [], "work": [], "folders": [], "memory": "", "exporter": [], "live": {},
+      "activeChatId": "", "activeGptId": "lucy-standard", "activeProjectId": "", "activeWorkId": "",
+      "settings": { "theme": "dark", "sidebarOpen": true, "sidebarWidth": 293, "fontScale": "normal", "activeModeId": "fast", "webSearchEnabled": false }
+    }
+  },
+  "authUsers": {}
+}
