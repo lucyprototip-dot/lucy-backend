@@ -25,6 +25,7 @@ const {
 
 const registerGeneratedRoutes = require("./routes/generatedRoutes");
 const registerStoreRoutes = require("./routes/storeRoutes");
+const registerAuthRoutes = require("./routes/authRoutes");
 const registerToolRoutes = require("./routes/toolRoutes");
 const registerChatRoutes = require("./routes/chatRoutes");
 const registerFileRoutes = require("./routes/fileRoutes");
@@ -47,6 +48,14 @@ const {
   writeRootStore,
   listLucyUsers,
 } = require("./services/lucyStoreService");
+const {
+  ensureAuthUsers,
+  listAuthUsersPublic,
+  loginLucyUser,
+  authUserFromRequest,
+  requireLucyAuth,
+  changeLucyPassword,
+} = require("./services/authService");
 
 
 dotenv.config();
@@ -1633,7 +1642,8 @@ async function exporterPdf(title, messages) {
 //  ve ortak fonksiyonları tutar; davranış değişmedi.
 // ============================================================
 registerGeneratedRoutes(app, { fs, path, GENERATED_DIR, GENERATED_PUBLIC_PATH, ensureGeneratedDir, publicBaseUrl, envBool });
-registerStoreRoutes(app, { readLucyStore, writeLucyStore, readRootStore, writeRootStore, listLucyUsers, normalizeUserId, STORE_PATH, DEFAULT_USER_ID, PORT });
+registerAuthRoutes(app, { ensureAuthUsers, listAuthUsersPublic, loginLucyUser, authUserFromRequest, requireLucyAuth, changeLucyPassword });
+registerStoreRoutes(app, { readLucyStore, writeLucyStore, readRootStore, writeRootStore, listLucyUsers, normalizeUserId, STORE_PATH, DEFAULT_USER_ID, PORT, authUserFromRequest });
 registerToolRoutes(app, { listLoadedTools, listToolLoadErrors, getLoadedTool, executeLucyTool, persistToolFileResult });
 registerChatRoutes(app, {
   isWebMode,

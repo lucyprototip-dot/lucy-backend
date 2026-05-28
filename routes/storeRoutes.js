@@ -9,6 +9,32 @@ function requestUserId(req, fallbackUserId) {
   );
 }
 
+function resolveStoreUserId(req, deps) {
+  const { authUserFromRequest, normalizeUserId, DEFAULT_USER_ID } = deps;
+  const requireAuth = process.env.LUCY_REQUIRE_AUTH === "true";
+
+  try {
+    if (typeof authUserFromRequest === "function") {
+      const authUser = authUserFromRequest(req);
+      if (authUser && authUser.userId) {
+        req.lucyUser = authUser;
+        return normalizeUserId(authUser.userId);
+      }
+    }
+  } catch (error) {
+    if (requireAuth) throw error;
+  }
+
+  if (requireAuth) {
+    const error = new Error("Oturum gerekli.");
+    error.status = 401;
+    error.code = "auth_required";
+    throw error;
+  }
+
+  return normalizeUserId(requestUserId(req, DEFAULT_USER_ID));
+}
+
 function registerStoreRoutes(app, deps) {
   const {
     readLucyStore,
@@ -20,15 +46,16 @@ function registerStoreRoutes(app, deps) {
     STORE_PATH,
     DEFAULT_USER_ID,
     PORT,
+    authUserFromRequest,
   } = deps;
 
   app.get("/api/store", (req, res) => {
     try {
-      const userId = normalizeUserId(requestUserId(req, DEFAULT_USER_ID));
+      const userId = resolveStoreUserId(req, { authUserFromRequest, normalizeUserId, DEFAULT_USER_ID });
       const store = readLucyStore(userId);
       res.json({ ok: true, userId, store });
     } catch (error) {
-      res.status(500).json({ ok: false, error: error.message });
+      res.status(error.status || 500).json({ ok: false, error: error.message, code: error.code || "store_error" });
     }
   });
 
@@ -38,12 +65,12 @@ function registerStoreRoutes(app, deps) {
         return res.status(400).json({ ok: false, error: "Geçersiz LUCY store verisi." });
       }
 
-      const userId = normalizeUserId(requestUserId(req, DEFAULT_USER_ID));
-      const { userId: _ignoredUserId, user: _ignoredUser, ...payload } = req.body;
+      const userId = resolveStoreUserId(req, { authUserFromRequest, normalizeUserId, DEFAULT_USER_ID });
+      const { userId: _ignoredUserId, user: _ignoredUser, token: _ignoredToken, ...payload } = req.body;
       const saved = writeLucyStore(payload, userId);
       res.json({ ok: true, userId, updatedAt: saved.updatedAt });
     } catch (error) {
-      res.status(500).json({ ok: false, error: error.message });
+      res.status(error.status || 500).json({ ok: false, error: error.message, code: error.code || "store_error" });
     }
   });
 
@@ -51,7 +78,7 @@ function registerStoreRoutes(app, deps) {
     try {
       res.json({ ok: true, users: listLucyUsers() });
     } catch (error) {
-      res.status(500).json({ ok: false, error: error.message });
+      res.status(error.status || 500).json({ ok: false, error: error.message, code: error.code || "store_error" });
     }
   });
 
@@ -63,7 +90,7 @@ function registerStoreRoutes(app, deps) {
       const root = readRootStore();
       res.json({ ok: true, root });
     } catch (error) {
-      res.status(500).json({ ok: false, error: error.message });
+      res.status(error.status || 500).json({ ok: false, error: error.message, code: error.code || "store_error" });
     }
   });
 
@@ -78,7 +105,7 @@ function registerStoreRoutes(app, deps) {
       const saved = writeRootStore(req.body);
       res.json({ ok: true, updatedAt: saved.updatedAt });
     } catch (error) {
-      res.status(500).json({ ok: false, error: error.message });
+      res.status(error.status || 500).json({ ok: false, error: error.message, code: error.code || "store_error" });
     }
   });
 

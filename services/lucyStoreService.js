@@ -45,7 +45,17 @@ function ensureDataDir() {
 }
 
 function normalizeUserId(value) {
-  const raw = String(value || "").trim().toLowerCase();
+  const raw = String(value || "")
+    .trim()
+    .toLocaleLowerCase("tr-TR")
+    .replace(/ı/g, "i")
+    .replace(/ğ/g, "g")
+    .replace(/ü/g, "u")
+    .replace(/ş/g, "s")
+    .replace(/ö/g, "o")
+    .replace(/ç/g, "c")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
   const clean = raw
     .replace(/[^a-z0-9._-]/g, "-")
     .replace(/-+/g, "-")
@@ -133,6 +143,7 @@ function emptyRootStore() {
     schema: "multi-user-json-store",
     updatedAt: new Date().toISOString(),
     users: {},
+    authUsers: {},
   };
 }
 
@@ -171,6 +182,7 @@ function normalizeRootStore(input = {}) {
       ...emptyRootStore(),
       ...input,
       users: {},
+      authUsers: input.authUsers && typeof input.authUsers === "object" && !Array.isArray(input.authUsers) ? input.authUsers : {},
       updatedAt: input.updatedAt || now,
     };
 
@@ -186,6 +198,7 @@ function normalizeRootStore(input = {}) {
   const root = emptyRootStore();
   root.updatedAt = now;
   root.users[DEFAULT_USER_ID] = normalizeUserStore(isLegacyUserStore(input) ? input : {});
+  root.authUsers = input && typeof input === "object" && !Array.isArray(input) && input.authUsers && typeof input.authUsers === "object" && !Array.isArray(input.authUsers) ? input.authUsers : {};
   return root;
 }
 
@@ -280,6 +293,7 @@ module.exports = {
   emptyUserStore,
   emptyLucyStore: emptyUserStore,
   emptyRootStore,
+  normalizeUserStore,
   readRootStore,
   writeRootStore,
   readLucyStore,
