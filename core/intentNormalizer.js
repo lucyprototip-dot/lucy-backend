@@ -171,6 +171,14 @@ function detectNamedColors(text = "") {
   };
 }
 
+function isPlainTableCreationRequest(text = "") {
+  const q = normalizeToolIntentText(text);
+  if (!/tablo/.test(q)) return false;
+  if (/(excel|xlsx|xls|pdf|word|docx|zip|dosya|indir|kaydet|gonder|gönder|cevir|donustur|grafik|chart|pasta|cizgi|bar|sutun|renk|emoji|gorsel|görsel)/.test(q)) return false;
+  if (/(bunu|bunun|buna|onu|onun|ona|son|onceki|önceki|az onceki|yazdigin|yazdığın|senin)/.test(q)) return false;
+  return /(yap|olustur|oluştur|hazirla|hazırla|goster|göster)/.test(q);
+}
+
 function detectColorPalette(value = "") {
   const text = normalizeToolIntentText(value);
 
@@ -261,6 +269,7 @@ function detectColorPalette(value = "") {
 
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
+  if (isPlainTableCreationRequest(value)) return false;
   const metaOrStyle = /\b(nedir|ne demek|ne ise yarar|nasil calisir|mantigi|anlat|acikla|ornek ver|farki ne|gibi|tarzi|tarzinda|formatinda|uslubunda|tonunda)\b/.test(text);
   const action = /\b(yap|olustur|hazirla|uret|ver|indir|kaydet|donustur|cevir|degistir|değiştir|gonder|at|ilet|oku|listele|hesapla|ciz|goster|arsivle|sikistir|kullan|uygula|olsun)\b/.test(text);
   const palette = detectColorPalette(value);
@@ -301,4 +310,5 @@ module.exports = {
   detectVisualStyle,
   detectColorPalette,
   likelyToolIntent,
+  isPlainTableCreationRequest,
 };

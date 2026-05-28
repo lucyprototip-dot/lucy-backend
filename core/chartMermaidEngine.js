@@ -3,11 +3,18 @@ const { cleanLabel: cleanSafeMermaidLabel, sanitizeMermaidCode, buildFlowchartFr
 
 function numberFromCell(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
-  const clean = String(value ?? "")
-    .replace(/[%₺$€£]/g, "")
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const clean = raw
+    .replace(/[₺$€£]/g, "")
+    .replace(/(tl|try|lira|kg|gr|g|lt|l|adet|paket|koli|li|lik)/gi, "")
+    .replace(/[’']/g, "")
+    .replace(/%/g, "")
     .replace(/\s/g, "")
     .replace(/\.(?=\d{3}(\D|$))/g, "")
-    .replace(/,/g, ".");
+    .replace(/,/g, ".")
+    .replace(/[^0-9.+-]/g, "");
+  if (!clean || !/[0-9]/.test(clean)) return null;
   const num = Number(clean);
   return Number.isFinite(num) ? num : null;
 }
@@ -35,6 +42,11 @@ function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
   const h = normalizeHeader(header);
   const q = normalizeToolIntentText(userText);
   let score = 0;
+
+  if (/^(#|no|sira|sıra|id)$/i.test(h)) score -= 120;
+  if (/(miktar|adet|quantity|qty|birim)/.test(h)) score += chartType === "pie" ? -45 : -15;
+  if (/(toplam|tutar|fiyat|ucret|ücret|bedel|maliyet|deger|değer|price|amount|total)/.test(h)) score += chartType === "pie" ? 95 : 65;
+  if (/(birim fiyat|unit price)/.test(h)) score += 35;
 
   if (q.includes("net") && /net|kar|kâr|kazanc|bakiye/.test(h)) score += 80;
   if (q.includes("gider") && /gider|kira|fatura|market|ulasim|eglence|saglik|giyim|abonelik|harcama/.test(h)) score += 70;

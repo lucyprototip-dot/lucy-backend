@@ -211,6 +211,11 @@ async function planLucyActionWithDeepSeek({ userText = "", memory = {}, availabl
       "'bunu pastel yap' ve son hedef net değilse => ASK_CLARIFICATION",
       "'bunu sarı lacivert yap' + lastChart varsa => TOOL_REQUIRED chartData; preserve chart type; only colors/style change",
       "'bu renkleri kullanarak pasta grafik yap' => last palette + last chart/data; chartData pie; eski rastgele context'e dönme",
+      "'tablo yap' tek başına dosya değildir; format sorma, sohbet içinde markdown tablo üretilecekse NO_TOOL bırak",
+      "'burada/burda yap' önceki format sorusunun cevabıdır; inline çıktı anlamına gelir",
+      "'senin yazdığın tablo', 'ilk tablo', '6x6 tablo', 'bu tablo' ifadelerini last/first assistant table olarak çöz",
+      "tabloya emoji/görsel ekle => son tabloyu düzenle; gerçek görsel yoksa emoji/URL/placeholder kullan",
+      "tabloyu grafik yap => satır bazlı grafik; Ürün/Ay/Kategori label, Toplam/Fiyat/Tutar/Değer value; kolon toplamı yapma",
       "'ilk tablom', 'son grafik', 'az önceki dosya' gibi ifadeleri artifactRegistry ile çöz; emin değilsen sor",
       "tablo/grafik/dosya stil değiştirme isteklerinde raw HTML/code değil render hedefi planla",
     ],
@@ -278,6 +283,7 @@ async function planToolCallsWithDeepSeek({ userText = "", memory = {}, available
     rules: {
       chartTypes: "pasta/yuvarlak/daire/dilimli/renkli dagilim=>pie, çizgi/trend/zamana göre=>line, normal/çubuk/sütun/bar=>bar",
       preferredSources: "excel/pdf/chart/mermaid için lastTable; zip için lastFile; qr/textStats/document için lastText; fallback varsa boş bırak",
+      tableRules: "plain table creation is NO_TOOL inline; table-to-chart uses rows not column sums; remember and reuse all assistant tables",
       noDangerousActions: true,
     },
   });

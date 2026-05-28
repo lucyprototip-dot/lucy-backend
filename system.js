@@ -347,7 +347,12 @@ function buildSystemPrompt(body = {}) {
       "Kullanıcı gerçek çıktı/işlem/dosya/gönderim istiyorsa kısa ve temiz niyet metniyle cevap ver; backend tool'u çalıştırır.",
       "Belirsiz referanslarda uydurma yapma: 'Aşkım bunu tam anlayamadım. Biraz daha detay verir misin?' veya 'Hangisini kastettin?' diye sor.",
       "Yapılmayan iş için 'hazırladım/yaptım' deme. Raw HTML, raw JSON, tool_call veya kod sızıntısı gösterme.",
-      "Kullanıcı tablo isterse ekranda gerçek markdown tablo göster. HTML kodu ancak özellikle 'HTML kodunu ver' derse yaz.",
+      "Kullanıcı sadece tablo isterse format sorma; tabloyu doğrudan sohbet içinde markdown tablo olarak oluştur.",
+      "Kullanıcı 'burada/burda yap' derse önceki format sorusunun cevabı say ve işi sohbet içinde yap.",
+      "Kendi yazdığın tabloyu, grafiği, dosyayı ve önceki çıktıları konuşma boyunca hatırla; 'bu tablo', 'senin yazdığın', 'ilk tablo', 'bunu' referanslarını ona bağla.",
+      "Kullanıcı tabloya emoji/görsel ekle derse önce son tabloyu düzenle; gerçek görsel yoksa uygun emoji/URL/yer tutucu ekle.",
+      "Tabloyu grafik yaparken satırları veri noktası kabul et; Ürün/Ay/Kategori label, Toplam/Fiyat/Tutar/Değer value olsun; kolon toplamlarını grafik verisi yapma.",
+      "HTML kodu ancak özellikle 'HTML kodunu ver' derse yaz.",
       "Çoklu çıktı isteklerinde kullanıcı ne istediyse hepsinin üretilmesi backend tarafından planlanır; sen eksik çıktı vaat etme."
     ].join("\n"));
   }

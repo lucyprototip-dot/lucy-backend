@@ -840,8 +840,8 @@ function validateToolInput(call = {}, req = null) {
 //  ChatGPT benzeri "bunu excel/pdf/zip/grafik yap" zinciri.
 // ============================================================
 const TOOL_MEMORY_MAX = Number(process.env.LUCY_TOOL_MEMORY_MAX || 120);
-const CONTENT_HISTORY_MAX = Number(process.env.LUCY_CONTENT_HISTORY_MAX || 260);
-const HYDRATE_MESSAGE_MAX = Number(process.env.LUCY_HYDRATE_MESSAGE_MAX || 240);
+const CONTENT_HISTORY_MAX = Number(process.env.LUCY_CONTENT_HISTORY_MAX || 520);
+const HYDRATE_MESSAGE_MAX = Number(process.env.LUCY_HYDRATE_MESSAGE_MAX || 520);
 const toolMemoryByChat = new Map();
 
 function newToolMemory() {
@@ -1166,6 +1166,11 @@ function resolveActiveContent(req, answer = "") {
   const typed = typedContentFromMemory(memory, preferred);
   if (typed) return typed;
 
+  if (userReferencesAssistantTable(userText)) {
+    const fromHistory = tableFromHistory(memory, userText);
+    if (fromHistory?.rows?.length) return { type: "table", table: fromHistory, text: tableToMarkdown(fromHistory), title: "LUCY Tablosu", source: "referenced-table" };
+  }
+
   // "bunu pdf/docx/txt yap" gibi genel dönüşümlerde en son gerçek asistan metni
   // aktif tool tablosundan daha değerlidir. Bu, textStats çıktısının şiiri ezmesini engeller.
   const latestAssistant = latestAssistantContentObject(req);
@@ -1245,6 +1250,12 @@ function isToolGeneratedAnswerText(text = "") {
   if (rawMermaidLike) return true;
 
   return false;
+}
+
+function userReferencesAssistantTable(userText = "") {
+  const q = normalizeIntentText(userText);
+  return /(senin|yazdigin|yazdığın|yaptigin|yaptığın|ilk|birinci|onceki|önceki|az onceki|son|bu|bunu|tablo|6x6|pazar listesi)/.test(q)
+    && /(tablo|liste|emoji|emojileri|gorsel|görsel|grafik|excel|pdf|duzenle|düzenle|ekle|renk|stil)/.test(q);
 }
 
 function transformPrefersTypedSource(userText = "") {
