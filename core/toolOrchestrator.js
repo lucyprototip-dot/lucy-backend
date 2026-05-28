@@ -391,8 +391,10 @@ function enrichToolCallInput(call, req) {
   }
 
   if (toolName === "chartdata") {
-    const labels = input.labels || input.data?.labels;
-    const values = input.values || input.data?.datasets?.[0]?.data;
+    const inlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
+    const styleOnly = userStyleMutationOnly(userText) && !inlineTable;
+    const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
+
     const style = { ...(input.style || {}), ...detectVisualStyle(userText) };
     const palette = detectColorPalette(userText);
     if (palette.requested) {
@@ -401,12 +403,28 @@ function enrichToolCallInput(call, req) {
       style.colors = palette.colors;
       input.colors = palette.colors;
     }
+
+    // Style-only chart requests must never re-plan the data or chart type.
+    // Example: “Bunun renklerini pastel yap” keeps the current pie as pie and only changes colors.
+    if (styleOnly && selectedChart?.data) {
+      const chartInput = chartToChartInput(selectedChart, userText);
+      if (chartInput) {
+        Object.assign(input, chartInput);
+        input.chartType = selectedChart.chartType || selectedChart.type || chartInput.chartType || "bar";
+        input.title = selectedChart.title || chartInput.title || "Grafik";
+        input.label = chartInput.label || selectedChart.label || input.title;
+        input.style = { ...(chartInput.style || {}), ...style, colors: palette.requested ? palette.colors : (style.colors || chartInput.colors || []) };
+        input.colors = palette.requested ? palette.colors : (style.colors || chartInput.colors || []);
+      }
+      return { ...call, input };
+    }
+
+    const labels = input.labels || input.data?.labels;
+    const values = input.values || input.data?.datasets?.[0]?.data;
     input.style = style;
     input.chartType = explicitChartTypeFromText(userText) || input.chartType || input.type || "bar";
 
     if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
-      const inlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
-      const selectedChart = chartFromHistory(memory, userText);
       const selectedTable = inlineTable || tableFromHistory(memory, userText) || memory.lastTable;
       const preferExistingChart = !inlineTable && userSpecificallyReferencesChart(userText) && selectedChart?.data;
       const chartInput = preferExistingChart
