@@ -1,14 +1,30 @@
 const fs = require("fs");
 const path = require("path");
 
-const DATA_DIR = process.env.LUCY_DATA_DIR || path.resolve(__dirname, "..", "data");
+const DEFAULT_USER_ID = normalizeUserId(process.env.LUCY_DEFAULT_USER_ID || "omer");
 const STORE_FILE_NAME = process.env.LUCY_STORE_FILE || "lucy_web_arsiv.json";
-const STORE_PATH = path.join(DATA_DIR, STORE_FILE_NAME);
+const STORE_PATH = resolveStorePath();
+const DATA_DIR = path.dirname(STORE_PATH);
 const ARCHIVE_FILE = STORE_PATH;
 const LEGACY_STORE_PATH = path.join(DATA_DIR, "lucy-store.json");
-const BACKUP_DIR = path.join(DATA_DIR, "backup");
-const BACKUP_INTERVAL_MS = 5 * 60 * 1000;
+const EXAMPLE_STORE_PATH = path.resolve(__dirname, "..", "data", "lucy_web_arsiv.example.json");
+const BACKUP_DIR = process.env.LUCY_BACKUP_DIR
+  ? path.resolve(process.env.LUCY_BACKUP_DIR)
+  : path.join(DATA_DIR, "backup");
+const BACKUP_INTERVAL_MS = Number(process.env.LUCY_BACKUP_INTERVAL_MS || 5 * 60 * 1000);
 const MAX_BACKUP_FILES = Number(process.env.LUCY_MAX_BACKUPS || 30);
+
+function resolveStorePath() {
+  if (process.env.LUCY_DATA_PATH && process.env.LUCY_DATA_PATH.trim()) {
+    return path.resolve(process.env.LUCY_DATA_PATH.trim());
+  }
+
+  const dataDir = process.env.LUCY_DATA_DIR
+    ? path.resolve(process.env.LUCY_DATA_DIR)
+    : path.resolve(__dirname, "..", "data");
+
+  return path.join(dataDir, STORE_FILE_NAME);
+}
 
 function safeUnlink(filePath) {
   try {
@@ -26,6 +42,16 @@ function ensureDataDir() {
   if (!fs.existsSync(BACKUP_DIR)) {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
   }
+}
+
+function normalizeUserId(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  const clean = raw
+    .replace(/[^a-z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "")
+    .slice(0, 64);
+  return clean || "default";
 }
 
 function backupFileName() {
@@ -73,7 +99,7 @@ function createLucyStoreBackup() {
   }
 }
 
-function emptyLucyStore() {
+function emptyUserStore() {
   return {
     version: "lucy-v11.9.0",
     updatedAt: new Date().toISOString(),
@@ -81,12 +107,15 @@ function emptyLucyStore() {
     gpts: [],
     academy: [],
     projects: [],
+    work: [],
+    folders: [],
     memory: "",
     exporter: [],
     live: {},
     activeChatId: "",
     activeGptId: "lucy-standard",
     activeProjectId: "",
+    activeWorkId: "",
     settings: {
       theme: "dark",
       sidebarOpen: true,
@@ -98,7 +127,81 @@ function emptyLucyStore() {
   };
 }
 
-function readLucyStore() {
+function emptyRootStore() {
+  return {
+    version: "lucy-multi-user-v1",
+    schema: "multi-user-json-store",
+    updatedAt: new Date().toISOString(),
+    users: {},
+  };
+}
+
+function isLegacyUserStore(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return ["chats", "gpts", "academy", "projects", "memory", "settings"].some((key) => key in value);
+}
+
+function normalizeUserStore(store = {}) {
+  const base = emptyUserStore();
+  const safe = store && typeof store === "object" && !Array.isArray(store) ? store : {};
+  return {
+    ...base,
+    ...safe,
+    chats: Array.isArray(safe.chats) ? safe.chats : base.chats,
+    gpts: Array.isArray(safe.gpts) ? safe.gpts : base.gpts,
+    academy: Array.isArray(safe.academy) ? safe.academy : base.academy,
+    projects: Array.isArray(safe.projects) ? safe.projects : base.projects,
+    work: Array.isArray(safe.work) ? safe.work : base.work,
+    folders: Array.isArray(safe.folders) ? safe.folders : base.folders,
+    exporter: Array.isArray(safe.exporter) ? safe.exporter : base.exporter,
+    live: safe.live && typeof safe.live === "object" && !Array.isArray(safe.live) ? safe.live : base.live,
+    settings: {
+      ...base.settings,
+      ...(safe.settings && typeof safe.settings === "object" && !Array.isArray(safe.settings) ? safe.settings : {}),
+    },
+    updatedAt: safe.updatedAt || base.updatedAt,
+  };
+}
+
+function normalizeRootStore(input = {}) {
+  const now = new Date().toISOString();
+
+  if (input && typeof input === "object" && !Array.isArray(input) && input.users && typeof input.users === "object" && !Array.isArray(input.users)) {
+    const root = {
+      ...emptyRootStore(),
+      ...input,
+      users: {},
+      updatedAt: input.updatedAt || now,
+    };
+
+    Object.entries(input.users).forEach(([rawUserId, userStore]) => {
+      const userId = normalizeUserId(rawUserId);
+      root.users[userId] = normalizeUserStore(userStore);
+    });
+
+    if (!root.users[DEFAULT_USER_ID]) root.users[DEFAULT_USER_ID] = emptyUserStore();
+    return root;
+  }
+
+  const root = emptyRootStore();
+  root.updatedAt = now;
+  root.users[DEFAULT_USER_ID] = normalizeUserStore(isLegacyUserStore(input) ? input : {});
+  return root;
+}
+
+function loadInitialRootStore() {
+  if (fs.existsSync(EXAMPLE_STORE_PATH)) {
+    try {
+      const raw = fs.readFileSync(EXAMPLE_STORE_PATH, "utf8");
+      if (raw.trim()) return normalizeRootStore(JSON.parse(raw));
+    } catch (error) {
+      console.error("LUCY example store okunamadı:", error.message);
+    }
+  }
+  return normalizeRootStore({});
+}
+
+function readRootStore() {
   ensureDataDir();
 
   if (!fs.existsSync(STORE_PATH) && fs.existsSync(LEGACY_STORE_PATH)) {
@@ -106,44 +209,80 @@ function readLucyStore() {
   }
 
   if (!fs.existsSync(STORE_PATH)) {
-    const initialStore = emptyLucyStore();
-    fs.writeFileSync(STORE_PATH, JSON.stringify(initialStore, null, 2), "utf8");
+    const initialStore = loadInitialRootStore();
+    writeRootStore(initialStore, { backup: false });
     return initialStore;
   }
 
   try {
     const raw = fs.readFileSync(STORE_PATH, "utf8");
-    if (!raw.trim()) return emptyLucyStore();
-    return { ...emptyLucyStore(), ...JSON.parse(raw) };
+    if (!raw.trim()) return normalizeRootStore({});
+    return normalizeRootStore(JSON.parse(raw));
   } catch (error) {
     console.error("LUCY data store okunamadı:", error.message);
-    return emptyLucyStore();
+    return normalizeRootStore({});
   }
 }
 
-function writeLucyStore(nextStore = {}) {
+function writeRootStore(nextRoot = {}, options = {}) {
   ensureDataDir();
 
-  const safeStore = {
-    ...emptyLucyStore(),
-    ...nextStore,
-    updatedAt: new Date().toISOString(),
-  };
+  const root = normalizeRootStore(nextRoot);
+  root.updatedAt = new Date().toISOString();
 
-  createLucyStoreBackup();
+  if (options.backup !== false) createLucyStoreBackup();
 
   const tempPath = `${STORE_PATH}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(safeStore, null, 2), "utf8");
+  fs.writeFileSync(tempPath, JSON.stringify(root, null, 2), "utf8");
   fs.renameSync(tempPath, STORE_PATH);
-  return safeStore;
+  return root;
+}
+
+function readLucyStore(userId = DEFAULT_USER_ID) {
+  const safeUserId = normalizeUserId(userId || DEFAULT_USER_ID);
+  const root = readRootStore();
+
+  if (!root.users[safeUserId]) {
+    root.users[safeUserId] = emptyUserStore();
+    writeRootStore(root);
+  }
+
+  return normalizeUserStore(root.users[safeUserId]);
+}
+
+function writeLucyStore(nextStore = {}, userId = DEFAULT_USER_ID) {
+  const safeUserId = normalizeUserId(userId || DEFAULT_USER_ID);
+  const root = readRootStore();
+  const previous = root.users[safeUserId] ? normalizeUserStore(root.users[safeUserId]) : emptyUserStore();
+
+  root.users[safeUserId] = normalizeUserStore({
+    ...previous,
+    ...(nextStore && typeof nextStore === "object" && !Array.isArray(nextStore) ? nextStore : {}),
+    updatedAt: new Date().toISOString(),
+  });
+
+  writeRootStore(root);
+  return root.users[safeUserId];
+}
+
+function listLucyUsers() {
+  const root = readRootStore();
+  return Object.keys(root.users).sort();
 }
 
 module.exports = {
   DATA_DIR,
   STORE_PATH,
   ARCHIVE_FILE,
+  DEFAULT_USER_ID,
   ensureDataDir,
-  emptyLucyStore,
+  normalizeUserId,
+  emptyUserStore,
+  emptyLucyStore: emptyUserStore,
+  emptyRootStore,
+  readRootStore,
+  writeRootStore,
   readLucyStore,
   writeLucyStore,
+  listLucyUsers,
 };

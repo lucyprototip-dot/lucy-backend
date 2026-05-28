@@ -155,8 +155,24 @@ function detectColorPalette(value = "") {
 
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
+  const metaOrStyle = /\b(nedir|ne demek|ne ise yarar|nasil calisir|mantigi|anlat|acikla|ornek ver|farki ne|gibi|tarzi|tarzinda|formatinda|uslubunda|tonunda)\b/.test(text);
+  const action = /\b(yap|olustur|hazirla|uret|ver|indir|kaydet|donustur|cevir|gonder|at|ilet|oku|listele|hesapla|ciz|goster|arsivle|sikistir)\b/.test(text);
+  if (metaOrStyle && !action) return false;
+  // Tool hakkında açıklama/eğitim soruları tool çalıştırmaz: "PDF nasıl yapılır", "Excel örneği anlat" vb.
+  if (/\b(pdf|excel|xlsx|xls|zip|qr|ocr|webfetch|mail|telegram|whatsapp|mermaid|diyagram|grafik|chart|calculator|hesap|textstats)\b/.test(text)
+      && /\b(nasil|nedir|ne demek|ne ise yarar|mantigi|anlat|acikla|ornek|farki)\b/.test(text)
+      && !/\b(gonder|indir|kaydet|dosya olarak|gercekten|hemen olustur|hemen yap)\b/.test(text)) return false;
+  // Açık Türkçe gönderim/URL okuma kalıpları tool niyetidir.
+  if (/https?:\/\/\S+/.test(String(value || "")) && /\b(oku|sayfa|sayfayi|sayfayı|sayfasini|sayfasını|icerik|içerik|getir|al|cikar|çıkar|baslik|başlık|metin)\b/.test(text)) return true;
+  if (/\b(linkteki|urldeki|linki|url|siteyi|sayfayi|sayfayı|sayfasini|sayfasını)\b.*\b(oku|icerik|içerik|getir|al|cikar|çıkar|baslik|başlık|metin)\b/.test(text)) return true;
+  if (/[\w.+-]+@[\w.-]+\.[a-z]{2,}/i.test(String(value || "")) && /\b(mail|maili|email|eposta|e posta|gonder|gönder|at|ilet)\b/.test(text)) return true;
+  if (/\b(mail|maili|email|eposta|e posta)\b.*\b(gonder|gönder|at|ilet)\b/.test(text) || /\b(gonder|gönder|at|ilet)\b.*\b(mail|maili|email|eposta|e posta)\b/.test(text)) return true;
+  if (/\b(telegram|telegrama|telegramdan)\b.*\b(gonder|gönder|at|ilet)\b/.test(text) || /\b(gonder|gönder|at|ilet)\b.*\b(telegram|telegrama|telegramdan)\b/.test(text)) return true;
+  if (/\b(whatsapp|whatsappa|whatsappdan|wp)\b.*\b(gonder|gönder|at|ilet)\b/.test(text) || /\b(gonder|gönder|at|ilet)\b.*\b(whatsapp|whatsappa|whatsappdan|wp)\b/.test(text)) return true;
+
   // Genel kelimeler tek başına tool tetiklemesin; açık çıktı fiili veya net tool kalıbı varsa tetiklensin.
-  return /\b(pdf|zip|excel|xlsx|xls|docx|qr|ocr|webfetch|hesap|calculator|hesapla|mail gonder|telegram gonder|whatsapp gonder|whatsapp mesaj|textstats|filemanager)\b|grafik|chart|pasta grafik|yuvarlak grafik|daire grafik|dilimli|trend grafik|cizgi grafik|cubuk grafik|sutun grafik|diyagram|mermaid|akis diagrami|akis semasi|blok diyagram|kutularla goster|indir|arsivle|rapor pdf|excel yap|pdf yap|zip yap|qr kod|dosyalari listele|dosyalari oku|dosyayi oku|son dosyayi oku|son olusturulan dosyayi oku|olusturulan dosyalari|filemanager/.test(text)
+  return /\b(zip|excel|xlsx|xls|docx|qr|ocr|webfetch|hesap|calculator|hesapla|mail gonder|maili gonder|email gonder|eposta gonder|telegram gonder|telegrama gonder|telegram mesaj gonder|whatsapp gonder|whatsappa gonder|whatsapp mesaj gonder|textstats|filemanager)\b|grafik|chart|pasta grafik|yuvarlak grafik|daire grafik|dilimli|trend grafik|cizgi grafik|cubuk grafik|sutun grafik|diyagram|mermaid|akis diagrami|akis semasi|blok diyagram|kutularla goster|indir|arsivle|rapor pdf|excel yap|pdf yap|zip yap|qr kod|dosyalari listele|dosyalari oku|dosyayi oku|son dosyayi oku|son olusturulan dosyayi oku|olusturulan dosyalari|filemanager|https?:\/\/\S+.*(oku|icerik|getir|al|cikar|sayfa|sayfasini|baslik|metin)/.test(text)
+    || /\b(pdf)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|donustur|cevir)\b/.test(text)
     || /\b(word|docx|belge|txt|markdown|md|csv|json|html)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|donustur|cevir)\b/.test(text)
     || /\b(sema|şema)\b.*\b(yap|olustur|hazirla|goster|ciz|kur)\b/.test(text)
     || /\b(saat kac|saat nedir|saat ne|tarih nedir|tarih ne|bugun tarih|bugunun tarihi|simdi kac|zaman nedir)\b/.test(text);

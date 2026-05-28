@@ -1,3 +1,33 @@
+function firstUploadedFile(req) {
+  if (req.file) return req.file;
+  if (Array.isArray(req.files)) return req.files[0] || null;
+  if (req.files && typeof req.files === "object") {
+    for (const value of Object.values(req.files)) {
+      if (Array.isArray(value) && value[0]) return value[0];
+      if (value && typeof value === "object") return value;
+    }
+  }
+  return null;
+}
+
+function flexibleUpload(upload, uploadStatusForError) {
+  return (req, res, next) => {
+    upload.any()(req, res, (error) => {
+      if (error) {
+        const status = typeof uploadStatusForError === "function" ? uploadStatusForError(error) : 400;
+        return res.status(status).json({
+          success: false,
+          error: error.code || "upload_failed",
+          message: error.message || "Dosya yüklenemedi.",
+        });
+      }
+      const file = firstUploadedFile(req);
+      if (file && !req.file) req.file = file;
+      next();
+    });
+  };
+}
+
 function registerFileRoutes(app, deps) {
   const {
     upload,
@@ -7,17 +37,21 @@ function registerFileRoutes(app, deps) {
     generateWithOpenRouter,
     normalizeText,
     safeUnlink,
+    uploadStatusForError,
   } = deps;
 
-  // Frontend bu üç endpoint'i sırayla deniyor. Hepsi aynı dosya okuma motoruna bağlandı.
-  app.post("/api/upload-file", upload.single("file"), handleUploadedFile);
-  app.post("/api/file", upload.single("file"), handleUploadedFile);
-  app.post("/api/read-file", upload.single("file"), handleUploadedFile);
+  // Frontend farklı field adları gönderebiliyor: file, image, document, upload vb.
+  // PATCH-3: Unexpected field yüzünden /api/upload-file patlamasın diye flexible upload kullanılır.
+  const acceptAnyFile = flexibleUpload(upload, uploadStatusForError);
 
-  app.post("/api/analyze-image", upload.single("image"), async (req, res) => {
+  app.post("/api/upload-file", acceptAnyFile, handleUploadedFile);
+  app.post("/api/file", acceptAnyFile, handleUploadedFile);
+  app.post("/api/read-file", acceptAnyFile, handleUploadedFile);
+
+  app.post("/api/analyze-image", acceptAnyFile, async (req, res) => {
     let uploadedPath = null;
     try {
-      const file = req.file || req.files?.image || req.files?.file;
+      const file = firstUploadedFile(req);
       if (!file) return res.status(400).json({ success: false, error: "Resim gerekli" });
       uploadedPath = file.path;
       const mimeType = file.mimetype;
@@ -38,7 +72,7 @@ function registerFileRoutes(app, deps) {
     }
   });
 
-  app.post("/api/analyze-video", upload.single("video"), async (req, res) => {
+  app.post("/api/analyze-video", acceptAnyFile, async (req, res) => {
     let uploadedPath = null;
     try {
       if (!req.file) return res.status(400).json({ success: false, error: "Video gerekli" });

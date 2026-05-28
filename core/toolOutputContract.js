@@ -133,6 +133,44 @@ function normalizeCalculator(result = {}, input = {}) {
   };
 }
 
+function normalizeTime(result = {}, input = {}) {
+  const locale = input.locale || result.locale || "tr-TR";
+  const timeZone = result.timeZone || input.timeZone || "Europe/Istanbul";
+  const time = result.time || result.datetime || result.dateTime || result.value || "";
+  const date = result.date || "";
+  const text = asText(result.text || result.message || (time ? `Şu an saat: ${time} (${timeZone})` : "Saat bilgisi alınamadı."));
+  return {
+    success: asBool(result.success, Boolean(time || text)),
+    type: "time",
+    tool: "time",
+    title: result.title || input.title || "Saat ve tarih",
+    time,
+    date,
+    timeZone,
+    locale,
+    text,
+    error: result.error,
+  };
+}
+
+function normalizeOcr(result = {}, input = {}) {
+  const text = asText(result.text || result.message || "");
+  const ok = asBool(result.success, Boolean(text));
+  return {
+    success: ok,
+    type: "ocr",
+    tool: "ocr",
+    title: result.title || input.title || "OCR sonucu",
+    text: text || (ok ? "OCR tamamlandı ama okunabilir metin bulunamadı." : "OCR çalıştırılamadı."),
+    confidence: result.confidence ?? null,
+    lang: result.lang || input.lang || input.language || "tur+eng",
+    filename: result.filename || input.filename || input.storedFilename || "",
+    storedFilename: result.storedFilename || input.storedFilename || "",
+    mimeType: result.mimeType || input.mimeType || "",
+    error: result.error,
+  };
+}
+
 function normalizeToolOutput(toolName = "tool", result = {}, input = {}) {
   const tool = String(toolName || result.tool || "tool");
   const lower = tool.toLowerCase();
@@ -140,6 +178,14 @@ function normalizeToolOutput(toolName = "tool", result = {}, input = {}) {
 
   if (lower === "calculator") {
     return normalizeCalculator(value, input);
+  }
+
+  if (lower === "time") {
+    return normalizeTime(value, input);
+  }
+
+  if (lower === "ocr") {
+    return normalizeOcr(value, input);
   }
 
   if (lower === "chartdata" || value.chartType || value.data?.labels || input.chartType) {
@@ -168,5 +214,7 @@ module.exports = {
   normalizeMermaid,
   normalizeFile,
   normalizeCalculator,
+  normalizeTime,
+  normalizeOcr,
   stripMermaidFence,
 };

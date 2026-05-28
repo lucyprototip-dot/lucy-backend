@@ -3,14 +3,21 @@ const DEFAULT_PALETTE = [
   "#ec4899", "#06b6d4", "#84cc16", "#f97316", "#14b8a6",
 ];
 
-function cleanNumber(value) {
+function parseNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
   const raw = String(value ?? "")
     .replace(/[%₺$€£]/g, "")
     .replace(/\s/g, "")
     .replace(/\.(?=\d{3}(\D|$))/g, "")
     .replace(/,/g, ".");
+  if (!raw || !/^-?\d+(?:\.\d+)?$/.test(raw)) return null;
   const num = Number(raw);
-  return Number.isFinite(num) ? num : 0;
+  return Number.isFinite(num) ? num : null;
+}
+
+function cleanNumber(value) {
+  const num = parseNumber(value);
+  return num === null ? 0 : num;
 }
 
 function paletteFor(input = {}, count = 1) {
@@ -40,17 +47,20 @@ module.exports = {
         ? input.headers
         : Object.keys(input.rows.find((row) => row && typeof row === "object") || {});
       const labelKey = headers[0];
-      const valueKey = headers.find((header) => input.rows.some((row) => Number.isFinite(cleanNumber(row?.[header]))));
+      const valueKey = headers.find((header) => input.rows.some((row) => parseNumber(row?.[header]) !== null));
+      if (!valueKey) {
+        return { success: false, error: "numeric_values_required", message: "Grafik için en az bir sayısal kolon gerekli." };
+      }
       labels = input.rows.slice(0, 30).map((row, index) => String(row?.[labelKey] ?? `Satır ${index + 1}`));
-      values = input.rows.slice(0, 30).map((row) => cleanNumber(row?.[valueKey]));
+      values = input.rows.slice(0, 30).map((row) => parseNumber(row?.[valueKey]));
     }
 
-    const numericValues = values.map((value) => cleanNumber(value));
-    if (!labels.length || !numericValues.length || labels.length !== numericValues.length) {
+    const numericValues = values.map((value) => parseNumber(value));
+    if (!labels.length || !numericValues.length || labels.length !== numericValues.length || numericValues.some((value) => value === null)) {
       return {
         success: false,
         error: "invalid_chart_data",
-        message: "labels ve values dolu olmalı ve aynı uzunlukta olmalı.",
+        message: "labels ve values dolu, aynı uzunlukta ve sayısal olmalı.",
       };
     }
 

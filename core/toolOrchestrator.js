@@ -26,6 +26,13 @@ const {
   stripToolNoise,
 } = require("./toolIntentDetector");
 const {
+  shouldBlockToolForConversation,
+  explicitToolAction,
+  normalizeToolName,
+  rankAndDedupeToolCalls,
+  isHardToolRequest,
+} = require("./toolBrainRouter");
+const {
   listLoadedTools,
   listToolLoadErrors,
   getLoadedTool,
@@ -453,21 +460,9 @@ function enrichToolCallInput(call, req) {
   if (toolName === "zip") {
     const hasFiles = Array.isArray(input.files) && input.files.length > 0;
     if (!hasFiles) {
-      const memoryFiles = [memory.lastFile, memory.lastPdf, memory.lastExcel]
-        .filter(Boolean)
-        .filter((file) => file?.storedFilename && !String(file.filename || file.storedFilename || "").toLowerCase().endsWith(".zip"));
-      const fromMemory = memoryFiles[0];
-      if (fromMemory?.storedFilename) {
-        input.files = [{ storedFilename: fromMemory.storedFilename, filename: fromMemory.filename || fromMemory.storedFilename }];
-      } else {
-        const refs = collectConversationGeneratedFileRefs(req).filter((ref) => !String(ref.filename || ref.storedFilename || "").toLowerCase().endsWith(".zip"));
-        const lastRef = refs[refs.length - 1];
-        if (lastRef?.storedFilename) {
-          input.files = [{
-            storedFilename: lastRef.storedFilename,
-            filename: lastRef.filename || lastRef.storedFilename,
-          }];
-        }
+      const chosen = selectGeneratedFileFromMemory(userText, memory, req, { allowZip: false });
+      if (chosen?.storedFilename) {
+        input.files = [{ storedFilename: chosen.storedFilename, filename: chosen.filename || chosen.storedFilename }];
       }
     }
     if (!input.filename) input.filename = "lucy-dosyalari.zip";
@@ -490,7 +485,8 @@ function latestUserIntentText(req) {
 }
 
 function requestedToolWork(req) {
-  return likelyToolIntent(latestUserIntentText(req));
+  const userText = latestUserIntentText(req);
+  return isHardToolRequest(userText) && likelyToolIntent(userText);
 }
 
 function requestedMermaidWork(req) {
@@ -593,24 +589,34 @@ function isUsableToolCall(call = {}) {
 }
 
 function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
-  const tool = String(call.tool || "").toLowerCase();
+  const tool = normalizeToolName(call.tool || "");
   const userText = latestUserIntentText(req);
 
-  // If user explicitly asks to read/list generated files, fileManager has absolute priority.
-  // This prevents the model from interpreting "oku" as webFetch.
-  if (wantsFileManagerFromText(userText)) {
-    return tool === "filemanager";
-  }
+  const brainBlock = shouldBlockToolForConversation(userText, tool);
+  if (brainBlock?.block) return false;
 
-  // Guard high false-positive tools. The model may emit these from generic words
-  // like "saat" or "web" even when the user means style/UI, not the tool.
+  // File read/list commands are deterministic and always own the "oku/listele" intent.
+  if (wantsFileManagerFromText(userText)) return tool === "filemanager";
+
+  // Every tool must match the current user intent. This blocks hallucinated model tool_call output.
+  if (tool === "calculator") return wantsCalculatorFromText(userText) && !wantsDocumentFromText(userText) && !wantsExcelFromText(userText) && !wantsPdfFromText(userText) && !wantsZipFromText(userText);
   if (tool === "time") return wantsTimeFromText(userText);
   if (tool === "webfetch") return wantsWebFetchFromText(userText);
-
-  // OCR should only run on explicit OCR/image-reading intent.
   if (tool === "ocr") return wantsOcrFromText(userText);
+  if (tool === "chartdata") return wantsChartFromText(userText);
+  if (tool === "mermaid") return wantsMermaidFromText(userText);
+  if (tool === "excel") return wantsExcelFromText(userText);
+  if (tool === "pdf") return wantsPdfFromText(userText);
+  if (tool === "document") return wantsDocumentFromText(userText);
+  if (tool === "qr") return wantsQrFromText(userText);
+  if (tool === "zip") return wantsZipFromText(userText);
+  if (tool === "textstats") return wantsTextStatsFromText(userText);
+  if (tool === "mail") return wantsMailFromText(userText);
+  if (tool === "telegram") return wantsTelegramFromText(userText);
+  if (tool === "whatsapp") return wantsWhatsappFromText(userText);
+  if (tool === "filemanager") return wantsFileManagerFromText(userText);
 
-  return true;
+  return explicitToolAction(userText, tool);
 }
 
 
@@ -792,6 +798,58 @@ function parseFirstMarkdownTableObject(text = "") {
   return null;
 }
 
+
+function parseLooseInlineTableObject(text = "") {
+  const raw = String(text || "").trim();
+  const q = normalizeIntentText(raw);
+  if (!/tablo/.test(q) || !raw.includes(":")) return null;
+
+  const before = raw.split(":")[0] || "";
+  const after = raw.split(":").slice(1).join(":").trim();
+  if (!after) return null;
+
+  let headerPart = before
+    .replace(/.*?([A-Za-zÇĞİÖŞÜçğıöşü0-9_\s,;|\/.-]+)\s+tablos[uuıi]?.*/i, "$1")
+    .replace(/\b(tablo|tablosu|yap|olustur|oluştur|hazirla|hazırla|bana|bir)\b/gi, "")
+    .trim();
+
+  let headers = headerPart
+    .split(/[,;|/]+/)
+    .map((h) => h.trim())
+    .filter(Boolean);
+
+  if (headers.length < 2) {
+    const guessed = before.match(/([A-Za-zÇĞİÖŞÜçğıöşü]+)\s*,\s*([A-Za-zÇĞİÖŞÜçğıöşü]+)(?:\s*,\s*([A-Za-zÇĞİÖŞÜçğıöşü]+))?/);
+    headers = guessed ? guessed.slice(1).filter(Boolean).map((h) => h.trim()) : [];
+  }
+
+  if (headers.length < 2) return null;
+  headers = headers.slice(0, 8).map((h, i) => h || `Sütun ${i + 1}`);
+
+  const chunks = after
+    .replace(/\b(bunu|bunlari|bunları|sonra|ardindan|ardından|hem|ayrica|ayrıca)\b.*$/i, "")
+    .split(/\s*[,;\n]+\s*/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const rows = [];
+  for (const chunk of chunks) {
+    const tokens = chunk.split(/\s+/).filter(Boolean);
+    if (tokens.length < headers.length) continue;
+    const row = {};
+    if (headers.length >= 2) {
+      const valueCount = headers.length - 1;
+      const values = tokens.slice(-valueCount);
+      const label = tokens.slice(0, tokens.length - valueCount).join(" ").trim();
+      row[headers[0]] = label || tokens[0];
+      headers.slice(1).forEach((h, idx) => { row[h] = values[idx] ?? ""; });
+    }
+    if (Object.values(row).some((v) => String(v).trim())) rows.push(row);
+  }
+
+  return rows.length ? { headers, rows, source: "loose-inline" } : null;
+}
+
 function normalizeRowsForMemory(rows = [], headers = null) {
   if (!Array.isArray(rows) || !rows.length) return null;
   if (Array.isArray(rows[0])) {
@@ -926,7 +984,7 @@ function resolveActiveContent(req, answer = "") {
 
   // Aynı mesajda uzun içerik/metin verildiyse öncelik kullanıcının son içeriği.
   if (!isOnlyTransformCommand(userText) && (String(userText).length > 90 || /\n/.test(userText) || hasMarkdownTable(userText))) {
-    const table = parseFirstMarkdownTableObject(userText);
+    const table = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText);
     return table
       ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(userText, "LUCY Tablosu"), source: "user-inline" }
       : { type: "text", text: stripToolNoise(userText), title: contentTitleFromText(userText, "LUCY İçeriği"), source: "user-inline" };
@@ -998,7 +1056,7 @@ function rememberText(memory, text = "") {
   if (!clean || clean.length < 2) return memory;
   if (isGeneratedStatusOnlyText(text)) return memory;
   memory.lastText = clean;
-  const table = parseFirstMarkdownTableObject(clean);
+  const table = parseFirstMarkdownTableObject(clean) || parseLooseInlineTableObject(clean);
   if (table) {
     memory.lastTable = table;
     setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(clean, "LUCY Tablosu"), source: "text" });
@@ -1339,6 +1397,7 @@ function documentFormatFromText(userText = "") {
   if (/\bcsv\b/.test(q)) return "csv";
   if (/\bjson\b/.test(q)) return "json";
   if (/\bhtml\b/.test(q)) return "html";
+  if (/\b(word|docx|doc)\b/.test(q)) return "docx";
   if (/\btxt\b|metin dosyasi|text dosyasi/.test(q)) return "txt";
   return "md";
 }
@@ -1358,19 +1417,241 @@ function documentInlineContentFromText(userText = "") {
   return text;
 }
 
+
+function messagePayloadFromText(userText = "", platform = "message") {
+  const raw = String(userText || "").trim();
+  const q = normalizeIntentText(raw);
+  const afterColon = raw.includes(":") ? raw.split(":").slice(1).join(":").trim() : "";
+  let text = afterColon || raw;
+
+  text = text
+    .replace(/^[^:]{0,120}\b(mail|email|eposta|e posta|telegram|whatsapp|wp)\b[^:]{0,120}\b(gonder|gönder|at|ilet)\b\s*/i, "")
+    .replace(/\b(mail|email|eposta|e posta|telegram|whatsapp|wp)\b\s*/gi, "")
+    .replace(/\b(gonder|gönder|at|ilet)\b\s*/gi, "")
+    .trim();
+
+  if (!text || normalizeIntentText(text) === q) text = afterColon || "LUCY mesajı";
+  return text;
+}
+
+function extractEmailFromText(userText = "") {
+  return String(userText || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
+}
+
+function extractPhoneFromText(userText = "") {
+  const explicit = String(userText || "").match(/(?:\+?\d[\d\s().-]{7,}\d)/);
+  if (!explicit) return "";
+  return explicit[0].replace(/[^0-9]/g, "");
+}
+
+function mailSubjectFromText(userText = "") {
+  const match = String(userText || "").match(/\b(?:konu|subject)\s*[:=]\s*([^\n:]{2,90})/i);
+  return (match?.[1] || "LUCY Mesajı").trim();
+}
+
+function normalizeFileKindRequest(userText = "") {
+  const q = normalizeIntentText(userText);
+  if (/\b(excel|xlsx|xls|e tablo|spreadsheet)\b/.test(q)) return "excel";
+  if (/\b(pdf)\b/.test(q)) return "pdf";
+  if (/\b(zip|arsiv|arşiv)\b/.test(q)) return "zip";
+  if (/\b(qr|karekod|png|resim|gorsel|görsel|image)\b/.test(q)) return "image";
+  if (/\b(txt|markdown|md|json|csv|html|belge|document|word|docx)\b/.test(q)) return "document";
+  return "last";
+}
+
+function cleanGeneratedFileCandidate(file = null) {
+  if (!file || typeof file !== "object") return null;
+  const storedFilename = file.storedFilename || file.generatedFile || file.name || file.filename;
+  if (!storedFilename) return null;
+  return {
+    ...file,
+    storedFilename,
+    filename: file.filename || file.name || storedFilename,
+  };
+}
+
+function selectGeneratedFileFromMemory(userText = "", memory = {}, req = null, options = {}) {
+  const kind = normalizeFileKindRequest(userText);
+  const allowZip = options.allowZip !== false;
+  const refs = collectConversationGeneratedFileRefs(req || {}).map(cleanGeneratedFileCandidate).filter(Boolean);
+
+  const typed = {
+    excel: [memory.lastExcel],
+    pdf: [memory.lastPdf],
+    zip: [memory.lastZip],
+    image: [memory.lastQr, memory.lastFile],
+    document: [memory.lastDocument, memory.lastFile],
+    last: [memory.lastFile, memory.lastPdf, memory.lastExcel, memory.lastDocument, memory.lastQr, memory.lastZip],
+  };
+
+  const candidates = [
+    ...(typed[kind] || []),
+    ...(kind !== "last" ? (typed.last || []) : []),
+    ...refs.slice().reverse(),
+  ].map(cleanGeneratedFileCandidate).filter(Boolean);
+
+  for (const candidate of candidates) {
+    const name = String(candidate.filename || candidate.storedFilename || "").toLowerCase();
+    if (!allowZip && name.endsWith(".zip")) continue;
+    if (kind === "excel" && !/\.(xlsx|xls|csv)$/i.test(name)) continue;
+    if (kind === "pdf" && !/\.pdf$/i.test(name)) continue;
+    if (kind === "zip" && !/\.zip$/i.test(name)) continue;
+    if (kind === "image" && !/\.(png|jpe?g|webp|gif|bmp|tiff?|svg)$/i.test(name)) continue;
+    if (kind === "document" && !/\.(txt|md|json|jsonl|csv|html?|xml|docx?)$/i.test(name)) continue;
+    return candidate;
+  }
+
+  return candidates.find((candidate) => allowZip || !String(candidate.filename || candidate.storedFilename || "").toLowerCase().endsWith(".zip")) || null;
+}
+
 function fileManagerInputFromText(userText = "", memory = {}, req = null) {
   const q = normalizeIntentText(userText);
   if (/listele|listesi|dosyalari|dosyaları|generated/.test(q) && !/oku|sil|delete/.test(q)) {
     return { action: "list" };
   }
+  if (/sil|delete|kaldir|kaldır/.test(q)) {
+    const file = selectGeneratedFileFromMemory(userText, memory, req, { allowZip: true });
+    if (file?.storedFilename) return { action: "delete", storedFilename: file.storedFilename, filename: file.filename || file.storedFilename };
+    return { action: "delete" };
+  }
   if (/oku|icerik|içerik|ac|aç/.test(q)) {
-    const refs = collectConversationGeneratedFileRefs(req || {}).filter((ref) => ref?.storedFilename);
-    const lastRef = refs[refs.length - 1];
-    const file = memory.lastFile || memory.lastDocument || memory.lastPdf || memory.lastExcel || lastRef;
+    const file = selectGeneratedFileFromMemory(userText, memory, req, { allowZip: true });
     if (file?.storedFilename) return { action: "read", storedFilename: file.storedFilename, filename: file.filename || file.storedFilename };
     return { action: "read" };
   }
   return { action: "list" };
+}
+
+
+function canonicalChainToolName(tool = "") {
+  const compact = String(tool || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  const aliases = {
+    chart: "chartData",
+    chartdata: "chartData",
+    filemanager: "fileManager",
+    webfetch: "webFetch",
+    textstats: "textStats",
+  };
+  return aliases[compact] || String(tool || "").trim();
+}
+
+function chainPriority(tool = "") {
+  const t = String(canonicalChainToolName(tool)).toLowerCase();
+  // ZIP her zaman en son çalışmalı; aynı turda üretilen dosyaları içine alabilsin.
+  const priority = {
+    calculator: 10,
+    time: 12,
+    webfetch: 15,
+    ocr: 20,
+    chartdata: 30,
+    mermaid: 32,
+    excel: 40,
+    document: 42,
+    pdf: 44,
+    qr: 46,
+    textstats: 50,
+    mail: 60,
+    whatsapp: 61,
+    telegram: 62,
+    filemanager: 70,
+    zip: 100,
+  };
+  return priority[t] ?? 55;
+}
+
+function orderToolCallsForChaining(calls = [], userText = "") {
+  return rankAndDedupeToolCalls(calls, userText)
+    .map((call, index) => ({ ...call, tool: canonicalChainToolName(call.tool), __chainIndex: index }))
+    .sort((a, b) => {
+      const pa = chainPriority(a.tool);
+      const pb = chainPriority(b.tool);
+      if (pa !== pb) return pa - pb;
+      return (a.__chainIndex || 0) - (b.__chainIndex || 0);
+    })
+    .map(({ __chainIndex, ...call }) => call);
+}
+
+function producedFileCandidate(tool = "", result = {}) {
+  if (!result || result.success === false) return null;
+  const filename = result.filename || result.storedFilename;
+  const storedFilename = result.storedFilename || result.generatedFile || result.filename;
+  if (!filename && !storedFilename) return null;
+  const lower = String(filename || storedFilename || "").toLowerCase();
+  // Aynı turda üretilen ZIP'i başka ZIP içine koyma.
+  if (lower.endsWith(".zip")) return null;
+  if (!["excel", "pdf", "document", "qr"].includes(String(tool || "").toLowerCase())) return null;
+  return {
+    tool,
+    filename: filename || storedFilename,
+    storedFilename: storedFilename || filename,
+    mimeType: result.mimeType || result.contentType || "",
+    url: result.url || result.downloadUrl || "",
+  };
+}
+
+function hasZipFiles(input = {}) {
+  return Array.isArray(input.files) && input.files.some((file) => file && (file.storedFilename || file.generatedFile || file.base64 || String(file.content || file.text || "").trim()));
+}
+
+function fillZipInputFromProducedFiles(call = {}, producedFiles = [], options = {}) {
+  const tool = String(call.tool || "").toLowerCase();
+  if (tool !== "zip") return call;
+  const input = call.input && typeof call.input === "object" ? { ...call.input } : {};
+  const produced = producedFiles
+    .filter(Boolean)
+    .filter((file) => file.storedFilename && !String(file.filename || file.storedFilename || "").toLowerCase().endsWith(".zip"))
+    .map((file) => ({ storedFilename: file.storedFilename, filename: file.filename || file.storedFilename }));
+
+  if (!produced.length) return { ...call, input };
+
+  if (options.preferProduced || !hasZipFiles(input)) {
+    return { ...call, input: { ...input, files: produced, filename: input.filename || "lucy-coklu-cikti.zip" } };
+  }
+
+  const existing = Array.isArray(input.files) ? input.files : [];
+  const seen = new Set();
+  const files = [...existing, ...produced].filter((file) => {
+    const key = String(file?.storedFilename || file?.generatedFile || file?.filename || "");
+    if (!key || key.toLowerCase().endsWith(".zip") || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return { ...call, input: { ...input, files, filename: input.filename || "lucy-coklu-cikti.zip" } };
+}
+
+function fillPdfInputFromProducedContent(call = {}, producedContents = [], userText = "") {
+  const tool = String(call.tool || "").toLowerCase();
+  if (tool !== "pdf") return call;
+  const input = call.input && typeof call.input === "object" ? { ...call.input } : {};
+  const q = normalizeIntentText(userText);
+  const latestChart = [...producedContents].reverse().find((item) => item?.type === "chart" && item.chart);
+  const latestMermaid = [...producedContents].reverse().find((item) => item?.type === "mermaid" && item.code);
+  if (latestChart && /grafik|chart|pasta|trend|cizgi|bar|sutun/.test(q)) {
+    input.chart = latestChart.chart;
+    input.title = input.title || latestChart.title || "LUCY Grafiği";
+  }
+  if (latestMermaid && /diyagram|mermaid|akis|akış|sema|şema/.test(q)) {
+    input.mermaid = latestMermaid.code;
+    input.title = input.title || latestMermaid.title || "LUCY Diyagramı";
+  }
+  return { ...call, input };
+}
+
+function producedContentCandidate(tool = "", result = {}) {
+  const t = String(tool || "").toLowerCase();
+  if (!result || result.success === false) return null;
+  if (t === "chartdata" && result.data) return { type: "chart", chart: result, title: result.title || "Grafik" };
+  if (t === "mermaid" && (result.code || result.mermaid)) return { type: "mermaid", code: result.code || result.mermaid, title: result.title || "Diyagram" };
+  return null;
+}
+
+function userAskedMultiOutputChain(userText = "") {
+  const q = normalizeIntentText(userText);
+  const outputKinds = [
+    wantsExcelFromText(q), wantsPdfFromText(q), wantsDocumentFromText(q), wantsQrFromText(q), wantsZipFromText(q),
+    wantsChartFromText(q), wantsMermaidFromText(q), wantsTextStatsFromText(q), wantsOcrFromText(q), wantsWebFetchFromText(q),
+  ].filter(Boolean).length;
+  return outputKinds >= 2 || /\b(hem|ve|sonra|ardindan|ardından|ayrica|ayrıca|birlikte|hepsini)\b/.test(q);
 }
 
 function buildImplicitToolCalls(answer = "", req) {
@@ -1378,7 +1659,7 @@ function buildImplicitToolCalls(answer = "", req) {
   const memory = hydrateMemoryFromRequest(req);
   const activeContent = resolveActiveContent(req, answer);
   const source = activeContentToText(activeContent, sourceFromMemory(req, answer));
-  const inlineTable = parseFirstMarkdownTableObject(source);
+  const inlineTable = parseFirstMarkdownTableObject(source) || parseLooseInlineTableObject(userText) || parseLooseInlineTableObject(source);
   const activeTable = activeContentTable(activeContent) || inlineTable || memory.lastTable;
   const title = activeContent?.title || contentTitleFromText(source, activeTable ? "LUCY Tablosu" : "LUCY Çıktısı");
   const stem = safeOutputStem(title);
@@ -1398,6 +1679,19 @@ function buildImplicitToolCalls(answer = "", req) {
   if (wantsWebFetchFromText(userText)) {
     const url = String(userText).match(/https?:\/\/\S+/i)?.[0]?.replace(/[),.;]+$/g, "");
     if (url) calls.push({ tool: "webFetch", input: { url } });
+  }
+
+
+  if (wantsMailFromText(userText)) {
+    calls.push({ tool: "mail", input: { to: extractEmailFromText(userText), subject: mailSubjectFromText(userText), text: messagePayloadFromText(userText, "mail") } });
+  }
+
+  if (wantsTelegramFromText(userText)) {
+    calls.push({ tool: "telegram", input: { text: messagePayloadFromText(userText, "telegram") } });
+  }
+
+  if (wantsWhatsappFromText(userText)) {
+    calls.push({ tool: "whatsapp", input: { to: extractPhoneFromText(userText), text: messagePayloadFromText(userText, "whatsapp") } });
   }
 
   if (wantsFileManagerFromText(userText)) {
@@ -1483,19 +1777,18 @@ function buildImplicitToolCalls(answer = "", req) {
   }
 
   if (wantsZipFromText(userText)) {
-    const fileCandidates = [memory.lastFile, memory.lastPdf, memory.lastExcel, memory.lastDocument]
-      .filter(Boolean)
-      .filter((file) => file?.storedFilename && !String(file.filename || file.storedFilename || "").toLowerCase().endsWith(".zip"));
-    const last = fileCandidates[0];
-    const refs = collectConversationGeneratedFileRefs(req)
-      .filter((ref) => ref?.storedFilename && !String(ref.filename || ref.storedFilename || "").toLowerCase().endsWith(".zip"));
-    const ref = refs[refs.length - 1];
-    const chosen = last || ref || null;
+    const isMulti = userAskedMultiOutputChain(userText);
+    const chosen = isMulti ? null : selectGeneratedFileFromMemory(userText, memory, req, { allowZip: false });
     const files = chosen?.storedFilename ? [{ storedFilename: chosen.storedFilename, filename: chosen.filename || chosen.storedFilename }] : undefined;
     calls.push({ tool: "zip", input: { filename: `${stem || "lucy-dosyalari"}.zip`, ...(files ? { files } : {}) } });
   }
 
-  return calls.map((call) => enrichToolCallInput(call, req)).filter(isUsableToolCall).slice(0, 5);
+  const maxCalls = userAskedMultiOutputChain(userText) ? 8 : 5;
+  return orderToolCallsForChaining(calls, userText)
+    .map((call) => enrichToolCallInput(call, req))
+    .filter((call) => isToolCallAllowedByCurrentIntent(call, req))
+    .filter(isUsableToolCall)
+    .slice(0, maxCalls);
 }
 
 function deepSeekPlannerEnabled() {
@@ -1521,8 +1814,10 @@ async function buildDeepSeekPlannerToolCalls(answer = "", req) {
 
     if (!Array.isArray(planned) || !planned.length) return [];
 
-    return planned
+    return rankAndDedupeToolCalls(planned, userText)
+      .map((call) => ({ ...call, tool: normalizeToolName(call.tool) }))
       .map((call) => enrichToolCallInput(call, req))
+      .filter((call) => isToolCallAllowedByCurrentIntent(call, req))
       .filter(isUsableToolCall)
       .slice(0, 5);
   } catch (error) {
@@ -1605,7 +1900,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const allowMermaid = requestedMermaidWork(req);
   const allowAnyTool = requestedToolWork(req);
   const mermaidCalls = explicitCalls.length || !allowMermaid ? [] : extractMermaidBlocksFromAnswer(answer);
-  const rawToolCalls = [...explicitCalls, ...mermaidCalls];
+  const rawToolCalls = orderToolCallsForChaining([...explicitCalls, ...mermaidCalls], latestUserIntentText(req));
 
   // Öncelik: explicit model tool_call -> kod tabanlı direct intent -> opsiyonel DS fallback.
   // Ancak kullanıcı grafik/stil mutasyonu istiyorsa ve elimizde aktif grafik varsa,
@@ -1613,6 +1908,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   let toolCalls = shouldForceChartRenderer(req)
     ? []
     : rawToolCalls
+      .map((call) => ({ ...call, tool: normalizeToolName(call.tool) }))
       .map((call) => enrichToolCallInput(call, req))
       .filter((call) => isToolCallAllowedByCurrentIntent(call, req))
       .filter(isUsableToolCall);
@@ -1644,8 +1940,13 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   }
 
   const toolResults = [];
+  const producedFilesThisTurn = [];
+  const producedContentsThisTurn = [];
+  const preferProducedZip = userAskedMultiOutputChain(latestUserIntentText(req));
 
-  for (const call of toolCalls) {
+  for (const originalCall of toolCalls) {
+    let call = fillPdfInputFromProducedContent(originalCall, producedContentsThisTurn, latestUserIntentText(req));
+    call = fillZipInputFromProducedFiles(call, producedFilesThisTurn, { preferProduced: preferProducedZip });
     const validation = validateToolInput(call, req);
     if (!validation.ok) {
       const failed = { success: false, error: validation.code, message: validation.message };
@@ -1657,6 +1958,10 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     const rawResult = await executeLucyTool(call.tool, call.input, numberEnv("LUCY_TOOL_TIMEOUT_MS", 30000));
     const persistedResult = persistToolFileResult(rawResult, req);
     rememberToolResult(req, call, persistedResult);
+    const produced = producedFileCandidate(call.tool, persistedResult);
+    if (produced) producedFilesThisTurn.push(produced);
+    const producedContent = producedContentCandidate(call.tool, persistedResult);
+    if (producedContent) producedContentsThisTurn.push(producedContent);
     const ui = normalizeToolResultForUI(call.tool, persistedResult, call.input);
 
     toolResults.push({

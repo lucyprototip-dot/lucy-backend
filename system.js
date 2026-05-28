@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const multer = require("multer");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const fs = require("fs");
 const path = require("path");
 const pdfParseModule = require("pdf-parse");
@@ -9,6 +11,7 @@ const mammoth = require("mammoth");
 const ExcelJS = require("exceljs");
 const PDFDocument = require("pdfkit");
 const { renderPdfBuffer, renderPdfKitBuffer } = require("./core/render/pdfRenderEngine");
+const { envBool, envInt, isAllowedUploadMime, uploadStatusForError, assertPublicHttpUrl } = require("./core/securityGuards");
 
 const {
   publicBaseUrl,
@@ -36,8 +39,13 @@ const {
 const {
   STORE_PATH,
   ARCHIVE_FILE,
+  DEFAULT_USER_ID,
+  normalizeUserId,
   readLucyStore,
   writeLucyStore,
+  readRootStore,
+  writeRootStore,
+  listLucyUsers,
 } = require("./services/lucyStoreService");
 
 
@@ -54,8 +62,34 @@ function hasEnv(name) {
 }
 
 const app = express();
+
+app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use(helmet({
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false,
+}));
+
+const globalLimiter = rateLimit({
+  windowMs: envInt("LUCY_RATE_WINDOW_MS", 60 * 1000),
+  limit: envInt("LUCY_RATE_LIMIT", 180),
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+});
+
+const toolHeavyLimiter = rateLimit({
+  windowMs: envInt("LUCY_TOOL_RATE_WINDOW_MS", 60 * 1000),
+  limit: envInt("LUCY_TOOL_RATE_LIMIT", 60),
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+});
+
+app.use(globalLimiter);
+app.use(["/api/tools", "/api/upload-file", "/api/file", "/api/read-file", "/api/analyze-image", "/api/analyze-video", "/api/generate-image", "/api/generate-video"], toolHeavyLimiter);
+
 app.use(cors());
-app.use(express.json({ limit: "80mb" }));
+app.use(express.json({ limit: envInt("LUCY_JSON_LIMIT_MB", 20) + "mb" }));
 
 const PORT = process.env.PORT || 5050;
 
@@ -65,7 +99,16 @@ setupGeneratedStatic(app, express);
 
 const upload = multer({
   dest: "uploads/",
-  limits: { fileSize: 80 * 1024 * 1024 },
+  limits: {
+    fileSize: envInt("LUCY_UPLOAD_MAX_MB", 25) * 1024 * 1024,
+    files: envInt("LUCY_UPLOAD_MAX_FILES", 8),
+  },
+  fileFilter(req, file, cb) {
+    if (envBool("LUCY_ALLOW_ANY_UPLOAD", false) || isAllowedUploadMime(file.mimetype, file.originalname)) return cb(null, true);
+    const error = new Error("Desteklenmeyen dosya türü.");
+    error.code = "unsupported_file_type";
+    return cb(error);
+  },
 });
 
 // Tool orchestration moved to backend/core/toolOrchestrator.js
@@ -322,7 +365,7 @@ function buildSystemPrompt(body = {}) {
       "• Tek mesajda birden fazla tool gerekiyorsa ayrı ayrı tool_call blokları üret.",
       "• chartData labels ve values boşsa, sayı içermiyorsa tool_call üretme — önce veri sor.",
       "• mermaid code geçerli DSL değilse tool_call üretme — önce veri/akış sor."
-    ].join("\\n"));
+    ].join("\n"));
   }
 
   return parts.join("\n\n");
@@ -582,9 +625,15 @@ async function fetchText(url, options = {}) {
 }
 
 async function fetchPageSummary(url = "") {
-  const attempts = [url];
-  if (url.startsWith("https://")) attempts.push(url.replace("https://", "http://"));
-  if (!url.includes("www.")) attempts.push(url.replace(/^https?:\/\//, (m) => `${m}www.`));
+  let safeUrl = "";
+  try {
+    safeUrl = await assertPublicHttpUrl(url);
+  } catch (error) {
+    return { title: url, text: "", url, error: error.message || "Güvenli olmayan URL engellendi" };
+  }
+  const attempts = [safeUrl];
+  if (safeUrl.startsWith("https://")) attempts.push(safeUrl.replace("https://", "http://"));
+  if (!safeUrl.includes("www.")) attempts.push(safeUrl.replace(/^https?:\/\//, (m) => `${m}www.`));
 
   let lastError = "";
   for (const attempt of Array.from(new Set(attempts))) {
@@ -1183,14 +1232,53 @@ async function generateWithOpenRouter({ prompt, kind }) {
   };
 }
 
+function isImageUpload(file = {}) {
+  const mime = String(file.mimetype || "").toLowerCase();
+  const ext = path.extname(file.originalname || "").toLowerCase();
+  return mime.startsWith("image/") || IMAGE_EXTENSIONS.has(ext);
+}
+
+function safeGeneratedUploadName(originalName = "image.png") {
+  const ext = path.extname(originalName || "").toLowerCase() || ".png";
+  const base = path.basename(originalName || "image", ext)
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60) || "image";
+  return `${Date.now()}-${base}${ext}`;
+}
+
+function generatedFileUrl(name = "") {
+  const base = publicBaseUrl();
+  const encoded = encodeURIComponent(name);
+  return base ? `${base}/generated/${encoded}` : `/generated/${encoded}`;
+}
+
+function storeUploadedImageForTools(file = {}) {
+  if (!file?.path || !isImageUpload(file)) return null;
+  ensureGeneratedDir();
+  const storedFilename = safeGeneratedUploadName(file.originalname || file.filename || "image.png");
+  const target = path.join(GENERATED_DIR, storedFilename);
+  fs.copyFileSync(file.path, target);
+  return {
+    storedFilename,
+    filename: file.originalname || storedFilename,
+    mimeType: file.mimetype || "image/png",
+    url: generatedFileUrl(storedFilename),
+    downloadUrl: generatedFileUrl(storedFilename),
+  };
+}
 
 async function handleUploadedFile(req, res) {
   let uploadedPath = null;
   try {
-    if (!req.file) return res.status(400).json({ success: false, error: "Dosya gerekli" });
+    const uploadedFile = req.file || (Array.isArray(req.files) ? req.files[0] : null);
+    if (!uploadedFile) return res.status(400).json({ success: false, error: "Dosya gerekli" });
 
-    uploadedPath = req.file.path;
-    const originalName = req.file.originalname || "dosya";
+    uploadedPath = uploadedFile.path;
+    const originalName = uploadedFile.originalname || "dosya";
+    const storedImage = storeUploadedImageForTools(uploadedFile);
     const extractedText = await extractTextFromFile(uploadedPath, originalName);
     const userPrompt = normalizeText(req.body.prompt || "Bu dosyayı oku ve özetle.");
 
@@ -1198,8 +1286,14 @@ async function handleUploadedFile(req, res) {
       return res.json({
         success: true,
         fileName: originalName,
+        storedFilename: storedImage?.storedFilename || "",
+        url: storedImage?.url || "",
+        downloadUrl: storedImage?.downloadUrl || "",
+        mimeType: uploadedFile.mimetype || "",
         extractedText: "",
-        answer: `${originalName} dosyası yüklendi ama içinden okunabilir metin çıkaramadım. Bu PDF taranmış/görsel PDF olabilir. OCR eklenirse görüntüden metin okunabilir.`,
+        answer: storedImage
+          ? `${originalName} görseli yüklendi. OCR için hazır: ${storedImage.storedFilename}`
+          : `${originalName} dosyası yüklendi ama içinden okunabilir metin çıkaramadım. Bu PDF taranmış/görsel PDF olabilir. OCR eklenirse görüntüden metin okunabilir.`,
       });
     }
 
@@ -1216,9 +1310,23 @@ async function handleUploadedFile(req, res) {
       ],
     });
 
-    return res.json({ success: true, fileName: originalName, extractedText, answer });
+    return res.json({
+      success: true,
+      fileName: originalName,
+      storedFilename: storedImage?.storedFilename || "",
+      url: storedImage?.url || "",
+      downloadUrl: storedImage?.downloadUrl || "",
+      mimeType: uploadedFile.mimetype || "",
+      extractedText,
+      answer,
+    });
   } catch (error) {
-    return res.status(500).json({ success: false, error: error.message });
+    const status = typeof uploadStatusForError === "function" ? uploadStatusForError(error) : 400;
+    return res.status(status >= 400 ? status : 400).json({
+      success: false,
+      error: error.code || "upload_file_failed",
+      message: error.message || "Dosya okunamadı.",
+    });
   } finally {
     safeUnlink(uploadedPath);
   }
@@ -1524,8 +1632,8 @@ async function exporterPdf(title, messages) {
 //  Endpoint kayıtları routes/ altına ayrıldı. system.js ana motoru
 //  ve ortak fonksiyonları tutar; davranış değişmedi.
 // ============================================================
-registerGeneratedRoutes(app, { fs, path, GENERATED_DIR, GENERATED_PUBLIC_PATH, ensureGeneratedDir, publicBaseUrl });
-registerStoreRoutes(app, { readLucyStore, writeLucyStore, STORE_PATH, PORT });
+registerGeneratedRoutes(app, { fs, path, GENERATED_DIR, GENERATED_PUBLIC_PATH, ensureGeneratedDir, publicBaseUrl, envBool });
+registerStoreRoutes(app, { readLucyStore, writeLucyStore, readRootStore, writeRootStore, listLucyUsers, normalizeUserId, STORE_PATH, DEFAULT_USER_ID, PORT });
 registerToolRoutes(app, { listLoadedTools, listToolLoadErrors, getLoadedTool, executeLucyTool, persistToolFileResult });
 registerChatRoutes(app, {
   isWebMode,
@@ -1545,6 +1653,7 @@ registerFileRoutes(app, {
   generateWithOpenRouter,
   normalizeText,
   safeUnlink,
+  uploadStatusForError,
 });
 registerVoiceRoutes(app, { sanitizeSpeechText, pickVoiceProfile, envValue });
 registerExportRoutes(app, {

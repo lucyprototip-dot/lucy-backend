@@ -11,6 +11,17 @@ function cleanCell(value = "") {
   return String(value).replace(/<br\s*\/?>/gi, "\n").replace(/\s+$/g, "").trim();
 }
 
+
+function protectSpreadsheetFormula(value = "") {
+  const text = cleanCell(value);
+  if (!text) return "";
+  // CSV/Excel formula injection guard: = + - @ ile başlayan metinler formül olarak çalışmasın.
+  // Saf sayılar ve negatif sayılar korunur.
+  if (/^[=+@]/.test(text)) return `'${text}`;
+  if (/^-/.test(text) && !/^-?\d+(?:[.,]\d+)?$/.test(text)) return `'${text}`;
+  return text;
+}
+
 function splitMarkdownRow(line = "") {
   const cells = [];
   let current = "";
@@ -28,13 +39,13 @@ function splitMarkdownRow(line = "") {
       continue;
     }
     if (char === "|") {
-      cells.push(cleanCell(current));
+      cells.push(protectSpreadsheetFormula(current));
       current = "";
       continue;
     }
     current += char;
   }
-  cells.push(cleanCell(current));
+  cells.push(protectSpreadsheetFormula(current));
   return cells;
 }
 
@@ -48,11 +59,11 @@ function rowsFromMatrix(matrix = []) {
     .filter((row) => row.some((cell) => String(cell).trim()));
   if (!clean.length) return [];
 
-  const headers = clean[0].map((header, index) => header || `Sütun ${index + 1}`);
+  const headers = clean[0].map((header, index) => protectSpreadsheetFormula(header) || `Sütun ${index + 1}`);
   return clean.slice(1).map((row) => {
     const out = {};
     headers.forEach((header, index) => {
-      out[header] = row[index] ?? "";
+      out[header] = protectSpreadsheetFormula(row[index] ?? "");
     });
     return out;
   });
@@ -100,7 +111,7 @@ function normalizeRows(rows = []) {
     .map((row, rowIndex) => {
       const out = {};
       Object.entries(row).forEach(([key, value], index) => {
-        out[cleanCell(key) || `Sütun ${index + 1}`] = cleanCell(value);
+        out[protectSpreadsheetFormula(key) || `Sütun ${index + 1}`] = protectSpreadsheetFormula(value);
       });
       if (!Object.keys(out).length) out.No = rowIndex + 1;
       return out;
@@ -112,13 +123,13 @@ function fallbackRows(input = {}) {
   if (direct.length) return direct;
 
   if (Array.isArray(input.labels) && Array.isArray(input.values)) {
-    return input.labels.map((label, index) => ({ Etiket: cleanCell(label), Değer: cleanCell(input.values[index] ?? "") }));
+    return input.labels.map((label, index) => ({ Etiket: protectSpreadsheetFormula(label), Değer: protectSpreadsheetFormula(input.values[index] ?? "") }));
   }
 
   const chartLabels = input.data?.labels;
   const chartValues = input.data?.datasets?.[0]?.data;
   if (Array.isArray(chartLabels) && Array.isArray(chartValues)) {
-    return chartLabels.map((label, index) => ({ Etiket: cleanCell(label), Değer: cleanCell(chartValues[index] ?? "") }));
+    return chartLabels.map((label, index) => ({ Etiket: protectSpreadsheetFormula(label), Değer: protectSpreadsheetFormula(chartValues[index] ?? "") }));
   }
 
   const text = String(input.text || input.content || input.value || input.markdown || "").trim();
@@ -129,7 +140,7 @@ function fallbackRows(input = {}) {
   if (csvRows.length) return csvRows;
 
   if (text) {
-    return text.split(/\r?\n/).filter((line) => line.trim()).map((line, index) => ({ No: index + 1, İçerik: cleanCell(line) }));
+    return text.split(/\r?\n/).filter((line) => line.trim()).map((line, index) => ({ No: index + 1, İçerik: protectSpreadsheetFormula(line) }));
   }
 
   return [];

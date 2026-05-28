@@ -45,6 +45,12 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
     data: contracted.data || normalized.data || normalized.chartData || null,
     code: contracted.code || normalized.code || normalized.mermaid || "",
     text: contracted.text || normalized.text || normalized.message || "",
+    time: contracted.time || normalized.time || normalized.datetime || normalized.dateTime || "",
+    date: contracted.date || normalized.date || "",
+    timeZone: contracted.timeZone || normalized.timeZone || input.timeZone || "",
+    locale: contracted.locale || normalized.locale || input.locale || "",
+    confidence: contracted.confidence ?? normalized.confidence,
+    lang: contracted.lang || normalized.lang || input.lang || input.language || "",
     colors: contracted.colors || normalized.colors || normalized.palette || normalized.style?.colors || [],
     palette: contracted.palette || normalized.paletteName || normalized.palette || normalized.style?.palette || "default",
     style: contracted.style || normalized.style || {},
@@ -70,6 +76,8 @@ function summarizeToolResultLine(toolName, ui) {
   if (ui.type === "chart") return `✅ ${ui.title || toolName}: Grafik hazır.`;
   if (ui.type === "mermaid") return `✅ ${ui.title || toolName}: Mermaid diyagramı hazır.`;
   if (ui.type === "file-list") return `✅ ${toolName}: ${ui.count || ui.files?.length || 0} dosya listelendi.`;
+  if (ui.type === "time") return `✅ ${toolName}: ${ui.text || ui.time || "Saat bilgisi hazır."}`;
+  if (ui.type === "ocr") return `✅ ${toolName}: ${ui.text || "OCR tamamlandı."}`;
   if (ui.type === "mail") return `✅ ${toolName}: ${ui.text || "Mail işlemi tamamlandı."}`;
   return `✅ ${toolName}: İşlem tamamlandı.`;
 }

@@ -25,6 +25,14 @@ function normalizeIntentText(value = "") {
   return normalizeToolIntentText(decodeHtmlEntities(value));
 }
 
+function toolMetaOrStyleReference(text = "") {
+  const q = normalizeIntentText(text);
+  const meta = /\b(nedir|ne demek|ne ise yarar|nasil calisir|mantigi|anlat|acikla|ornek ver|farki ne)\b/.test(q);
+  const style = /\b(gibi|tarzi|tarzinda|formatinda|uslubunda|dilinde|tonunda|premium olsun|modern olsun)\b/.test(q);
+  const action = /\b(yap|olustur|hazirla|uret|ver|indir|kaydet|donustur|cevir|gonder|at|ilet|oku|listele|hesapla|ciz|goster|arsivle|sikistir)\b/.test(q);
+  return (meta || style) && !action;
+}
+
 function wantsPdfFromText(text = "") {
   const q = normalizeIntentText(text);
   return /\bpdf\b|pdf olarak|pdf yap|pdf yaz|pdf hazirla|pdf gonder|pdf indir|rapor pdf/.test(q);
@@ -103,10 +111,14 @@ function wantsTimeFromText(text = "") {
 
 function wantsWebFetchFromText(text = "") {
   const q = normalizeIntentText(text);
-  // Açık "oku/getir/içerik al" talebi
-  if (/webfetch|web fetch|siteyi oku|url oku|linki oku|sayfayi oku|sayfayı oku|icerigi al|icerik getir|bu url|bu linki|siteye gir|web'den/.test(q)) return true;
-  // Sadece URL varsa ve başka metin çok kısaysa (kullanıcı direkt URL yapıştırdı)
   const raw = String(text || "").trim();
+  const hasUrl = /https?:\/\/\S+/i.test(raw);
+
+  // Açık URL/link/sayfa okuma talebi. "linkteki başlığı çıkar" gibi doğal Türkçe de dahil.
+  if (/webfetch|web fetch|siteyi oku|url oku|linki oku|linkteki|bu linkteki|urldeki|url deki|sayfayi oku|sayfayı oku|sayfasini oku|sayfasını oku|icerigi al|icerik getir|bu url|bu linki|siteye gir|web'den/.test(q)) return true;
+  if (hasUrl && /\b(oku|sayfa|sayfayi|sayfayı|sayfasini|sayfasını|icerik|içerik|getir|al|cikar|çıkar|baslik|başlık|metin|extract|read)\b/.test(q)) return true;
+
+  // Sadece URL varsa ve başka metin çok kısaysa (kullanıcı direkt URL yapıştırdı)
   const urlMatch = raw.match(/^https?:\/\/\S+/i);
   if (urlMatch && raw.replace(urlMatch[0], "").replace(/[.,!? ]/g, "").length < 15) return true;
   return false;
@@ -114,18 +126,22 @@ function wantsWebFetchFromText(text = "") {
 
 function wantsMailFromText(text = "") {
   const q = normalizeIntentText(text);
-  // Mail gönder kastı — sadece "gönder/ilet/yaz" kombinasyonuyla
-  return /\b(mail gonder|email gonder|eposta gonder|mail at|mail yaz|mailine gonder|maile gonder)\b/.test(q);
+  // Mail gönder kastı — mail/maili/e-posta + gönder/at/ilet kombinasyonları.
+  return /\b(mail|maili|email|e posta|eposta)\b.*\b(gonder|at|ilet)\b/.test(q)
+    || /\b(gonder|at|ilet)\b.*\b(mail|maili|email|e posta|eposta)\b/.test(q)
+    || /[a-z0-9._%+-]+\s+at\s+[a-z0-9.-]+\s+adresine.*\b(gonder|ilet)\b/.test(q);
 }
 
 function wantsWhatsappFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /whatsapp gonder|whatsapp mesaj gonder|whatsapp mesaj at|whatsapp at|wp mesaj gonder|wp gonder|whatsapp yaz/.test(q);
+  return /\b(whatsapp|whatsappa|whatsappdan|wp)\b.*\b(gonder|at|ilet)\b/.test(q)
+    || /\b(gonder|at|ilet)\b.*\b(whatsapp|whatsappa|whatsappdan|wp)\b/.test(q);
 }
 
 function wantsTelegramFromText(text = "") {
   const q = normalizeIntentText(text);
-  return /telegram gonder|telegram at|telegram yaz|telegram mesaj/.test(q);
+  return /\b(telegram|telegrama|telegramdan)\b.*\b(gonder|at|ilet)\b/.test(q)
+    || /\b(gonder|at|ilet)\b.*\b(telegram|telegrama|telegramdan)\b/.test(q);
 }
 
 function isOnlyTransformCommand(text = "") {
@@ -165,4 +181,5 @@ module.exports = {
   wantsTelegramFromText,
   isOnlyTransformCommand,
   stripToolNoise,
+  toolMetaOrStyleReference,
 };
