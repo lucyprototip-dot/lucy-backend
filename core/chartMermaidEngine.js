@@ -63,6 +63,49 @@ function numericHeaders(table) {
   return (table?.headers || []).filter((header) => isNumericColumn(rows, header));
 }
 
+
+function explicitMetricRequested(userText = "") {
+  const q = normalizeToolIntentText(userText);
+  if (/\b(toplam|total|tutar|amount|bedel|gelir|satis|satış|ciro|revenue|sales)\b/.test(q)) return "total";
+  if (/\b(birim fiyat|unit price|adet fiyat|fiyat|price)\b/.test(q)) return "price";
+  if (/\b(miktar|adet|quantity|count|sayi|sayisi|sayı|sayısı)\b/.test(q)) return "quantity";
+  if (/\b(deger|değer|value|puan|skor)\b/.test(q)) return "value";
+  return "";
+}
+
+function scoreStrictValueHeader(header = "") {
+  const h = normalizeHeader(header);
+  if (/^toplam$|toplam tutar|toplam gelir|genel toplam|total/.test(h)) return 1000;
+  if (/^tutar$|amount|bedel/.test(h)) return 920;
+  if (/^gelir$|^satis$|^satış$|ciro|revenue|sales/.test(h)) return 850;
+  if (/^deger$|^değer$|^value$/.test(h)) return 500;
+  // "Birim Fiyat" toplam değildir. Sadece gerçek toplam/tutar yoksa scoring fallback bunu seçebilir.
+  return 0;
+}
+
+function strictValueHeader(table, userText = "") {
+  const nums = numericHeaders(table);
+  if (!nums.length) return null;
+
+  const requested = explicitMetricRequested(userText);
+  if (requested === "quantity") {
+    const quantity = nums.find((header) => /miktar|adet|quantity|count|sayi|sayisi|sayı|sayısı/.test(normalizeHeader(header)));
+    if (quantity) return quantity;
+  }
+  if (requested === "price") {
+    const price = nums.find((header) => /birim fiyat|unit price|adet fiyat|fiyat|price/.test(normalizeHeader(header)));
+    if (price) return price;
+  }
+
+  // Kullanıcı farklı bir numeric metrik istemediyse, explicit toplam/tutar/gelir kolonu satır bazında kilitlenir.
+  // Bu modda asla miktar x birim fiyat gibi yeniden hesaplama yapılmaz.
+  const strict = nums
+    .map((header, index) => ({ header, score: scoreStrictValueHeader(header) + (nums.length - index) * 0.01 }))
+    .filter((item) => item.score >= 1)
+    .sort((a, b) => b.score - a.score)[0];
+  return strict?.header || null;
+}
+
 function labelHeader(table) {
   const rows = table?.rows || [];
   const headers = table?.headers || [];
@@ -125,6 +168,8 @@ function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
 function chooseValueHeader(table, userText = "", chartType = "bar") {
   const nums = numericHeaders(table);
   if (!nums.length) return null;
+  const strict = strictValueHeader(table, userText);
+  if (strict) return strict;
   const scored = nums.map((header, index) => ({
     header,
     score: scoreHeaderForQuery(header, userText, chartType) + (nums.length - index) * 0.01,

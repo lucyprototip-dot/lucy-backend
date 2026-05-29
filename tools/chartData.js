@@ -52,6 +52,46 @@ function normalizeHeader(header = "") {
     .trim();
 }
 
+
+function explicitMetricRequested(input = {}) {
+  const q = normalizeHeader(input.userText || input.prompt || input.request || input.title || input.label || "");
+  if (/\b(toplam|total|tutar|amount|bedel|gelir|satis|ciro|revenue|sales)\b/.test(q)) return "total";
+  if (/\b(birim fiyat|unit price|adet fiyat|fiyat|price)\b/.test(q)) return "price";
+  if (/\b(miktar|adet|quantity|count|sayi|sayisi)\b/.test(q)) return "quantity";
+  if (/\b(deger|value|puan|skor)\b/.test(q)) return "value";
+  return "";
+}
+
+function strictValueHeader(headers = [], rows = [], input = {}) {
+  const candidates = headers.filter((header) => rows.some((row) => parseNumber(row?.[header]) !== null));
+  if (!candidates.length) return null;
+
+  const requested = explicitMetricRequested(input);
+  if (requested === "quantity") {
+    const quantity = candidates.find((header) => /miktar|adet|quantity|count|sayi|sayisi/.test(normalizeHeader(header)));
+    if (quantity) return quantity;
+  }
+  if (requested === "price") {
+    const price = candidates.find((header) => /birim fiyat|unit price|adet fiyat|fiyat|price/.test(normalizeHeader(header)));
+    if (price) return price;
+  }
+
+  const ranked = candidates
+    .map((header, index) => {
+      const h = normalizeHeader(header);
+      let score = 0;
+      if (/^toplam$|toplam tutar|toplam gelir|genel toplam|total/.test(h)) score = 1000;
+      else if (/^tutar$|amount|bedel/.test(h)) score = 920;
+      else if (/^gelir$|^satis$|ciro|revenue|sales/.test(h)) score = 850;
+      else if (/^deger$|^value$/.test(h)) score = 500;
+      return { header, score: score + (candidates.length - index) * 0.01 };
+    })
+    .filter((item) => item.score >= 1)
+    .sort((a, b) => b.score - a.score);
+
+  return ranked[0]?.header || null;
+}
+
 function scoreValueHeader(header = "", input = {}) {
   const h = normalizeHeader(header);
   const q = normalizeHeader(input.userText || input.prompt || input.request || input.title || input.label || "");
@@ -90,6 +130,8 @@ function chooseLabelHeader(headers = [], rows = []) {
 function chooseValueHeader(headers = [], rows = [], input = {}) {
   const candidates = headers.filter((header) => rows.some((row) => parseNumber(row?.[header]) !== null));
   if (!candidates.length) return null;
+  const strict = strictValueHeader(headers, rows, input);
+  if (strict) return strict;
   const scored = candidates.map((header, index) => ({
     header,
     score: scoreValueHeader(header, input) + (candidates.length - index) * 0.01,

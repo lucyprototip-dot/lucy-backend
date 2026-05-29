@@ -391,7 +391,7 @@ function enrichToolCallInput(call, req) {
   }
 
   if (toolName === "chartdata") {
-    const inlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
+    const inlineTable = parseFirstMarkdownTableObject(userText) || parseCsvLikeTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
     const styleOnly = userStyleMutationOnly(userText) && !inlineTable;
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
 
@@ -545,7 +545,9 @@ function requestedMermaidWork(req) {
 
 function styleMutationText(userText = "") {
   const q = normalizeIntentText(userText);
-  return /\b(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|pastel|premium|modern|canli|farkli ton|tonlarda)\b/.test(q);
+  return /\b(renk|renkli|renklerini|renkleri|renkte|renklerde|renklere|renklendir|renklendirir|boya|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|pastel|premium|modern|canli|farkli ton|farkli renk|ayri renk|ayrı renk|tonlarda)\b/.test(q)
+    || /\b\d+\s*(farkli|farklı|ayri|ayrı)?\s*renk(?:te|li|le|lerle|lerde)?\b/.test(q)
+    || /\b(her|tum|tüm)\s+(dilim|parca|parça|seri|bar|sutun|sütun)\w*\s+(farkli|farklı|ayri|ayrı)?\s*renk/.test(q);
 }
 
 function explicitChartTypeFromText(userText = "") {
@@ -558,7 +560,7 @@ function explicitChartTypeFromText(userText = "") {
 
 function userSpecificallyReferencesChart(userText = "") {
   const q = normalizeIntentText(userText);
-  return /grafik|chart|pasta|pie|trend|cizgi|line|cubuk|bar|sutun|yuvarlak|daire|dilim|donut|dagilim|renkli pasta|renklerini degistir|renkleri degistir|renklendir|palet|tema|stil/.test(q)
+  return /grafik|chart|pasta|pie|trend|cizgi|line|cubuk|bar|sutun|yuvarlak|daire|dilim|donut|dagilim|renkli pasta|renklerini degistir|renkleri degistir|renkte|renklendir|palet|tema|stil/.test(q)
     && !wantsMermaidFromText(q);
 }
 
@@ -637,7 +639,7 @@ function chartTitleForStyleMutation(userText = "", currentTitle = "Grafik", char
 }
 
 function hasFreshInlineChartData(userText = "") {
-  return Boolean(parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText));
+  return Boolean(parseFirstMarkdownTableObject(userText) || parseCsvLikeTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText));
 }
 
 function isChartExportOnlyRequest(userText = "") {
@@ -961,6 +963,54 @@ function parseFirstMarkdownTableObject(text = "") {
 
 
 
+function splitCsvLikeLine(line = "") {
+  return String(line || "")
+    .split(/\s*,\s*/)
+    .map((cell) => cell.trim())
+    .filter((cell) => cell.length > 0);
+}
+
+function parseCsvLikeTableObject(text = "") {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length < 2) return null;
+
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const headerCells = splitCsvLikeLine(lines[i]);
+    if (headerCells.length < 2 || headerCells.length > 10) continue;
+    if (headerCells.some((cell) => /^https?:\/\//i.test(cell))) continue;
+    if (headerCells.some((cell) => /^bu\s+tablo|grafik\s+yap|pasta\s+grafik/i.test(cell))) continue;
+
+    const rows = [];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j];
+      const q = normalizeIntentText(line);
+      if (/\b(bu|bunu|bundan|tablodan|grafik|pasta|chart|yap|hazirla|hazırla|cevir|çevir)\b/.test(q) && !line.includes(",")) break;
+      const cells = splitCsvLikeLine(line);
+      if (cells.length < headerCells.length) continue;
+      if (cells.length > headerCells.length + 2) continue;
+      const row = {};
+      headerCells.forEach((header, index) => {
+        if (index === headerCells.length - 1) row[header] = cells.slice(index).join(", ");
+        else row[header] = cells[index] ?? "";
+      });
+      if (Object.values(row).some((value) => String(value).trim())) rows.push(row);
+    }
+
+    if (rows.length) {
+      const numericColumns = headerCells.filter((header) => rows.some((row) => /-?\d/.test(String(row?.[header] ?? ""))));
+      if (numericColumns.length) return { headers: headerCells, rows, source: "csv-inline" };
+    }
+  }
+
+  return null;
+}
+
+
+
 function parseInlineKeyValueTableObject(text = "") {
   const raw = String(text || "").trim();
   if (!raw) return null;
@@ -1155,7 +1205,7 @@ function activeContentTable(content = {}) {
   if (!content || typeof content !== "object") return null;
   if (content.type === "table" && content.table?.rows?.length) return content.table;
   if (content.table?.rows?.length) return content.table;
-  if (content.text) return parseFirstMarkdownTableObject(content.text);
+  if (content.text) return parseFirstMarkdownTableObject(content.text) || parseCsvLikeTableObject(content.text);
   return null;
 }
 
@@ -1202,7 +1252,7 @@ function resolveActiveContent(req, answer = "") {
 
   const inlineContent = inlineContentFromToolRequest(userText);
   if (inlineContent) {
-    const table = parseFirstMarkdownTableObject(inlineContent) || parseLooseInlineTableObject(inlineContent);
+    const table = parseFirstMarkdownTableObject(inlineContent) || parseCsvLikeTableObject(inlineContent) || parseLooseInlineTableObject(inlineContent);
     return table
       ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(inlineContent, "LUCY Tablosu"), source: "user-inline" }
       : { type: "text", text: inlineContent, title: contentTitleFromText(inlineContent, "LUCY İçeriği"), source: "user-inline" };
@@ -1210,7 +1260,7 @@ function resolveActiveContent(req, answer = "") {
 
   // Aynı mesajda uzun içerik/metin verildiyse öncelik kullanıcının son içeriği.
   if (!isOnlyTransformCommand(userText) && (String(userText).length > 90 || /\n/.test(userText) || hasMarkdownTable(userText))) {
-    const table = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText);
+    const table = parseFirstMarkdownTableObject(userText) || parseCsvLikeTableObject(userText) || parseLooseInlineTableObject(userText);
     return table
       ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(userText, "LUCY Tablosu"), source: "user-inline" }
       : { type: "text", text: stripToolNoise(userText), title: contentTitleFromText(userText, "LUCY İçeriği"), source: "user-inline" };
@@ -1218,7 +1268,7 @@ function resolveActiveContent(req, answer = "") {
 
   // Model bu turda gerçek içerik ürettiyse onu kullan.
   if (answerText && answerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText))) {
-    const table = parseFirstMarkdownTableObject(answerText);
+    const table = parseFirstMarkdownTableObject(answerText) || parseCsvLikeTableObject(answerText);
     return table
       ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(answerText, "LUCY Tablosu"), source: "assistant-answer" }
       : { type: "text", text: answerText, title: contentTitleFromText(answerText, "LUCY İçeriği"), source: "assistant-answer" };
@@ -1326,7 +1376,7 @@ function latestAssistantContentObject(req) {
     if (role !== "assistant") continue;
     const text = stripToolNoise(messageText(message));
     if (!text || isToolGeneratedAnswerText(text)) continue;
-    const table = parseFirstMarkdownTableObject(text) || parseLooseInlineTableObject(text);
+    const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text) || parseLooseInlineTableObject(text);
     if (table?.rows?.length) return { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(text, "LUCY Tablosu"), source: "latest-assistant" };
     return { type: "text", text, title: contentTitleFromText(text, "LUCY İçeriği"), source: "latest-assistant" };
   }
@@ -1354,7 +1404,7 @@ function rememberText(memory, text = "") {
   if (!clean || clean.length < 2) return memory;
   if (isGeneratedStatusOnlyText(text) || isToolGeneratedAnswerText(text)) return memory;
   memory.lastText = clean;
-  const table = parseFirstMarkdownTableObject(clean) || parseLooseInlineTableObject(clean);
+  const table = parseFirstMarkdownTableObject(clean) || parseCsvLikeTableObject(clean) || parseLooseInlineTableObject(clean);
   if (table) {
     memory.lastTable = table;
     setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(clean, "LUCY Tablosu"), source: "text" });
@@ -1426,7 +1476,7 @@ function rememberToolResult(req, call = {}, result = {}) {
     // Dosya üretmek aktif kaynak içeriğini ezmesin: "bunu pdf yap" sonrası "bunu excel yap" hâlâ aynı tablo/metni kullanmalı.
     if (toolName === "document" && String(input.content || input.text || "").trim()) {
       const text = String(input.content || input.text || "");
-      const table = parseFirstMarkdownTableObject(text);
+      const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text);
       if (table) setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: input.title || result.title || "LUCY Belgesi", source: "document" });
       else setActiveContent(memory, { type: "text", text, title: input.title || result.title || "LUCY Belgesi", source: "document" });
     }
@@ -1998,8 +2048,8 @@ function buildImplicitToolCalls(answer = "", req) {
   const activeContent = resolveActiveContent(req, answer);
   const source = activeContentToText(activeContent, sourceFromMemory(req, answer));
   const userInlineContent = inlineContentFromToolRequest(userText);
-  const userInlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
-  const inlineTable = userInlineTable || parseFirstMarkdownTableObject(source) || parseLooseInlineTableObject(source) || parseInlineKeyValueTableObject(source);
+  const userInlineTable = parseFirstMarkdownTableObject(userText) || parseCsvLikeTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
+  const inlineTable = userInlineTable || parseFirstMarkdownTableObject(source) || parseCsvLikeTableObject(source) || parseLooseInlineTableObject(source) || parseInlineKeyValueTableObject(source);
   // Kullanıcı mesajındaki yeni veri her zaman eski context'ten önce gelir.
   const activeTable = inlineTable || activeContentTable(activeContent) || memory.lastTable;
   const hasFreshUserContent = Boolean(userInlineContent || userInlineTable);
@@ -2058,7 +2108,7 @@ function buildImplicitToolCalls(answer = "", req) {
     const chartInput = chartToChartInput(selectedChartForStyle, userText);
     if (chartInput) calls.push({ tool: "chartData", input: applyStyleToChartInput(chartInput, userText, selectedChartForStyle) });
   } else if (wantsChartFromText(userText) && !isChartExportOnlyRequest(userText)) {
-    const freshInlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
+    const freshInlineTable = parseFirstMarkdownTableObject(userText) || parseCsvLikeTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
     const selectedTableRaw = freshInlineTable || tableFromHistory(memory, userText) || activeTable;
     const tablePalette = paletteFromTable(selectedTableRaw);
@@ -2498,6 +2548,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const chartMemory = hydrateMemoryFromRequest(req);
   const tableBackedChartRequest = Boolean(implicitChartCall && (
     parseFirstMarkdownTableObject(userText)
+    || parseCsvLikeTableObject(userText)
     || parseLooseInlineTableObject(userText)
     || parseInlineKeyValueTableObject(userText)
     || tableFromHistory(chartMemory, userText)
