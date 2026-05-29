@@ -3,12 +3,43 @@ const { cleanLabel: cleanSafeMermaidLabel, sanitizeMermaidCode, buildFlowchartFr
 
 function numberFromCell(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
-  const clean = String(value ?? "")
-    .replace(/[%₺$€£]/g, "")
-    .replace(/\s/g, "")
-    .replace(/\.(?=\d{3}(\D|$))/g, "")
-    .replace(/,/g, ".");
-  const num = Number(clean);
+
+  const raw = String(value ?? "")
+    .replace(/[−–—]/g, "-")
+    .replace(/[’']/g, "")
+    .trim();
+  if (!raw) return null;
+
+  // Gerçek kullanıcı tabloları genelde "30 TL", "2 kg", "12’li", "1.234,56 ₺" gibi gelir.
+  // Hücre komple sayı değilse bile ilk güvenli numeric token çıkarılır.
+  const match = raw.match(/-?\d[\d\s.,]*/);
+  if (!match) return null;
+
+  let token = match[0].replace(/\s/g, "");
+  if (!token || token === "-") return null;
+
+  const comma = token.lastIndexOf(",");
+  const dot = token.lastIndexOf(".");
+
+  if (comma >= 0 && dot >= 0) {
+    token = comma > dot
+      ? token.replace(/\./g, "").replace(/,/g, ".")
+      : token.replace(/,/g, "");
+  } else if (comma >= 0) {
+    const parts = token.split(",");
+    const last = parts[parts.length - 1] || "";
+    token = parts.length === 2 && last.length <= 2
+      ? token.replace(/,/g, ".")
+      : token.replace(/,/g, "");
+  } else if (dot >= 0) {
+    const parts = token.split(".");
+    const last = parts[parts.length - 1] || "";
+    token = parts.length > 2 || (parts.length === 2 && last.length === 3)
+      ? token.replace(/\./g, "")
+      : token;
+  }
+
+  const num = Number(token);
   return Number.isFinite(num) ? num : null;
 }
 
@@ -56,6 +87,11 @@ function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
   const q = normalizeToolIntentText(chartIntentText(userText));
   let score = 0;
 
+  if (/^#|^no$|^id$|sira|sıra/.test(h)) score -= 90;
+  if (/not|aciklama|açıklama|kategori|category|birim$|unit$/.test(h)) score -= 40;
+  if (/toplam|total/.test(q) && /toplam|total/.test(h)) score += 140;
+  if (/tahmini fiyat|fiyat|tutar|bedel|amount|price/.test(q) && /tahmini fiyat|fiyat|tutar|bedel|amount|price/.test(h)) score += 110;
+
   if (q.includes("net") && /net|kar|kâr|kazanc|bakiye/.test(h)) score += 80;
   if (q.includes("gider") && /gider|kira|fatura|market|ulasim|eglence|saglik|giyim|abonelik|harcama/.test(h)) score += 70;
   if (q.includes("gelir") && /gelir|maas|maaş|freelance|kazanc/.test(h)) score += 70;
@@ -101,7 +137,44 @@ function rowLabel(row = {}, key = "", index = 0) {
 }
 
 function rowTotalByHeaders(row = {}, headers = []) {
-  return headers.reduce((sum, header) => sum + (numberFromCell(row?.[header]) ?? 0), 0);
+  let seen = false;
+  const total = headers.reduce((sum, header) => {
+    const value = numberFromCell(row?.[header]);
+    if (value === null) return sum;
+    seen = true;
+    return sum + value;
+  }, 0);
+  return seen ? total : null;
+}
+
+function rowSeriesFromValueHeader(table = {}, labelKey = "", valueKey = "", limit = 30) {
+  const rows = (table?.rows || []).slice(0, limit);
+  const labels = [];
+  const values = [];
+
+  rows.forEach((row, index) => {
+    const value = numberFromCell(row?.[valueKey]);
+    if (value === null) return;
+    labels.push(rowLabel(row, labelKey, index));
+    values.push(value);
+  });
+
+  return labels.length ? { labels, values, label: valueKey } : null;
+}
+
+function rowSeriesFromTotalHeaders(table = {}, labelKey = "", headers = [], limit = 40, label = "Toplam") {
+  const rows = (table?.rows || []).slice(0, limit);
+  const labels = [];
+  const values = [];
+
+  rows.forEach((row, index) => {
+    const total = rowTotalByHeaders(row, headers);
+    if (total === null) return;
+    labels.push(rowLabel(row, labelKey, index));
+    values.push(total);
+  });
+
+  return labels.length ? { labels, values, label } : null;
 }
 
 function expenseHeaders(table) {
@@ -201,11 +274,7 @@ function tableToPieInput(table, userText = "") {
 
   const valueKey = chooseValueHeader(table, userText, "pie");
   if (!valueKey) return null;
-  return {
-    labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
-    values: rows.map((row) => numberFromCell(row?.[valueKey]) ?? 0),
-    label: valueKey,
-  };
+  return rowSeriesFromValueHeader(table, labelKey, valueKey, 30);
 }
 
 function tableToLineInput(table, userText = "") {
@@ -232,30 +301,18 @@ function tableToLineInput(table, userText = "") {
 
   const exp = expenseHeaders(table);
   if (q.includes("gider") && exp.length >= 2) {
-    return {
-      labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
-      values: rows.map((row) => rowTotalByHeaders(row, exp)),
-      label: "Toplam Gider",
-    };
+    return rowSeriesFromTotalHeaders(table, labelKey, exp, 40, "Toplam Gider");
   }
 
   // "gelir trendi" için gelirleri satır bazında topla.
   const inc = incomeHeaders(table);
   if (q.includes("gelir") && inc.length >= 1) {
-    return {
-      labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
-      values: rows.map((row) => rowTotalByHeaders(row, inc)),
-      label: "Toplam Gelir",
-    };
+    return rowSeriesFromTotalHeaders(table, labelKey, inc, 40, "Toplam Gelir");
   }
 
   const valueKey = chooseValueHeader(table, userText, "line");
   if (!valueKey) return null;
-  return {
-    labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
-    values: rows.map((row) => numberFromCell(row?.[valueKey]) ?? 0),
-    label: valueKey,
-  };
+  return rowSeriesFromValueHeader(table, labelKey, valueKey, 40);
 }
 
 function tableToBarInput(table, userText = "") {
@@ -277,11 +334,7 @@ function tableToBarInput(table, userText = "") {
   }
   const valueKey = chooseValueHeader(table, userText, "bar");
   if (!valueKey) return null;
-  return {
-    labels: rows.map((row, index) => rowLabel(row, labelKey, index)),
-    values: rows.map((row) => numberFromCell(row?.[valueKey]) ?? 0),
-    label: valueKey,
-  };
+  return rowSeriesFromValueHeader(table, labelKey, valueKey, 30);
 }
 
 function tableToChartInput(table, userText = "") {

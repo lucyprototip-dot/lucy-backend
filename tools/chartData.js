@@ -6,13 +6,95 @@ const DEFAULT_PALETTE = [
 function parseNumber(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const raw = String(value ?? "")
-    .replace(/[%₺$€£]/g, "")
-    .replace(/\s/g, "")
-    .replace(/\.(?=\d{3}(\D|$))/g, "")
-    .replace(/,/g, ".");
-  if (!raw || !/^-?\d+(?:\.\d+)?$/.test(raw)) return null;
-  const num = Number(raw);
+    .replace(/[−–—]/g, "-")
+    .replace(/[’']/g, "")
+    .trim();
+  if (!raw) return null;
+
+  const match = raw.match(/-?\d[\d\s.,]*/);
+  if (!match) return null;
+
+  let token = match[0].replace(/\s/g, "");
+  if (!token || token === "-") return null;
+
+  const comma = token.lastIndexOf(",");
+  const dot = token.lastIndexOf(".");
+
+  if (comma >= 0 && dot >= 0) {
+    token = comma > dot
+      ? token.replace(/\./g, "").replace(/,/g, ".")
+      : token.replace(/,/g, "");
+  } else if (comma >= 0) {
+    const parts = token.split(",");
+    const last = parts[parts.length - 1] || "";
+    token = parts.length === 2 && last.length <= 2
+      ? token.replace(/,/g, ".")
+      : token.replace(/,/g, "");
+  } else if (dot >= 0) {
+    const parts = token.split(".");
+    const last = parts[parts.length - 1] || "";
+    token = parts.length > 2 || (parts.length === 2 && last.length === 3)
+      ? token.replace(/\./g, "")
+      : token;
+  }
+
+  const num = Number(token);
   return Number.isFinite(num) ? num : null;
+}
+
+function normalizeHeader(header = "") {
+  return String(header || "")
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ı/g, "i")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function scoreValueHeader(header = "", input = {}) {
+  const h = normalizeHeader(header);
+  const q = normalizeHeader(input.userText || input.prompt || input.request || input.title || input.label || "");
+  let score = 0;
+
+  if (/^#|^no$|^id$|sira/.test(h)) score -= 100;
+  if (/not|aciklama|kategori|category|birim$|unit$/.test(h)) score -= 50;
+  if (/toplam|total/.test(q) && /toplam|total/.test(h)) score += 150;
+  if (/tahmini fiyat|fiyat|tutar|bedel|amount|price/.test(q) && /tahmini fiyat|fiyat|tutar|bedel|amount|price/.test(h)) score += 120;
+  if (/toplam|total/.test(h)) score += 80;
+  if (/tutar|amount|bedel/.test(h)) score += 65;
+  if (/tahmini fiyat/.test(h)) score += 55;
+  if (/fiyat|price/.test(h)) score += 35;
+  if (/deger|value/.test(h)) score += 30;
+  if (/miktar|adet|quantity|count/.test(h)) score += 10;
+  if (/birim fiyat|unit price/.test(h)) score += 8;
+
+  return score;
+}
+
+function chooseLabelHeader(headers = [], rows = []) {
+  const scored = headers.map((header, index) => {
+    const h = normalizeHeader(header);
+    const hasText = rows.some((row) => String(row?.[header] ?? "").trim() && parseNumber(row?.[header]) === null);
+    let score = (headers.length - index) * 0.01;
+    if (hasText) score += 10;
+    if (/^urun$|urun adi|urun ad|urun ismi|product/.test(h)) score += 100;
+    if (/^ad$|^isim$|^adi$|^ismi$|baslik|title|name/.test(h)) score += 80;
+    if (/kategori|category/.test(h)) score += 30;
+    if (/not|aciklama|description/.test(h)) score -= 20;
+    return { header, score };
+  }).sort((a, b) => b.score - a.score);
+  return scored[0]?.header || headers[0];
+}
+
+function chooseValueHeader(headers = [], rows = [], input = {}) {
+  const candidates = headers.filter((header) => rows.some((row) => parseNumber(row?.[header]) !== null));
+  if (!candidates.length) return null;
+  const scored = candidates.map((header, index) => ({
+    header,
+    score: scoreValueHeader(header, input) + (candidates.length - index) * 0.01,
+  })).sort((a, b) => b.score - a.score);
+  return scored[0]?.header || candidates[0];
 }
 
 function cleanNumber(value) {
@@ -46,13 +128,20 @@ module.exports = {
       const headers = Array.isArray(input.headers) && input.headers.length
         ? input.headers
         : Object.keys(input.rows.find((row) => row && typeof row === "object") || {});
-      const labelKey = headers[0];
-      const valueKey = headers.find((header) => input.rows.some((row) => parseNumber(row?.[header]) !== null));
+      const labelKey = chooseLabelHeader(headers, input.rows);
+      const valueKey = chooseValueHeader(headers, input.rows, input);
       if (!valueKey) {
         return { success: false, error: "numeric_values_required", message: "Grafik için en az bir sayısal kolon gerekli." };
       }
-      labels = input.rows.slice(0, 30).map((row, index) => String(row?.[labelKey] ?? `Satır ${index + 1}`));
-      values = input.rows.slice(0, 30).map((row) => parseNumber(row?.[valueKey]));
+      const pairs = input.rows.slice(0, 30)
+        .map((row, index) => ({
+          label: String(row?.[labelKey] ?? `Satır ${index + 1}`).trim() || `Satır ${index + 1}`,
+          value: parseNumber(row?.[valueKey]),
+        }))
+        .filter((item) => item.value !== null);
+      labels = pairs.map((item) => item.label);
+      values = pairs.map((item) => item.value);
+      if (!input.label) input.label = valueKey;
     }
 
     const numericValues = values.map((value) => parseNumber(value));

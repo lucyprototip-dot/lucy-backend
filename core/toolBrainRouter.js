@@ -88,7 +88,6 @@ function explicitToolAction(text = "", tool = "") {
   };
   // Deterministic Turkish direct-action fallbacks. Keep these outside the action map
   // so planner/model output cannot accidentally bypass hard intent validation.
-  if (tool === "textstats" && /\b(metnin istatistik|istatistiklerini cikar|istatistikleri cikar|istatistigini cikar)\b/.test(q)) return true;
   if (tool === "webfetch" && wantsReadUrl) return true;
   if (tool === "webfetch" && hasUrl && /\b(oku|sayfa|sayfayi|sayfayı|sayfasini|sayfasını|icerik|içerik|getir|al|cikar|çıkar|baslik|başlık|metin|extract|read)\b/.test(q)) return true;
   if (tool === "mail" && (/[\w.+-]+@[\w.-]+\.[a-z]{2,}/i.test(raw) && /\b(mail|maili|email|eposta|e posta|gonder|gönder|at|ilet)\b/.test(q))) return true;

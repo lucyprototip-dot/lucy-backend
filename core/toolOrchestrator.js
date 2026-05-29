@@ -855,6 +855,8 @@ const toolMemoryByChat = new Map();
 function newToolMemory() {
   return {
     lastText: "",
+    firstTable: null,
+    firstChart: null,
     lastTable: null,
     lastChart: null,
     lastMermaid: null,
@@ -870,6 +872,8 @@ function newToolMemory() {
     activeContent: null,
     contentHistory: [],
     index: { tables: [], charts: [], mermaids: [], texts: [], files: [] },
+    pendingClarification: null,
+    lastUserIntent: "",
     updatedAt: Date.now(),
   };
 }
@@ -1136,6 +1140,12 @@ function setActiveContent(memory, content = {}) {
     updatedAt: Date.now(),
   };
   memory.activeContent = clean;
+  if (type === "table" && clean.table?.rows?.length && !memory.firstTable) {
+    memory.firstTable = cloneJsonSafe(clean.table);
+  }
+  if (type === "chart" && (clean.chart?.data || clean.ui?.data) && !memory.firstChart) {
+    memory.firstChart = cloneJsonSafe(clean.chart || clean.ui || clean);
+  }
   pushContentHistory(memory, clean);
   memory.updatedAt = Date.now();
   return memory;
@@ -1595,6 +1605,7 @@ function referencedHistoryIndex(userText = "") {
 function tableFromHistory(memory = {}, userText = "") {
   const tables = [];
   ensureConversationIndex(memory);
+  if (memory.firstTable?.rows?.length) tables.push(memory.firstTable);
   if (Array.isArray(memory.index?.tables)) {
     for (const item of memory.index.tables) {
       const table = activeContentTable(item);
@@ -1627,6 +1638,7 @@ function tableFromHistory(memory = {}, userText = "") {
 function chartFromHistory(memory = {}, userText = "") {
   const charts = [];
   ensureConversationIndex(memory);
+  if (memory.firstChart?.data) charts.push(memory.firstChart);
   if (Array.isArray(memory.index?.charts)) {
     for (const item of memory.index.charts) {
       if (item?.type === "chart" && (item.chart?.data || item.ui?.data)) charts.push(item.chart || item.ui || item);
@@ -2229,11 +2241,38 @@ function currentUserHasClearAction(text = "") {
     || /\btablo\b.*\b(yap|goster|göster|cevir|çevir|donustur|dönüştür)\b|\btablo yap\b/.test(q);
 }
 
+function storePendingClarification(req, message = "", decision = {}) {
+  const memory = getStoredToolMemory(req);
+  memory.pendingClarification = {
+    question: String(message || ""),
+    userText: latestUserIntentText(req),
+    decision: decision?.decision || "ASK_CLARIFICATION",
+    createdAt: Date.now(),
+  };
+  memory.updatedAt = Date.now();
+  return memory.pendingClarification;
+}
+
+function clearPendingClarification(req) {
+  const memory = getStoredToolMemory(req);
+  memory.pendingClarification = null;
+  memory.lastUserIntent = latestUserIntentText(req);
+  memory.updatedAt = Date.now();
+  return memory;
+}
+
 function resolveClarificationFollowUpText(req) {
-  if (!latestAssistantAskedClarification(req)) return "";
+  const memory = hydrateMemoryFromRequest(req);
+  const pending = memory.pendingClarification || null;
+  if (!latestAssistantAskedClarification(req) && !pending) return "";
   const current = latestUserIntentText(req);
-  const previous = previousUserIntentText(req);
+  const previous = pending?.userText || previousUserIntentText(req);
   if (!current || !previous) return "";
+
+  const currentNorm = normalizeIntentText(current);
+  if (/\b(burda|burada|sohbette|chatte|ekranda|buraya)\b/.test(currentNorm)) {
+    return `${previous} burada göster`;
+  }
 
   // Kullanıcı zaten hem kaynak hem aksiyon verdi ise aynen kullan.
   if (sourcePrefixFromText(current) && currentUserHasClearAction(current)) return current;
@@ -2412,16 +2451,19 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const aiDecision = await buildAiPlannerDecision(req);
 
   if (aiDecision?.decision === "ASK_CLARIFICATION" && !shouldBypassPlannerClarification(aiDecision, req)) {
+    const clarificationMessage = buildClarificationMessage(aiDecision, req);
+    storePendingClarification(req, clarificationMessage, aiDecision);
     return {
       toolCalls: [],
       toolResults: [],
-      finalAnswer: buildClarificationMessage(aiDecision, req),
+      finalAnswer: clarificationMessage,
       plannerDecision: aiDecision,
     };
   }
 
   const fallbackClarification = !aiDecision ? shouldAskClarificationWithoutAi(req) : "";
   if (fallbackClarification && !requestHasResolvableTypedReference(req) && !resolveClarificationFollowUpText(req)) {
+    storePendingClarification(req, fallbackClarification, { decision: "ASK_CLARIFICATION" });
     return { toolCalls: [], toolResults: [], finalAnswer: fallbackClarification };
   }
 
@@ -2502,6 +2544,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   }
 
   if (!toolCalls.length) {
+    clearPendingClarification(req);
     const cleaned = sanitizeNormalAnswer(answer, req);
     if (cleaned) rememberText(getStoredToolMemory(req), cleaned);
     return {
@@ -2510,6 +2553,8 @@ async function executeToolCallsFromAnswer(answer = "", req) {
       finalAnswer: cleaned || (allowAnyTool ? missingToolContextMessage(req) : "Tamam aşkım, buradayım. Ne istersen birlikte yaparız. 💙"),
     };
   }
+
+  clearPendingClarification(req);
 
   const toolResults = [];
   const producedFilesThisTurn = [];

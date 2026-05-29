@@ -171,6 +171,14 @@ function detectNamedColors(text = "") {
   };
 }
 
+function isPlainTableCreationRequest(text = "") {
+  const q = normalizeToolIntentText(text);
+  if (!/tablo/.test(q)) return false;
+  if (/(excel|xlsx|xls|pdf|word|docx|zip|dosya|indir|kaydet|gonder|gönder|cevir|donustur|grafik|chart|pasta|cizgi|bar|sutun|renk|emoji|gorsel|görsel)/.test(q)) return false;
+  if (/(bunu|bunun|buna|onu|onun|ona|son|onceki|önceki|az onceki|yazdigin|yazdığın|senin)/.test(q)) return false;
+  return /(yap|olustur|oluştur|hazirla|hazırla|goster|göster)/.test(q);
+}
+
 function detectColorPalette(value = "") {
   const text = normalizeToolIntentText(value);
 
@@ -261,9 +269,17 @@ function detectColorPalette(value = "") {
 
 function likelyToolIntent(value = "") {
   const text = normalizeToolIntentText(value);
+  if (isPlainTableCreationRequest(value)) return false;
   const metaOrStyle = /\b(nedir|ne demek|ne ise yarar|nasil calisir|mantigi|anlat|acikla|ornek ver|farki ne|gibi|tarzi|tarzinda|formatinda|uslubunda|tonunda)\b/.test(text);
-  const action = /\b(yap|olustur|hazirla|uret|ver|indir|kaydet|donustur|cevir|gonder|at|ilet|oku|listele|hesapla|ciz|goster|arsivle|sikistir)\b/.test(text);
+  const action = /\b(yap|olustur|hazirla|uret|ver|indir|kaydet|donustur|cevir|degistir|değiştir|gonder|at|ilet|oku|listele|hesapla|ciz|goster|arsivle|sikistir|kullan|uygula|olsun)\b/.test(text);
+  const palette = detectColorPalette(value);
+  const artifactReference = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|son|en son|onceki|önceki|mevcut|daha|grafik|chart|tablo|dosya|renkleri|renklerini)\b/.test(text);
+  const chartReference = /\b(grafik|chart|pasta|pie|cizgi|bar|sutun|cubuk|dilim|daire|yuvarlak)\b/.test(text);
   if (metaOrStyle && !action) return false;
+  // “Bunu X renk yap / X renkleri kullan” gibi istekler tool işidir; X dinamik çıkarılır.
+  // Salt “saat tarzı premium olsun” gibi stil referanslarını ise tool niyeti sanma.
+  if (palette.requested && (artifactReference || chartReference || (palette.dynamic && action))) return true;
+  if (/\b(tablo)\b.*\b(yap|olustur|hazirla|goster|cevir|donustur)\b|\b(bunu|son|grafik|chart)\b.*\btablo\b/.test(text)) return true;
   // Tool hakkında açıklama/eğitim soruları tool çalıştırmaz: "PDF nasıl yapılır", "Excel örneği anlat" vb.
   if (/\b(pdf|excel|xlsx|xls|zip|qr|ocr|webfetch|mail|telegram|whatsapp|mermaid|diyagram|grafik|chart|calculator|hesap|textstats)\b/.test(text)
       && /\b(nasil|nedir|ne demek|ne ise yarar|mantigi|anlat|acikla|ornek|farki)\b/.test(text)
@@ -280,7 +296,6 @@ function likelyToolIntent(value = "") {
   if (/\b(renkli|renklendir|rengarenk|farkli renk|farkli renklerde|palet|tema|neon|pastel|sari|lacivert|beyaz|pasta|pie|yuvarlak|daire|dilim|cizgi|line|trend|cubuk|bar|sutun)\b.*\b(yap|olsun|cevir|donustur|goster|görster|goster|hazirla)\b/.test(text)) return true;
 
   // Genel kelimeler tek başına tool tetiklemesin; açık çıktı fiili veya net tool kalıbı varsa tetiklensin.
-  if (/\b(metnin istatistik|istatistiklerini cikar|istatistikleri cikar|istatistigini cikar)\b/.test(text)) return true;
   return /\b(zip|excel|xlsx|xls|docx|qr|ocr|webfetch|hesap|calculator|hesapla|mail gonder|maili gonder|email gonder|eposta gonder|telegram gonder|telegrama gonder|telegram mesaj gonder|whatsapp gonder|whatsappa gonder|whatsapp mesaj gonder|textstats|filemanager)\b|grafik|chart|pasta grafik|yuvarlak grafik|daire grafik|dilimli|trend grafik|cizgi grafik|cubuk grafik|sutun grafik|diyagram|mermaid|akis diagrami|akis semasi|blok diyagram|kutularla goster|indir|arsivle|rapor pdf|excel yap|pdf yap|zip yap|qr kod|dosyalari listele|dosyalari oku|dosyayi oku|son dosyayi oku|son olusturulan dosyayi oku|olusturulan dosyalari|filemanager|https?:\/\/\S+.*(oku|icerik|getir|al|cikar|sayfa|sayfasini|baslik|metin)/.test(text)
     || /\b(pdf)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|donustur|cevir)\b/.test(text)
     || /\b(word|docx|belge|txt|markdown|md|csv|json|html)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|donustur|cevir)\b/.test(text)
@@ -295,4 +310,5 @@ module.exports = {
   detectVisualStyle,
   detectColorPalette,
   likelyToolIntent,
+  isPlainTableCreationRequest,
 };

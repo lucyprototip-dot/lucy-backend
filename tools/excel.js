@@ -209,7 +209,10 @@ module.exports = {
     headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF111827" } };
 
     sheet.views = [{ state: "frozen", ySplit: 1 }];
-    sheet.autoFilter = { from: "A1", to: `${columnLetter(columns.length)}1` };
+    const wantsFilter = input.autoFilter === true
+      || input.filter === true
+      || /\b(filtreli|filter|auto\s*filter|suzgecli|süzgeçli)\b/i.test(String(input.userText || input.text || input.title || ""));
+    if (wantsFilter) sheet.autoFilter = { from: "A1", to: `${columnLetter(columns.length)}1` };
 
     sheet.eachRow((row, rowNumber) => {
       row.eachCell({ includeEmpty: true }, (cell) => {

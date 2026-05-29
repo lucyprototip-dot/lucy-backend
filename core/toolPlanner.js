@@ -43,22 +43,55 @@ function extractJsonObject(text = "") {
   return null;
 }
 
-function memorySummary(memory = {}) {
-  const table = memory.lastTable?.headers?.length && memory.lastTable?.rows?.length
+function summarizeTable(table = null) {
+  return table?.headers?.length && table?.rows?.length
     ? {
-        headers: memory.lastTable.headers,
-        rowsSample: memory.lastTable.rows.slice(0, 8),
-        rowCount: memory.lastTable.rows.length,
+        headers: table.headers,
+        rowsSample: table.rows.slice(0, 8),
+        rowCount: table.rows.length,
       }
     : null;
+}
+
+function summarizeChart(chart = null) {
+  const data = chart?.data || chart?.raw?.data || null;
+  return data?.labels?.length
+    ? {
+        chartType: chart.chartType || chart.type || "",
+        title: chart.title || "",
+        labelsSample: data.labels.slice(0, 8),
+        valuesSample: (data.datasets?.[0]?.data || []).slice(0, 8),
+      }
+    : null;
+}
+
+function memorySummary(memory = {}) {
+  const lastTable = summarizeTable(memory.lastTable);
+  const firstTable = summarizeTable(memory.firstTable);
+  const activeTable = summarizeTable(memory.activeContent?.type === "table" ? memory.activeContent.table : null);
+  const lastChart = summarizeChart(memory.lastChart);
+  const firstChart = summarizeChart(memory.firstChart);
 
   return {
     hasLastText: Boolean(memory.lastText),
     lastTextPreview: truncate(memory.lastText || "", 900),
-    hasLastTable: Boolean(table),
-    lastTable: table,
-    hasLastChart: Boolean(memory.lastChart),
-    lastChartType: memory.lastChart?.chartType || memory.lastChart?.type || "",
+    hasFirstTable: Boolean(firstTable),
+    firstTable,
+    hasLastTable: Boolean(lastTable),
+    lastTable,
+    hasActiveTable: Boolean(activeTable),
+    activeTable,
+    tableCount: Array.isArray(memory.index?.tables) ? memory.index.tables.length : 0,
+    hasLastChart: Boolean(lastChart),
+    lastChart,
+    hasFirstChart: Boolean(firstChart),
+    firstChart,
+    chartCount: Array.isArray(memory.index?.charts) ? memory.index.charts.length : 0,
+    pendingClarification: memory.pendingClarification ? {
+      question: memory.pendingClarification.question || "",
+      userText: truncate(memory.pendingClarification.userText || "", 500),
+    } : null,
+    activeContentType: memory.activeContent?.type || "",
     hasLastMermaid: Boolean(memory.lastMermaid?.code),
     lastMermaidPreview: truncate(memory.lastMermaid?.code || "", 600),
     hasLastFile: Boolean(memory.lastFile?.storedFilename || memory.lastFile?.filename),
@@ -187,6 +220,8 @@ async function planLucyActionWithDeepSeek({ userText = "", memory = {}, availabl
     "NO_TOOL: Kullanıcı bilgi soruyor, sohbet ediyor, stil örneği istiyor veya gerçek işlem istemiyor.",
     "TOOL_REQUIRED: Kullanıcı dosya/grafik/pdf/excel/zip/qr/web okuma/hesap/gönderim gibi gerçek işlem istiyor.",
     "ASK_CLARIFICATION: 'bunu/onu/son/ilk tablo/az önceki' gibi referans belirsizse veya hangi çıktı istendiği net değilse.",
+    "Artifact registry'de firstTable/lastTable/activeTable/lastChart/pendingClarification varsa bunları kullan; 'ilk tablo' firstTable, 'son tablo/bu tablo' lastTable/activeTable demektir.",
+    "Tablo -> grafik isteklerinde satırları veri noktası kabul et; kolon toplamı yapma. 'Toplam sütununu baz al' denirse value=Toplam, label=Ürün/Ad/Kategori olmalı.",
     "Belirsiz durumda asla eski context'i kafana göre seçme; kısa bir soru üret.",
     "Asla yapılmayan iş için 'yaptım' deme. Raw JSON, raw HTML veya tool_call kullanıcıya gösterme.",
     "Kullanıcı kaç çıktı istiyorsa o kadar tool planla. Örn: txt, md, pdf, word, excel, zip istiyorsa hepsini sırala.",
@@ -206,6 +241,7 @@ async function planLucyActionWithDeepSeek({ userText = "", memory = {}, availabl
       "'bunu pdf yap', 'excel hazırla', 'zip yap', 'siteyi oku' => TOOL_REQUIRED",
       "'bunu pastel yap' ve son hedef net değilse => ASK_CLARIFICATION",
       "'ilk tablom', 'son grafik', 'az önceki dosya' gibi ifadeleri artifactRegistry ile çöz; emin değilsen sor",
+      "pendingClarification varsa kullanıcının kısa cevabını önceki soruya bağla",
       "tablo/grafik/dosya stil değiştirme isteklerinde raw HTML/code değil render hedefi planla",
     ],
   });
@@ -258,6 +294,8 @@ async function planToolCallsWithDeepSeek({ userText = "", memory = {}, available
     "Grafik eş anlamları: yuvarlak grafik/daire/dilimli/renkli dağılım=pasta; trend/zamana göre/çizgi=line; normal/çubuk/sütun=bar.",
     "Diyagram eş anlamları: şema/akış/kutularla göster/bağlantılı göster/flowchart=mermaid.",
     "Kullanıcı 'bunu/onu/şunu' dediğinde memory içindeki son uygun kaynağı seç.",
+    "'ilk tablo' firstTable; 'son/bu tablo' lastTable veya activeTable; pendingClarification varsa kısa cevabı önceki soruya bağla.",
+    "Tablo -> grafik isteklerinde satır bazlı çalış: label=Ürün/Ad/Kategori, value=Toplam/Tutar/Fiyat. Kolon toplamı ancak kullanıcı açıkça kolon/sütun toplamı isterse yapılır.",
     "Asla sistem komutu, dosya silme, .env/API key okuma, key gösterme, shell çalıştırma planlama.",
     "Sadece izinli create/convert/summarize türü tool çağrıları planla.",
     "Cevap formatı: {\"toolCalls\":[{\"tool\":\"excel\",\"source\":\"lastTable\",\"input\":{}}],\"reason\":\"kisa\"}",
