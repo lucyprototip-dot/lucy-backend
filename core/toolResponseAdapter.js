@@ -28,7 +28,7 @@ function normalizeToolResultForUI(toolName, result = {}, input = {}) {
   const normalized = result && typeof result === "object" ? { ...result } : { value: result };
   const contracted = normalizeToolOutput(toolName, normalized, input);
   const guessedType = guessToolResultType(toolName, normalized);
-  const type = contracted.type === "chart" || contracted.type === "mermaid" ? contracted.type : guessedType;
+  const type = /^file(?:-|$)/.test(guessedType) ? guessedType : (contracted.type === "chart" || contracted.type === "mermaid" ? contracted.type : guessedType);
   const title = contracted.title || normalized.title || input.title || input.subject || input.filename || input.name || `${toolName} sonucu`;
 
   return {

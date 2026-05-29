@@ -750,7 +750,7 @@ function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
     return (wantsChartFromText(userText) || isStyleOnlyChartModify(userText, memory)) && !isChartExportOnlyRequest(userText);
   }
   if (tool === "mermaid") return wantsMermaidFromText(userText);
-  if (tool === "excel") return wantsExcelFromText(userText);
+  if (tool === "excel") return wantsExcelFromText(userText) && !isExcelFileToPdfRequest(userText);
   if (tool === "pdf") return wantsPdfFromText(userText);
   if (tool === "document") return wantsDocumentFromText(userText);
   if (tool === "qr") return wantsQrFromText(userText);
@@ -802,7 +802,10 @@ function validateToolInput(call = {}, req = null) {
 
   if (tool === "pdf") {
     const hasText = String(input.text || input.content || input.value || "").trim();
-    if (!hasText && !memory.lastTable?.rows?.length && !memory.lastText) return fail("PDF için önce metin, tablo veya rapor içeriği gerekli aşkım.", "pdf_source_required");
+    const hasRows = Array.isArray(input.rows || input.table?.rows) && (input.rows || input.table.rows).length > 0;
+    const hasChart = Boolean(input.chart || input.chartData || input.data?.labels);
+    const hasMermaid = Boolean(String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim());
+    if (!hasText && !hasRows && !hasChart && !hasMermaid && !memory.lastTable?.rows?.length && !memory.lastText) return fail("PDF için önce metin, tablo veya rapor içeriği gerekli aşkım.", "pdf_source_required");
   }
 
   if (tool === "ocr") {
@@ -1364,6 +1367,7 @@ function isToolGeneratedAnswerText(text = "") {
 
 function transformPrefersTypedSource(userText = "") {
   const q = normalizeIntentText(userText);
+  if (isExcelFileToPdfRequest(q)) return "file";
   if (/\b(son tablo|tabloyu|tablo|excel|xlsx|xls)\b/.test(q)) return "table";
   if (/\b(son grafik|grafik|chart|pasta|pie|cizgi|line|bar|sutun|renkli|renklendir|palet|tema)\b/.test(q) && !wantsMermaidFromText(q)) return "chart";
   if (/\b(son diyagram|diyagram|mermaid|akis|akış|sema|şema|flowchart)\b/.test(q)) return "mermaid";
@@ -2045,6 +2049,13 @@ function userAskedMultiOutputChain(userText = "") {
   return outputKinds >= 2 || /\b(hem|ve|sonra|ardindan|ardından|ayrica|ayrıca|birlikte|hepsini)\b/.test(q);
 }
 
+function isExcelFileToPdfRequest(userText = "") {
+  const q = normalizeIntentText(userText);
+  if (!wantsPdfFromText(q) || !/\b(excel|xlsx|xls)\b/.test(q)) return false;
+  if (/\b(hem|ve|sonra|ardindan|ardÄ±ndan|ayrica|ayrÄ±ca|birlikte|hepsini)\b/.test(q)) return false;
+  return /\b(dosya|dosyasi|dosyasini|exceli)\b/.test(q);
+}
+
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
@@ -2163,7 +2174,7 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsExcelFromText(userText)) {
+  if (wantsExcelFromText(userText) && !isExcelFileToPdfRequest(userText)) {
     const activeChartData = activeContent?.type === "chart" ? (activeContent.chart?.data || activeContent.ui?.data || null) : null;
     const excelInput = activeTable?.rows?.length
       ? { title, sheetName: title.slice(0, 31), rows: activeTable.rows, headers: activeTable.headers, filename: `${stem || "lucy-tablo"}.xlsx` }
@@ -2194,7 +2205,7 @@ function buildImplicitToolCalls(answer = "", req) {
       pdfInput.mermaid = activeContent.code || activeContent.mermaid;
       pdfInput.text = "";
     } else {
-      pdfInput.text = activeTable?.rows?.length && isOnlyTransformCommand(userText) ? tableToMarkdown(activeTable) : source;
+      pdfInput.text = activeTable?.rows?.length && (isOnlyTransformCommand(userText) || isExcelFileToPdfRequest(userText)) ? tableToMarkdown(activeTable) : source;
     }
     calls.push({ tool: "pdf", input: pdfInput });
   }
@@ -2339,9 +2350,12 @@ function resolveClarificationFollowUpText(req) {
 function requestHasResolvableTypedReference(req) {
   const text = normalizeIntentText(latestUserIntentText(req));
   const memory = hydrateMemoryFromRequest(req);
-  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyayı|dosyayi|metin|yazi|yazı|diyagram|şema|sema)\b/.test(text);
+  if (isChartExportOnlyRequest(text) && memory.lastChart?.data) return true;
+  if (isExcelFileToPdfRequest(text) && memory.lastExcel?.storedFilename) return true;
+  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyası|dosyasi|dosyasını|dosyasini|dosyayı|dosyayi|excel|xlsx|xls|metin|yazi|yazı|diyagram|şema|sema)\b/.test(text);
   const hasVagueCurrentSource = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|son|en son|mevcut)\b/.test(text);
   const hasAction = currentUserHasClearAction(text);
+  if (/\b(grafigini|pasta|pie)\b/.test(text) && hasAction && memory.lastChart?.data) return true;
   if (hasTypedSource && hasAction) return true;
   if (hasVagueCurrentSource && hasAction && memory.activeContent?.type === "chart" && memory.lastChart?.data) return true;
   return false;
@@ -2557,7 +2571,8 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     || tableFromHistory(chartMemory, userText)
     || chartMemory.lastTable?.rows?.length
   ));
-  if (!forceStyleChart && tableBackedChartRequest && !userSpecificallyReferencesChart(userText)) {
+  const explicitlyUsesTableSource = /\b(tablo|tabloyu|tablodan|table)\b/.test(normalizeIntentText(userText));
+  if (!forceStyleChart && tableBackedChartRequest && (explicitlyUsesTableSource || !userSpecificallyReferencesChart(userText))) {
     // Tablo -> grafik deterministik kalmali; planner'in tahmini labels/values secimi tablo motorunu ezmemeli.
     toolCalls = [implicitChartCall];
   }
