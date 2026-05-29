@@ -85,8 +85,54 @@ function parseNumber(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function normalizeChartData(widget = {}) {
+  const chart = widget.chart && typeof widget.chart === 'object' ? widget.chart : null;
+  const ui = widget.ui && typeof widget.ui === 'object' ? widget.ui : null;
+  const candidates = [
+    widget.data,
+    widget.chartData,
+    widget.raw?.data,
+    widget.raw?.chartData,
+    widget.raw?.__contracted?.data,
+    widget.__contracted?.data,
+    chart?.data,
+    chart?.chartData,
+    chart?.raw?.data,
+    chart?.raw?.chartData,
+    chart?.raw?.__contracted?.data,
+    ui?.data,
+    ui?.chartData,
+    ui?.raw?.data,
+    ui?.raw?.__contracted?.data,
+  ].filter(Boolean);
+
+  const data = candidates.find((candidate) => Array.isArray(candidate?.labels) && Array.isArray(candidate?.datasets));
+  if (data) return data;
+
+  const labels = widget.labels || widget.raw?.labels || widget.raw?.__contracted?.data?.labels || chart?.labels || chart?.raw?.labels || ui?.labels || ui?.raw?.labels || [];
+  const values = widget.values
+    || widget.raw?.values
+    || widget.raw?.__contracted?.data?.datasets?.[0]?.data
+    || chart?.values
+    || chart?.raw?.values
+    || ui?.values
+    || ui?.raw?.values
+    || [];
+  if (Array.isArray(labels) && labels.length && Array.isArray(values) && values.length) {
+    return {
+      labels,
+      datasets: [{
+        label: widget.label || chart?.label || ui?.label || 'Veri',
+        data: values,
+        ...(Array.isArray(widget.colors) && widget.colors.length ? { backgroundColor: widget.colors, borderColor: widget.colors } : {}),
+      }],
+    };
+  }
+  return null;
+}
+
 function getChartSeries(widget = {}) {
-  const data = widget.data || widget.chartData || widget.raw?.data || {};
+  const data = normalizeChartData(widget) || {};
   const labels = Array.isArray(widget.labels) ? widget.labels : (Array.isArray(data.labels) ? data.labels : []);
   const dataset = Array.isArray(data.datasets) && data.datasets[0] ? data.datasets[0] : {};
   const values = Array.isArray(widget.values) ? widget.values : (Array.isArray(dataset.data) ? dataset.data : []);
@@ -373,14 +419,21 @@ function markdownToHtml(markdown = '') {
 function buildDocumentMarkdown(input = {}) {
   const chunks = [];
   const text = input.text || input.content || input.value || input.markdown || input.body || '';
+  const chart = input.chart && typeof input.chart === 'object' ? input.chart : null;
+  const chartData = normalizeChartData({ ...input, chart });
   if (text) chunks.push(normalizeText(text));
   if (Array.isArray(input.rows) || Array.isArray(input.previewRows)) {
     const headers = input.headers || input.columns || [];
     const rows = input.rows || input.previewRows || [];
     chunks.push(`\n\n\`\`\`lucy-widget\n${JSON.stringify({ type: 'table', title: input.title || 'Tablo', headers, rows })}\n\`\`\``);
   }
-  if (input.data?.labels || input.chartData?.labels || input.labels) {
-    chunks.push(`\n\n\`\`\`lucy-widget\n${JSON.stringify({ type: 'chart', title: input.title || input.label || 'Grafik', chartType: input.chartType || 'bar', data: input.data || input.chartData, labels: input.labels, values: input.values })}\n\`\`\``);
+  if (Array.isArray(input.widgets)) {
+    input.widgets
+      .filter((widget) => widget && typeof widget === 'object')
+      .forEach((widget) => chunks.push(`\n\n\`\`\`lucy-widget\n${JSON.stringify(widget)}\n\`\`\``));
+  }
+  if (chartData?.labels || input.labels) {
+    chunks.push(`\n\n\`\`\`lucy-widget\n${JSON.stringify({ type: 'chart', title: input.title || chart?.title || chart?.raw?.title || input.label || 'Grafik', chartType: input.chartType || chart?.chartType || chart?.raw?.chartType || chart?.raw?.__contracted?.chartType || chart?.type || 'bar', data: chartData, labels: input.labels, values: input.values })}\n\`\`\``);
   }
   if (input.code || input.mermaid) chunks.push(`\n\n\`\`\`mermaid\n${cleanMermaidCode(input.code || input.mermaid)}\n\`\`\``);
   return normalizeText(chunks.join('\n'));
