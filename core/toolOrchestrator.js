@@ -1424,10 +1424,16 @@ function rememberToolResult(req, call = {}, result = {}) {
 
 function hydrateMemoryFromRequest(req) {
   const memory = getStoredToolMemory(req);
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  for (const message of messages.slice(-HYDRATE_MESSAGE_MAX)) {
+  const requestMessages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  const persistentMessages = Array.isArray(req?.body?.__lucyPersistentToolMessages) ? req.body.__lucyPersistentToolMessages : [];
+  const messages = [...persistentMessages, ...requestMessages];
+  const seenMessages = new Set();
+  for (const message of messages.slice(-Math.max(HYDRATE_MESSAGE_MAX, persistentMessages.length || 0))) {
     const text = messageText(message);
     const role = String(message?.role || message?.sender || "").toLowerCase();
+    const key = `${role}:${text}`;
+    if (seenMessages.has(key)) continue;
+    seenMessages.add(key);
     const userInlineContent = role === "user" && (String(text).length > 90 || /\n/.test(text) || hasMarkdownTable(text));
     if (text && (role !== "user" || userInlineContent) && !isOnlyTransformCommand(text)) rememberText(memory, text);
     extractLucyWidgetsFromText(text).forEach((widget) => rememberLucyWidget(memory, widget));

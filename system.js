@@ -1099,6 +1099,7 @@ async function askDeepSeekStream(body = {}, res, req = null) {
       const payloadText = line.replace(/^data:\s*/, "");
       if (payloadText === "[DONE]") {
         const toolPayload = await executeToolCallsFromAnswer(fullAnswer, req);
+        if (req) req.__lucyLastToolPayload = toolPayload;
         if (toolPayload.finalAnswer) {
           writeSse(res, { delta: toolPayload.finalAnswer });
         }
@@ -1125,6 +1126,7 @@ async function askDeepSeekStream(body = {}, res, req = null) {
   }
 
   const toolPayload = await executeToolCallsFromAnswer(fullAnswer, req);
+  if (req) req.__lucyLastToolPayload = toolPayload;
   if (toolPayload.finalAnswer) {
     writeSse(res, { delta: toolPayload.finalAnswer });
   }
