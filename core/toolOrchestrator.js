@@ -745,7 +745,10 @@ function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
   if (tool === "time") return wantsTimeFromText(userText);
   if (tool === "webfetch") return wantsWebFetchFromText(userText);
   if (tool === "ocr") return wantsOcrFromText(userText);
-  if (tool === "chartdata") return wantsChartFromText(userText) && !isChartExportOnlyRequest(userText);
+  if (tool === "chartdata") {
+    const memory = hydrateMemoryFromRequest(req);
+    return (wantsChartFromText(userText) || isStyleOnlyChartModify(userText, memory)) && !isChartExportOnlyRequest(userText);
+  }
   if (tool === "mermaid") return wantsMermaidFromText(userText);
   if (tool === "excel") return wantsExcelFromText(userText);
   if (tool === "pdf") return wantsPdfFromText(userText);

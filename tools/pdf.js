@@ -1,6 +1,5 @@
 const {
   normalizeText,
-  slugFileName,
   renderPdfBuffer,
   renderPdfKitBuffer,
 } = require("../core/render/pdfRenderEngine");
@@ -18,6 +17,30 @@ function toPdfBuffer(value) {
     if (value.buffer) return toPdfBuffer(value.buffer);
   }
   return null;
+}
+
+function slugFileName(value = "lucy-rapor", ext = "pdf") {
+  const cleanExt = String(ext || "pdf").replace(/^\.+/, "").replace(/[^a-z0-9]+/gi, "").toLowerCase() || "pdf";
+  const base = normalizeText(value || "lucy-rapor")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\u0131/g, "i")
+    .replace(/\u0130/g, "I")
+    .replace(/\u011f/g, "g")
+    .replace(/\u011e/g, "G")
+    .replace(/\u015f/g, "s")
+    .replace(/\u015e/g, "S")
+    .replace(/\u00fc/g, "u")
+    .replace(/\u00dc/g, "U")
+    .replace(/\u00f6/g, "o")
+    .replace(/\u00d6/g, "O")
+    .replace(/\u00e7/g, "c")
+    .replace(/\u00c7/g, "C")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80) || "lucy-rapor";
+  return `${base}.${cleanExt}`;
 }
 
 

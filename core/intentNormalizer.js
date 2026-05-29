@@ -106,8 +106,10 @@ function detectChartType(value = "") {
 
 function detectVisualStyle(value = "") {
   const text = normalizeToolIntentText(value);
+  const colorStyle = /\b(renkli|rengarenk|colorful|renk|renkte|renklerde|renklerle|renklere|farkli renk|ayri renk)\b/.test(text)
+    || /\b\d+\s*(?:farkli|ayri)?\s*renk(?:te|li|le|lerle|lerde)?\b/.test(text);
   return {
-    colorful: /\b(renkli|rengarenk|colorful|renk)\b/.test(text),
+    colorful: colorStyle,
     premium: /\b(premium|sik|modern|profesyonel|neon|cyberpunk|pastel)\b/.test(text),
     round: /\b(yuvarlak|daire|pasta|pie|donut|halka)\b/.test(text),
     compact: /\b(kisa|kompakt|minimal)\b/.test(text),
@@ -183,6 +185,9 @@ function detectColorPalette(value = "") {
   const text = normalizeToolIntentText(value);
 
   const named = detectNamedColors(text);
+  const wantsDifferentColors = /\b(?:farkli|ayri)\s+renk(?:te|li|le|lerle|lerde)?\b/.test(text)
+    || /\b\d+\s*(?:farkli|ayri)?\s*renk(?:te|li|le|lerle|lerde)?\b/.test(text)
+    || /\brenk(?:te|lerde|lerle|lere)\b/.test(text);
 
   // Takım/marka/tema ifadeleri sabit komut değil, semantik kısa yol olarak yorumlanır.
   if (/\bfenerbahce|fenerbahçe\b/.test(text)) {
@@ -242,11 +247,12 @@ function detectColorPalette(value = "") {
     };
   }
 
-  if (/\b(renkli|rengarenk|colorful|renk)\b/.test(text)) {
+  if (wantsDifferentColors || /\b(renkli|rengarenk|colorful|renk)\b/.test(text)) {
     return {
       name: "colorful",
       colors: ["#ef4444", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ec4899"],
       requested: true,
+      dynamic: wantsDifferentColors,
     };
   }
 
