@@ -1953,7 +1953,7 @@ function fillDocumentInputFromProducedContent(call = {}, producedContents = [], 
   const latestChart = [...producedContents].reverse().find((item) => item?.type === "chart" && item.chart);
   const latestMermaid = [...producedContents].reverse().find((item) => item?.type === "mermaid" && item.code);
   const current = String(input.content || input.text || input.markdown || "").trim();
-  const currentLooksLikePrompt = /(bunu|sonra|dosyas[ıi]|yap|haz[ıi]rla|oku|sayfa|link|url)/.test(normalizeIntentText(current));
+  const currentLooksLikePrompt = /\b(bunu|sonra|dosyas[ıi]|yap|haz[ıi]rla|oku|sayfa|link|url)\b/.test(normalizeIntentText(current));
   if (latestWeb && (!current || currentLooksLikePrompt || /oku|sayfa|web|link|url|ozet|özet/.test(q))) {
     input.content = latestWeb.text;
     input.title = input.title || latestWeb.title || "Web Özeti";
