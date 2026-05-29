@@ -1962,9 +1962,15 @@ function buildImplicitToolCalls(answer = "", req) {
   const memory = hydrateMemoryFromRequest(req);
   const activeContent = resolveActiveContent(req, answer);
   const source = activeContentToText(activeContent, sourceFromMemory(req, answer));
-  const inlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText) || parseFirstMarkdownTableObject(source) || parseLooseInlineTableObject(source) || parseInlineKeyValueTableObject(source);
+  const userInlineContent = inlineContentFromToolRequest(userText);
+  const userInlineTable = parseFirstMarkdownTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
+  const inlineTable = userInlineTable || parseFirstMarkdownTableObject(source) || parseLooseInlineTableObject(source) || parseInlineKeyValueTableObject(source);
   // Kullanıcı mesajındaki yeni veri her zaman eski context'ten önce gelir.
   const activeTable = inlineTable || activeContentTable(activeContent) || memory.lastTable;
+  const hasFreshUserContent = Boolean(userInlineContent || userInlineTable);
+  if (hasFreshUserContent && activeContent && typeof activeContent === "object") {
+    activeContent.title = contentTitleFromText(userInlineContent || userText, activeTable ? "LUCY Tablosu" : "LUCY Ciktisi");
+  }
   const title = activeContent?.title || contentTitleFromText(source, activeTable ? "LUCY Tablosu" : "LUCY Çıktısı");
   const stem = safeOutputStem(title);
   const calls = [];
@@ -2108,7 +2114,8 @@ function buildImplicitToolCalls(answer = "", req) {
   if (wantsQrFromText(userText)) {
     const url = String(userText).match(/https?:\/\/\S+/i)?.[0]?.replace(/[),.;]+$/g, "");
     const text = url || (!isOnlyTransformCommand(userText) ? userText : memory.lastText || source);
-    if (String(text || "").trim()) calls.push({ tool: "qr", input: { text, filename: `${stem || "lucy-qr"}.png` } });
+    const qrStem = safeOutputStem(url || text || stem || "lucy-qr");
+    if (String(text || "").trim()) calls.push({ tool: "qr", input: { text, filename: `${qrStem || "lucy-qr"}.png` } });
   }
 
   if (wantsTextStatsFromText(userText)) {

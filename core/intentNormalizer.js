@@ -280,6 +280,7 @@ function likelyToolIntent(value = "") {
   if (/\b(renkli|renklendir|rengarenk|farkli renk|farkli renklerde|palet|tema|neon|pastel|sari|lacivert|beyaz|pasta|pie|yuvarlak|daire|dilim|cizgi|line|trend|cubuk|bar|sutun)\b.*\b(yap|olsun|cevir|donustur|goster|görster|goster|hazirla)\b/.test(text)) return true;
 
   // Genel kelimeler tek başına tool tetiklemesin; açık çıktı fiili veya net tool kalıbı varsa tetiklensin.
+  if (/\b(metnin istatistik|istatistiklerini cikar|istatistikleri cikar|istatistigini cikar)\b/.test(text)) return true;
   return /\b(zip|excel|xlsx|xls|docx|qr|ocr|webfetch|hesap|calculator|hesapla|mail gonder|maili gonder|email gonder|eposta gonder|telegram gonder|telegrama gonder|telegram mesaj gonder|whatsapp gonder|whatsappa gonder|whatsapp mesaj gonder|textstats|filemanager)\b|grafik|chart|pasta grafik|yuvarlak grafik|daire grafik|dilimli|trend grafik|cizgi grafik|cubuk grafik|sutun grafik|diyagram|mermaid|akis diagrami|akis semasi|blok diyagram|kutularla goster|indir|arsivle|rapor pdf|excel yap|pdf yap|zip yap|qr kod|dosyalari listele|dosyalari oku|dosyayi oku|son dosyayi oku|son olusturulan dosyayi oku|olusturulan dosyalari|filemanager|https?:\/\/\S+.*(oku|icerik|getir|al|cikar|sayfa|sayfasini|baslik|metin)/.test(text)
     || /\b(pdf)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|donustur|cevir)\b/.test(text)
     || /\b(word|docx|belge|txt|markdown|md|csv|json|html)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|donustur|cevir)\b/.test(text)

@@ -84,6 +84,7 @@ function wantsMermaidFromText(text = "") {
 
 function wantsTextStatsFromText(text = "") {
   const q = normalizeIntentText(text);
+  if (/metnin istatistik|istatistiklerini cikar|istatistikleri cikar|istatistigini cikar/.test(q)) return true;
   return /textstats|metin istatistik|kelime say|karakter say|satir say|satır say/.test(q);
 }
 
