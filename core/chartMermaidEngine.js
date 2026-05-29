@@ -16,6 +16,13 @@ function normalizeHeader(header = "") {
   return normalizeToolIntentText(header).replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function chartIntentText(userText = "") {
+  return String(userText || "")
+    .split(/\r?\n/)
+    .filter((line) => !String(line || "").includes("|"))
+    .join("\n");
+}
+
 function isNumericColumn(rows = [], header = "") {
   return rows.some((row) => numberFromCell(row?.[header]) !== null);
 }
@@ -46,7 +53,7 @@ function labelHeader(table) {
 
 function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
   const h = normalizeHeader(header);
-  const q = normalizeToolIntentText(userText);
+  const q = normalizeToolIntentText(chartIntentText(userText));
   let score = 0;
 
   if (q.includes("net") && /net|kar|kâr|kazanc|bakiye/.test(h)) score += 80;

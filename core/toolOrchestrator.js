@@ -419,6 +419,23 @@ function enrichToolCallInput(call, req) {
     input.style = style;
     input.chartType = explicitChartTypeFromText(userText) || input.chartType || input.type || "bar";
 
+    const sourceHint = String(input.source || "").toLowerCase();
+    const shouldRecomputeTableChart = Boolean(inlineTable || (/lasttable|table|tablo/.test(sourceHint) && (memory.lastTable?.rows?.length || tableFromHistory(memory, userText)?.rows?.length)));
+    if (shouldRecomputeTableChart) {
+      const selectedTableRaw = inlineTable || tableFromHistory(memory, userText) || memory.lastTable;
+      const tablePalette = paletteFromTable(selectedTableRaw);
+      const chartInput = selectedTableRaw?.rows?.length ? tableToChartInput(selectedTableRaw, userText) : null;
+      if (chartInput) {
+        const merged = applyStyleToChartInput({ ...chartInput, title: input.title || chartInput.title }, userText, chartInput);
+        if (tablePalette?.colors?.length && !palette.requested) {
+          merged.colors = tablePalette.colors;
+          merged.style = { ...(merged.style || {}), colorful: true, palette: tablePalette.name, colors: tablePalette.colors };
+        }
+        Object.assign(input, merged);
+      }
+      return { ...call, input };
+    }
+
     if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
       const selectedTableRaw = inlineTable || tableFromHistory(memory, userText) || memory.lastTable;
       const tablePalette = paletteFromTable(selectedTableRaw);
@@ -2433,6 +2450,19 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   const implicitChartCall = implicitCallsForCurrentIntent.find((call) => String(call.tool || "").toLowerCase() === "chartdata");
   if (forceStyleChart && implicitChartCall) {
     // DS cevabı tablo/HTML/metin üretse bile, semantik olarak bu bir chart style mutation ise chartData kazanır.
+    toolCalls = [implicitChartCall];
+  }
+
+  const chartMemory = hydrateMemoryFromRequest(req);
+  const tableBackedChartRequest = Boolean(implicitChartCall && (
+    parseFirstMarkdownTableObject(userText)
+    || parseLooseInlineTableObject(userText)
+    || parseInlineKeyValueTableObject(userText)
+    || tableFromHistory(chartMemory, userText)
+    || chartMemory.lastTable?.rows?.length
+  ));
+  if (!forceStyleChart && tableBackedChartRequest && !userSpecificallyReferencesChart(userText)) {
+    // Tablo -> grafik deterministik kalmali; planner'in tahmini labels/values secimi tablo motorunu ezmemeli.
     toolCalls = [implicitChartCall];
   }
 
