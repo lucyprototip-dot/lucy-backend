@@ -28,7 +28,20 @@ function numericHeaders(table) {
 function labelHeader(table) {
   const rows = table?.rows || [];
   const headers = table?.headers || [];
-  return headers.find((header) => rows.some((row) => String(row?.[header] ?? "").trim() && numberFromCell(row?.[header]) === null)) || headers[0];
+  const textHeaders = headers.filter((header) => rows.some((row) => String(row?.[header] ?? "").trim() && numberFromCell(row?.[header]) === null));
+  if (!textHeaders.length) return headers[0];
+
+  const scored = textHeaders.map((header, index) => {
+    const h = normalizeHeader(header);
+    let score = (textHeaders.length - index) * 0.01;
+    if (/^urun$|urun adi|urun ad|urun ismi|product/.test(h)) score += 100;
+    if (/^ad$|^isim$|^adi$|^ismi$|baslik|title|name/.test(h)) score += 80;
+    if (/kategori|category/.test(h)) score += 45;
+    if (/kalem|aciklama|not|description/.test(h)) score += 25;
+    return { header, score };
+  }).sort((a, b) => b.score - a.score);
+
+  return scored[0]?.header || textHeaders[0] || headers[0];
 }
 
 function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
@@ -51,6 +64,17 @@ function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
     if (/net|kar|kâr/.test(h)) score -= 10;
     if (/gider|harcama|masraf|deger|adet|puan/.test(h)) score += 20;
   }
+
+  if (/toplam|total/.test(h)) score += 55;
+  if (/tutar|amount|bedel/.test(h)) score += 45;
+  if (/gelir|satis|ciro|revenue|sales/.test(h)) score += 40;
+  if (/deger|value/.test(h)) score += 32;
+  if (/miktar|adet|quantity|count/.test(h)) score += 18;
+  if (/birim fiyat|unit price/.test(h)) score += 8;
+  if (/fiyat|price/.test(h)) score += 10;
+
+  if (/adet|miktar|quantity|count/.test(q) && /adet|miktar|quantity|count/.test(h)) score += 80;
+  if (/birim fiyat|unit price/.test(q) && /birim fiyat|unit price/.test(h)) score += 90;
 
   return score;
 }
@@ -103,12 +127,28 @@ function monthLikeHeaders(table) {
   const nums = numericHeaders(table);
   const monthPattern = /ocak|subat|şubat|mart|nisan|mayis|mayıs|haziran|temmuz|agustos|ağustos|eylul|eylül|ekim|kasim|kasım|aralik|aralık|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|ay\s*\d+/i;
   const matching = nums.filter((header) => monthPattern.test(normalizeHeader(header)) || monthPattern.test(String(header || "")));
-  return matching.length >= 2 ? matching : (nums.length >= 3 ? nums : []);
+  return matching.length >= 2 ? matching : [];
 }
 
 function columnTotalsByHeaders(table, headers = []) {
   const rows = table?.rows || [];
   return headers.map((header) => rows.reduce((sum, row) => sum + (numberFromCell(row?.[header]) ?? 0), 0));
+}
+
+function wantsColumnSummary(userText = "") {
+  const q = normalizeToolIntentText(userText);
+  return /kolon toplam|sutun toplam|sütun toplam|kolonlari|kolonları|sutunlari|sütunları|ozet|özet|metrik|metrikleri|numeric kolon|sayisal kolon|sayısal kolon/.test(q)
+    || /(metrik|kolon|sutun|sütun).*(karsilastir|karşılaştır)/.test(q);
+}
+
+function tableToColumnSummaryInput(table) {
+  const nums = numericHeaders(table);
+  if (nums.length < 2) return null;
+  return {
+    labels: nums,
+    values: columnTotalsByHeaders(table, nums),
+    label: "Kolon Toplamları",
+  };
 }
 
 function tableToPieInput(table, userText = "") {
@@ -130,6 +170,11 @@ function tableToPieInput(table, userText = "") {
 
   // Aylık gelir/gider tablosu gibi: ilk satır/ay üzerinden kategori dağılımı istenebilir.
   // "gider" denmişse gider sütunlarını kategori olarak topla. "gelir" denmişse gelir sütunlarını topla.
+  if (wantsColumnSummary(userText)) {
+    const columnSummary = tableToColumnSummaryInput(table);
+    if (columnSummary) return columnSummary;
+  }
+
   const exp = expenseHeaders(table);
   const inc = incomeHeaders(table);
   if (q.includes("gider") && exp.length >= 2) {
@@ -173,6 +218,11 @@ function tableToLineInput(table, userText = "") {
   }
 
   // "gider trendi" için giderleri satır bazında topla.
+  if (wantsColumnSummary(userText)) {
+    const columnSummary = tableToColumnSummaryInput(table);
+    if (columnSummary) return columnSummary;
+  }
+
   const exp = expenseHeaders(table);
   if (q.includes("gider") && exp.length >= 2) {
     return {
@@ -213,6 +263,10 @@ function tableToBarInput(table, userText = "") {
       values: columnTotalsByHeaders(table, monthHeaders),
       label: "Aylık Toplam",
     };
+  }
+  if (wantsColumnSummary(userText)) {
+    const columnSummary = tableToColumnSummaryInput(table);
+    if (columnSummary) return columnSummary;
   }
   const valueKey = chooseValueHeader(table, userText, "bar");
   if (!valueKey) return null;
