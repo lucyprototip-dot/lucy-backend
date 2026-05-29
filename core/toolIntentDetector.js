@@ -1,4 +1,4 @@
-const { normalizeToolIntentText, detectColorPalette } = require("./intentNormalizer");
+const { normalizeToolIntentText } = require("./intentNormalizer");
 
 function decodeHtmlEntities(value = "") {
   return String(value || "")
@@ -50,12 +50,7 @@ function wantsZipFromText(text = "") {
 
 function wantsChartFromText(text = "") {
   const q = normalizeIntentText(text);
-  const palette = detectColorPalette(text);
-  const chartWords = /grafik|chart|pasta grafik|pasta olarak|pasta yap|pie chart|yuvarlak grafik|yuvarlak pasta|daire grafik|dilimli grafik|renkli dagilim|dagilim|cizgi grafik|trend grafik|bar grafik|sutun grafik|cubuk grafik|doughnut|donut|cizelge|gorsellestir|görselleştir|renkli pasta/.test(q);
-  const styleAction = /\b(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|pastel|neon|siyah beyaz|monokrom)\b.*\b(yap|olsun|degistir|değiştir|cevir|donustur|kullan|uygula)\b/.test(q);
-  const explicitPaletteAction = palette.requested && /\b(bunu|bunun|buna|bundaki|son|grafik|chart|renkleri|renklerini)\b/.test(q) && /\b(yap|olsun|degistir|değiştir|kullan|uygula|cevir|donustur)\b/.test(q);
-  return chartWords || styleAction || explicitPaletteAction
-    || /pastel renk|pastel renklerde|pastel yap|renklerini degistir|renkleri degistir|renk degistir|renklendir|tema degistir|stil degistir|palet degistir|renkli yap/.test(q);
+  return /grafik|chart|pasta grafik|pasta olarak|pasta yap|pie chart|yuvarlak grafik|yuvarlak pasta|daire grafik|dilimli grafik|renkli dagilim|dagilim|pastel renk|pastel renklerde|pastel yap|cizgi grafik|trend grafik|bar grafik|sutun grafik|cubuk grafik|doughnut|donut|cizelge|gorsellestir|görselleştir|renkli pasta|renklerini degistir|renkleri degistir|renk degistir|renklendir|tema degistir|stil degistir|palet degistir|renkli yap/.test(q);
 }
 
 function wantsDocumentFromText(text = "") {
@@ -66,7 +61,7 @@ function wantsDocumentFromText(text = "") {
     /\b(txt dosya|markdown dosya|md dosya|docx belge|belge olustur|belge hazirla|metin belgesi|dosya yap|dosya hazirla|dosya olarak kaydet|dosya olarak ver|csv dosya|json dosya|html dosya)\b/.test(q)
     || /\b(word|docx|belge|txt|markdown|md|csv|json|html)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|cikar|çıkar|donustur|cevir)\b/.test(q)
     || /\b(bunu|sunlari|metni|icerigi|tabloyu|onceki|son)\b.*\b(word|docx|belge|txt|markdown|md|csv|json|html)\b/.test(q)
-  );
+  ) && !wantsPdfFromText(q) && !wantsExcelFromText(q) && !wantsZipFromText(q);
 }
 
 function wantsQrFromText(text = "") {

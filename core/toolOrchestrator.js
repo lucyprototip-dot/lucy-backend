@@ -378,7 +378,6 @@ function enrichToolCallInput(call, req) {
       input.text = memory.lastText;
     }
   }
-  if (toolName === "excel" && !input.userText) input.userText = userText;
 
   if (toolName === "pdf" && !String(input.text || input.content || input.value || "").trim()) {
     const active = resolveActiveContent(req);
@@ -529,8 +528,7 @@ function requestedMermaidWork(req) {
 
 function styleMutationText(userText = "") {
   const q = normalizeIntentText(userText);
-  const palette = detectColorPalette(userText);
-  return palette.requested || /\b(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|kirmizi|mavi|mor|pembe|gri|yesil|turuncu|neon|pastel|premium|modern|canli|farkli ton|tonlarda|koyu|acik|açık|kurumsal)\b/.test(q);
+  return /\b(renk|renkli|renklerini|renkleri|renklendir|palet|palette|tema|stil|sari|lacivert|beyaz|siyah|neon|pastel|premium|modern|canli|farkli ton|tonlarda)\b/.test(q);
 }
 
 function explicitChartTypeFromText(userText = "") {
@@ -557,12 +555,10 @@ function userStyleMutationOnly(userText = "") {
 
 function classifyBunuXIntent(userText = "") {
   const q = normalizeIntentText(userText);
-  const explicitType = explicitChartTypeFromText(q);
   if (wantsPdfFromText(q) || wantsExcelFromText(q) || wantsZipFromText(q) || wantsDocumentFromText(q)) return "file_format";
   if (/\btablo\b.*\b(yap|goster|göster|cevir|çevir|donustur|dönüştür)\b|\btablo yap\b/.test(q)) return "output_table";
-  // “Bunu X renk yap” cümlesinde X renk/stildir; chart kelimesi geçmiyorsa tip değişmez.
-  if (styleMutationText(q) && !explicitType) return "style_change";
-  if (wantsChartFromText(q) || explicitType) return "output_chart";
+  if (wantsChartFromText(q) || explicitChartTypeFromText(q)) return "output_chart";
+  if (styleMutationText(q)) return "style_change";
   if (/\b(profesyonel|premium|modern|daha iyi|duzenle|düzenle|iyilestir|iyileştir)\b/.test(q)) return "quality_change";
   return "unknown";
 }
@@ -730,7 +726,7 @@ function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
   if (tool === "time") return wantsTimeFromText(userText);
   if (tool === "webfetch") return wantsWebFetchFromText(userText);
   if (tool === "ocr") return wantsOcrFromText(userText);
-  if (tool === "chartdata") return (wantsChartFromText(userText) || isStyleOnlyChartModify(userText, hydrateMemoryFromRequest(req))) && !isChartExportOnlyRequest(userText);
+  if (tool === "chartdata") return wantsChartFromText(userText) && !isChartExportOnlyRequest(userText);
   if (tool === "mermaid") return wantsMermaidFromText(userText);
   if (tool === "excel") return wantsExcelFromText(userText);
   if (tool === "pdf") return wantsPdfFromText(userText);
@@ -784,12 +780,7 @@ function validateToolInput(call = {}, req = null) {
 
   if (tool === "pdf") {
     const hasText = String(input.text || input.content || input.value || "").trim();
-    const hasChart = Boolean(input.chart || input.chartData || input.data?.labels);
-    const hasMermaid = Boolean(String(input.mermaid || input.code || "").trim());
-    const hasRows = Array.isArray(input.rows) && input.rows.length;
-    if (!hasText && !hasChart && !hasMermaid && !hasRows && !memory.lastTable?.rows?.length && !memory.lastText && !memory.lastChart?.data && !memory.lastMermaid?.code) {
-      return fail("PDF için önce metin, tablo, grafik veya rapor içeriği gerekli aşkım.", "pdf_source_required");
-    }
+    if (!hasText && !memory.lastTable?.rows?.length && !memory.lastText) return fail("PDF için önce metin, tablo veya rapor içeriği gerekli aşkım.", "pdf_source_required");
   }
 
   if (tool === "ocr") {
@@ -840,8 +831,8 @@ function validateToolInput(call = {}, req = null) {
 //  ChatGPT benzeri "bunu excel/pdf/zip/grafik yap" zinciri.
 // ============================================================
 const TOOL_MEMORY_MAX = Number(process.env.LUCY_TOOL_MEMORY_MAX || 120);
-const CONTENT_HISTORY_MAX = Number(process.env.LUCY_CONTENT_HISTORY_MAX || 520);
-const HYDRATE_MESSAGE_MAX = Number(process.env.LUCY_HYDRATE_MESSAGE_MAX || 520);
+const CONTENT_HISTORY_MAX = Number(process.env.LUCY_CONTENT_HISTORY_MAX || 260);
+const HYDRATE_MESSAGE_MAX = Number(process.env.LUCY_HYDRATE_MESSAGE_MAX || 240);
 const toolMemoryByChat = new Map();
 
 function newToolMemory() {
@@ -868,11 +859,28 @@ function newToolMemory() {
 
 function conversationKey(req) {
   const body = req?.body || {};
-  return String(
+  const explicit = (
     body.chatId || body.conversationId || body.threadId || body.sessionId ||
     body.activeChatId || body.activeChat?.id || body.currentChatId ||
-    body.projectId || body.activeProject?.id || "default"
+    body.projectId || body.activeProject?.id || body.userId || body.user?.id
   );
+  if (explicit) return String(explicit);
+
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const fingerprintSource = messages.slice(-8).map((message) => ({
+    role: message?.role || message?.sender || "",
+    text: messageText(message).slice(0, 2000),
+  }));
+  if (fingerprintSource.length) {
+    const hash = crypto
+      .createHash("sha1")
+      .update(JSON.stringify(fingerprintSource))
+      .digest("hex")
+      .slice(0, 16);
+    return `transient:${hash}`;
+  }
+
+  return `transient:${req?.ip || req?.socket?.remoteAddress || "anonymous"}`;
 }
 
 function compactToolMemoryStore() {
@@ -1141,10 +1149,37 @@ function activeContentToText(content = {}, fallback = "") {
   return String(content.text || fallback || "").trim();
 }
 
+function inlineContentFromToolRequest(userText = "") {
+  const raw = String(userText || "").trim();
+  if (!raw) return "";
+
+  const colonIndex = raw.indexOf(":");
+  if (colonIndex > 0) {
+    const before = raw.slice(0, colonIndex);
+    const after = raw.slice(colonIndex + 1).trim();
+    if (after && currentUserHasClearAction(before)) return stripToolNoise(after);
+  }
+
+  const quoted = raw.match(/[“"']([^“"']{2,4000})[”"']/);
+  if (quoted?.[1] && currentUserHasClearAction(raw.replace(quoted[0], ""))) {
+    return stripToolNoise(quoted[1].trim());
+  }
+
+  return "";
+}
+
 function resolveActiveContent(req, answer = "") {
   const memory = hydrateMemoryFromRequest(req);
   const userText = latestUserIntentText(req);
   const answerText = stripToolNoise(answer);
+
+  const inlineContent = inlineContentFromToolRequest(userText);
+  if (inlineContent) {
+    const table = parseFirstMarkdownTableObject(inlineContent) || parseLooseInlineTableObject(inlineContent);
+    return table
+      ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(inlineContent, "LUCY Tablosu"), source: "user-inline" }
+      : { type: "text", text: inlineContent, title: contentTitleFromText(inlineContent, "LUCY İçeriği"), source: "user-inline" };
+  }
 
   // Aynı mesajda uzun içerik/metin verildiyse öncelik kullanıcının son içeriği.
   if (!isOnlyTransformCommand(userText) && (String(userText).length > 90 || /\n/.test(userText) || hasMarkdownTable(userText))) {
@@ -1165,11 +1200,6 @@ function resolveActiveContent(req, answer = "") {
   const preferred = transformPrefersTypedSource(userText);
   const typed = typedContentFromMemory(memory, preferred);
   if (typed) return typed;
-
-  if (userReferencesAssistantTable(userText)) {
-    const fromHistory = tableFromHistory(memory, userText);
-    if (fromHistory?.rows?.length) return { type: "table", table: fromHistory, text: tableToMarkdown(fromHistory), title: "LUCY Tablosu", source: "referenced-table" };
-  }
 
   // "bunu pdf/docx/txt yap" gibi genel dönüşümlerde en son gerçek asistan metni
   // aktif tool tablosundan daha değerlidir. Bu, textStats çıktısının şiiri ezmesini engeller.
@@ -1250,12 +1280,6 @@ function isToolGeneratedAnswerText(text = "") {
   if (rawMermaidLike) return true;
 
   return false;
-}
-
-function userReferencesAssistantTable(userText = "") {
-  const q = normalizeIntentText(userText);
-  return /(senin|yazdigin|yazdığın|yaptigin|yaptığın|ilk|birinci|onceki|önceki|az onceki|son|bu|bunu|tablo|6x6|pazar listesi)/.test(q)
-    && /(tablo|liste|emoji|emojileri|gorsel|görsel|grafik|excel|pdf|duzenle|düzenle|ekle|renk|stil)/.test(q);
 }
 
 function transformPrefersTypedSource(userText = "") {
@@ -1455,6 +1479,9 @@ function latestUsefulConversationContent(req, answer = "") {
   const userText = latestUserIntentText(req);
   const answerText = stripToolNoise(answer);
   const previousAssistant = latestAssistantContent(req);
+
+  const inlineContent = inlineContentFromToolRequest(userText);
+  if (inlineContent) return inlineContent;
 
   // Kullanıcı aynı mesajda içerik verdiyse onu önceliklendir: "şunu pdf yap: ..."
   const userHasInlineContent = String(userText || "").length > 90 || /\n/.test(userText) || /\|.+\|/.test(userText);
@@ -2150,7 +2177,6 @@ function actionSuffixFromText(text = "") {
   if (wantsZipFromText(q)) return "zip yap";
   if (wantsDocumentFromText(q)) return documentFormatFromText(q) === "docx" ? "word yap" : `${documentFormatFromText(q)} dosyası yap`;
   if (/\btablo\b.*\b(yap|goster|göster|cevir|çevir|donustur|dönüştür)\b|\btablo yap\b/.test(q)) return "tablo yap";
-  if (styleMutationText(q) && !explicitChartTypeFromText(q)) return "renklerini değiştir";
   if (wantsChartFromText(q)) return "grafik yap";
   if (wantsMermaidFromText(q)) return "diyagram yap";
   return "";
@@ -2169,7 +2195,7 @@ function sourcePrefixFromText(text = "") {
 function currentUserHasClearAction(text = "") {
   const q = normalizeIntentText(text);
   return wantsPdfFromText(q) || wantsExcelFromText(q) || wantsZipFromText(q) || wantsDocumentFromText(q)
-    || wantsChartFromText(q) || wantsMermaidFromText(q) || styleMutationText(q)
+    || wantsChartFromText(q) || wantsMermaidFromText(q)
     || /\btablo\b.*\b(yap|goster|göster|cevir|çevir|donustur|dönüştür)\b|\btablo yap\b/.test(q);
 }
 
@@ -2228,7 +2254,7 @@ function shouldAskClarificationWithoutAi(req) {
   const text = normalizeIntentText(latestUserIntentText(req));
   if (!text) return "";
   const vagueRef = /\b(bunu|onu|şunu|sunu|bu|o|son|en son|az onceki|az önceki|ilk|onceki|önceki)\b/.test(text);
-  const mutation = styleMutationText(text) || /\b(renk|renkli|pastel|neon|kalin|kalın|cizgili|çizgili|degistir|değiştir|duzenle|düzenle|pdf yap|excel yap|word yap|zip yap|grafik yap|tablo yap)\b/.test(text);
+  const mutation = /\b(renk|renkli|pastel|neon|kalin|kalın|cizgili|çizgili|degistir|değiştir|duzenle|düzenle|pdf yap|excel yap|word yap|zip yap|grafik yap|tablo yap)\b/.test(text);
   if (!vagueRef || !mutation) return "";
   const memory = hydrateMemoryFromRequest(req);
   if (memory.activeContent?.type === "chart" && memory.lastChart?.data && userStyleMutationOnly(text)) return "";
