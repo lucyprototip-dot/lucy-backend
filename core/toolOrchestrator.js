@@ -58,7 +58,7 @@ const {
   chartUiFromMemory,
   mermaidUiFromMemory,
 } = require("./chartMermaidEngine");
-const { buildUnderstandingFrame } = require("./understandingFrame");
+const { buildUnderstandingFrame, frameSuggestedToolPermission } = require("./understandingFrame");
 
 dotenv.config();
 
@@ -753,7 +753,7 @@ function isUsableToolCall(call = {}) {
   return true;
 }
 
-function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
+function legacyToolCallAllowedByCurrentIntent(call = {}, req = null) {
   const tool = normalizeToolName(call.tool || "");
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
@@ -791,6 +791,38 @@ function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
   if (tool === "filemanager") return wantsFileManagerFromText(userText);
 
   return explicitToolAction(userText, tool);
+}
+
+function recordPermissionFrameDebug(call = {}, req = null, oldPermissionDecision = false) {
+  if (!req || typeof req !== "object") return;
+  const tool = normalizeToolName(call.tool || "");
+  const frame = req.__lucyUnderstandingFrame || buildUnderstandingFrame(req, {});
+  req.__lucyUnderstandingFrame = frame;
+  const suggested = frameSuggestedToolPermission(frame, tool);
+  const oldDecision = Boolean(oldPermissionDecision);
+  const frameDecision = Boolean(suggested.allow);
+  const mismatch = oldDecision !== frameDecision;
+  if (!Array.isArray(req.__lucyPermissionDebug)) req.__lucyPermissionDebug = [];
+  req.__lucyPermissionDebug.push({
+    tool,
+    oldPermissionDecision: oldDecision,
+    frameSuggestedPermission: frameDecision,
+    mismatch,
+    mismatchReason: mismatch
+      ? `legacy_${oldDecision ? "allowed" : "blocked"}__frame_${frameDecision ? "allowed" : "blocked"}__${suggested.reason || "no_reason"}`
+      : "",
+    frameReason: suggested.reason || "",
+    frameIntent: frame.primaryIntent,
+    frameUtteranceType: frame.utteranceType,
+    frameOutputTargets: frame.outputTargets || [],
+    frameSourceRequirement: frame.sourceRequirement,
+  });
+}
+
+function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
+  const oldPermissionDecision = legacyToolCallAllowedByCurrentIntent(call, req);
+  recordPermissionFrameDebug(call, req, oldPermissionDecision);
+  return oldPermissionDecision;
 }
 
 

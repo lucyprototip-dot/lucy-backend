@@ -246,6 +246,102 @@ function buildUnderstandingFrame(req = {}, memory = {}) {
   };
 }
 
+function canonicalPermissionTool(tool = "") {
+  const compact = String(tool || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return {
+    chart: "chartdata",
+    chartdata: "chartdata",
+    chartData: "chartdata",
+    file: "filemanager",
+    files: "filemanager",
+    filemanager: "filemanager",
+    web: "webfetch",
+    webfetch: "webfetch",
+    textstats: "textstats",
+    stats: "textstats",
+  }[compact] || compact;
+}
+
+function targetForTool(tool = "") {
+  return {
+    calculator: "calculator",
+    chartdata: "chart",
+    document: "document",
+    excel: "excel",
+    filemanager: "fileManager",
+    mail: "mail",
+    mermaid: "mermaid",
+    ocr: "ocr",
+    pdf: "pdf",
+    qr: "qr",
+    telegram: "telegram",
+    textstats: "textStats",
+    time: "time",
+    webfetch: "webFetch",
+    whatsapp: "whatsapp",
+    zip: "zip",
+  }[canonicalPermissionTool(tool)] || "";
+}
+
+function frameSuggestedToolPermission(frame = {}, tool = "") {
+  const canonicalTool = canonicalPermissionTool(tool);
+  const target = targetForTool(canonicalTool);
+  const targets = new Set(Array.isArray(frame.outputTargets) ? frame.outputTargets : []);
+  const intent = String(frame.primaryIntent || "unknown");
+  const source = String(frame.sourceRequirement || "none");
+
+  if (!String(frame.userText || "").trim()) {
+    return { allow: false, reason: "empty_user_text" };
+  }
+
+  if (intent === "chat") {
+    return { allow: false, reason: "chat_intent" };
+  }
+
+  if (intent === "search_research") {
+    return { allow: false, reason: "research_intent_not_generation_tool" };
+  }
+
+  if (intent === "read_extract") {
+    const allow = (
+      (canonicalTool === "ocr" && source === "image")
+      || (canonicalTool === "filemanager" && source === "file_content")
+      || (canonicalTool === "webfetch" && source === "web_page")
+      || canonicalTool === "textstats"
+    );
+    return { allow, reason: allow ? "read_extract_source_tool" : "read_extract_blocks_generation_tool" };
+  }
+
+  if (intent === "live_data") {
+    const allow = canonicalTool === "time" && targets.has("time");
+    return { allow, reason: allow ? "live_time_target" : "live_data_requires_matching_tool" };
+  }
+
+  if (intent === "communication") {
+    const allow = ["mail", "whatsapp", "telegram"].includes(canonicalTool) && targets.has(target);
+    return { allow, reason: allow ? "communication_target" : "communication_requires_matching_channel" };
+  }
+
+  if (intent === "style_only") {
+    const allow = canonicalTool === "chartdata" && targets.has("chart");
+    return { allow, reason: allow ? "style_only_chart_target" : "style_only_requires_chart" };
+  }
+
+  if (intent === "export") {
+    const allow = Boolean(target && targets.has(target));
+    return { allow, reason: allow ? "export_target_match" : "export_target_mismatch" };
+  }
+
+  if (["transform_filter", "tool_action", "multi_step_task", "compute"].includes(intent)) {
+    const allow = Boolean(target && targets.has(target));
+    return { allow, reason: allow ? "task_target_match" : "task_target_mismatch" };
+  }
+
+  const allow = Boolean(target && targets.has(target));
+  return { allow, reason: allow ? "output_target_match" : "no_frame_permission_signal" };
+}
+
 module.exports = {
   buildUnderstandingFrame,
+  frameSuggestedToolPermission,
 };
