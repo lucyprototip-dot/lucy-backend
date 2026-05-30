@@ -58,6 +58,7 @@ const {
   chartUiFromMemory,
   mermaidUiFromMemory,
 } = require("./chartMermaidEngine");
+const { buildUnderstandingFrame } = require("./understandingFrame");
 
 dotenv.config();
 
@@ -2717,9 +2718,12 @@ function buildToolFinalAnswer(toolResults = []) {
 }
 
 async function executeToolCallsFromAnswer(answer = "", req) {
-  hydrateMemoryFromRequest(req);
+  const memory = hydrateMemoryFromRequest(req);
   const clarifiedIntent = resolveClarificationFollowUpText(req);
   if (clarifiedIntent) req.__lucyEffectiveUserText = clarifiedIntent;
+  if (req && typeof req === "object") {
+    req.__lucyUnderstandingFrame = buildUnderstandingFrame(req, memory);
+  }
   const userText = latestUserIntentText(req);
   const aiDecision = await buildAiPlannerDecision(req);
 
