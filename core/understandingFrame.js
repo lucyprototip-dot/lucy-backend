@@ -138,7 +138,8 @@ function referencesFromText(text = "") {
   const targetTypes = [];
   if (/\b(tablo|tabloyu|dataset|veri|liste)\b/.test(q)) targetTypes.push("table");
   if (/\b(grafik|grafigi|chart|pasta|pie|cizgi|bar|sutun|cubuk)\b/.test(q)) targetTypes.push("chart");
-  if (/\b(dosya|dosyayi|pdfi|exceli|zipi|word|docx)\b/.test(q)) targetTypes.push("file");
+  if (/\b(dosya|dosyayi|pdfi|exceli|zipi|wordu|docxu)\b/.test(q)
+    || /\b(bu|son|onceki|az onceki)\s+(pdf|excel|zip|word|docx)\b/.test(q)) targetTypes.push("file");
   if (/\b(metin|yazi|icerik|cevap)\b/.test(q)) targetTypes.push("text");
 
   let ordinal = "";

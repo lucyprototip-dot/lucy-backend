@@ -1408,6 +1408,110 @@ function activeContentToText(content = {}, fallback = "") {
   return String(content.text || fallback || "").trim();
 }
 
+function artifactDebugSummary(content = null, source = "") {
+  if (!content || typeof content !== "object") return null;
+  const type = String(content.type || (content.table ? "table" : content.chart || content.data ? "chart" : content.file || content.storedFilename || content.filename ? "file" : content.text ? "text" : "")).toLowerCase();
+  if (!type) return null;
+  const table = activeContentTable(content);
+  const chart = content.chart || content.ui || (content.data ? content : null);
+  const file = content.file || content;
+  const text = activeContentToText(content, "");
+  return {
+    type,
+    source: source || content.source || "",
+    title: content.title || chart?.title || file?.filename || file?.storedFilename || "",
+    tableRows: table?.rows?.length || 0,
+    chartLabels: chart?.data?.labels?.length || 0,
+    filename: file?.filename || file?.storedFilename || "",
+    textPreview: type === "text" || text ? String(text || "").replace(/\s+/g, " ").slice(0, 120) : "",
+  };
+}
+
+function artifactDebugKey(summary = null) {
+  if (!summary) return "";
+  return [
+    summary.type || "",
+    summary.source || "",
+    summary.title || "",
+    summary.filename || "",
+    summary.tableRows || 0,
+    summary.chartLabels || 0,
+    summary.textPreview || "",
+  ].join("|");
+}
+
+function frameSuggestedArtifactForDebug(frame = {}, memory = {}, req = null) {
+  const refs = frame.references || {};
+  const targetTypes = Array.isArray(refs.targetTypes) ? refs.targetTypes : [];
+  const targets = new Set(Array.isArray(frame.outputTargets) ? frame.outputTargets : []);
+  const sourceRequirement = String(frame.sourceRequirement || "");
+  const userText = String(frame.userText || "");
+
+  if (targetTypes.includes("chart") || sourceRequirement === "chart") {
+    const chart = chartFromHistory(memory, userText) || memory.lastChart;
+    if (chart?.data) return artifactDebugSummary({ type: "chart", chart, title: chart.title || "Grafik", source: "frame-chart" });
+  }
+
+  if (targetTypes.includes("table") || sourceRequirement === "table_or_dataset" || sourceRequirement === "table_or_numeric_data") {
+    const latestAssistant = latestAssistantContentObject(req);
+    const table = tableFromHistory(memory, userText) || activeContentTable(memory.activeContent) || activeContentTable(latestAssistant) || memory.lastTable;
+    if (table?.rows?.length) return artifactDebugSummary({ type: "table", table, title: "LUCY Tablosu", source: "frame-table" });
+  }
+
+  if (targetTypes.includes("file") || sourceRequirement === "generated_file" || (targets.has("zip") && !targetTypes.includes("chart") && !targetTypes.includes("table"))) {
+    const file = selectGeneratedFileFromMemory(userText, memory, req, { allowZip: false }) || memory.lastFile;
+    if (file?.storedFilename || file?.filename) return artifactDebugSummary({ type: "file", file, title: file.filename || file.storedFilename, source: "frame-file" });
+  }
+
+  if (targetTypes.includes("text")) {
+    const text = memory.activeContent?.type === "text" ? memory.activeContent.text : memory.lastText;
+    if (String(text || "").trim()) return artifactDebugSummary({ type: "text", text, title: "LUCY Metni", source: "frame-text" });
+  }
+
+  if (sourceRequirement === "active_artifact" || sourceRequirement === "working_artifact_chain") {
+    if (memory.activeContent) return artifactDebugSummary(memory.activeContent, "frame-activeContent");
+    const latestAssistant = latestAssistantContentObject(req);
+    if (latestAssistant) return artifactDebugSummary(latestAssistant, "frame-latestAssistant");
+    if (memory.lastChart?.data) return artifactDebugSummary({ type: "chart", chart: memory.lastChart, title: memory.lastChart.title || "Grafik", source: "frame-lastChart" });
+    if (memory.lastTable?.rows?.length) return artifactDebugSummary({ type: "table", table: memory.lastTable, title: "LUCY Tablosu", source: "frame-lastTable" });
+    if (memory.lastFile?.storedFilename || memory.lastFile?.filename) return artifactDebugSummary({ type: "file", file: memory.lastFile, title: memory.lastFile.filename || memory.lastFile.storedFilename, source: "frame-lastFile" });
+    if (memory.lastText) return artifactDebugSummary({ type: "text", text: memory.lastText, title: "LUCY Metni", source: "frame-lastText" });
+  }
+
+  return null;
+}
+
+function referenceMismatchReason(legacy = null, suggested = null) {
+  if (!legacy && suggested) return "legacy_missing__frame_found_artifact";
+  if (legacy && !suggested) return "legacy_found__frame_missing_artifact";
+  if (!legacy && !suggested) return "";
+  if (legacy?.type !== suggested?.type) return `type_mismatch__legacy_${legacy?.type || "none"}__frame_${suggested?.type || "none"}`;
+  if ((legacy?.filename || "") !== (suggested?.filename || "")) return "file_mismatch";
+  if ((legacy?.tableRows || 0) !== (suggested?.tableRows || 0)) return "table_row_count_mismatch";
+  if ((legacy?.chartLabels || 0) !== (suggested?.chartLabels || 0)) return "chart_label_count_mismatch";
+  if (legacy?.type === "text" && (legacy?.textPreview || "") !== (suggested?.textPreview || "")) return "content_preview_mismatch";
+  if (legacy?.type === "table" && suggested?.type === "table" && (legacy?.textPreview || "") && (suggested?.textPreview || "") && legacy.textPreview !== suggested.textPreview) return "content_preview_mismatch";
+  return "";
+}
+
+function recordReferenceFrameDebug(req = null, memory = {}, legacyArtifact = null) {
+  if (!req || typeof req !== "object") return;
+  const frame = req.__lucyUnderstandingFrame || buildUnderstandingFrame(req, memory);
+  req.__lucyUnderstandingFrame = frame;
+  const legacyResolvedArtifact = artifactDebugSummary(legacyArtifact, legacyArtifact?.source || "legacy-resolveActiveContent");
+  const frameSuggestedArtifact = frameSuggestedArtifactForDebug(frame, memory, req);
+  const mismatchReason = referenceMismatchReason(legacyResolvedArtifact, frameSuggestedArtifact);
+  req.__lucyReferenceDebug = {
+    rawReferenceText: frame.userText || latestUserIntentText(req),
+    frameReferences: frame.references || {},
+    legacyResolvedArtifact,
+    frameSuggestedArtifact,
+    mismatch: Boolean(mismatchReason),
+    mismatchReason,
+    confidence: frame.confidence,
+  };
+}
+
 function inlineContentFromToolRequest(userText = "") {
   const raw = String(userText || "").trim();
   if (!raw) return "";
@@ -2756,6 +2860,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   if (req && typeof req === "object") {
     req.__lucyUnderstandingFrame = buildUnderstandingFrame(req, memory);
   }
+  recordReferenceFrameDebug(req, memory, resolveActiveContent(req, answer));
   const userText = latestUserIntentText(req);
   const aiDecision = await buildAiPlannerDecision(req);
 
