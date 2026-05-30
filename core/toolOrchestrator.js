@@ -371,11 +371,16 @@ function enrichToolCallInput(call, req) {
   const userText = latestUserIntentText(req);
 
   if (toolName === "excel" && !(Array.isArray(input.rows) && input.rows.length) && !String(input.text || input.content || input.value || "").trim()) {
-    const selectedTable = rankedSubsetTableForIntent(memory.lastTable, userText);
+    const active = resolveActiveContent(req);
+    const activeText = activeContentToText(active, "");
+    const activeTable = chartableTableFromContent(active);
+    const selectedTable = rankedSubsetTableForIntent(activeTable || (shouldBlockStaleArtifactFallback(memory, userText) ? null : memory.lastTable), userText);
     if (selectedTable?.rows?.length) {
       input.rows = selectedTable.rows;
       input.headers = selectedTable.headers;
       input.title = input.title || "LUCY Tablosu";
+    } else if (activeText) {
+      input.text = activeText;
     } else if (memory.lastText) {
       input.text = memory.lastText;
     }
@@ -395,6 +400,8 @@ function enrichToolCallInput(call, req) {
   if (toolName === "chartdata") {
     const inlineTable = parseInlineTableObject(userText);
     const blockStaleArtifactFallback = shouldBlockStaleArtifactFallback(memory, userText);
+    const active = resolveActiveContent(req);
+    const activeTable = chartableTableFromContent(active);
     const styleOnly = userStyleMutationOnly(userText) && !inlineTable;
     const selectedChart = blockStaleArtifactFallback ? null : (chartFromHistory(memory, userText) || memory.lastChart);
 
@@ -423,9 +430,9 @@ function enrichToolCallInput(call, req) {
     input.chartType = explicitChartTypeFromText(userText) || input.chartType || input.type || "bar";
 
     const sourceHint = String(input.source || "").toLowerCase();
-    const shouldRecomputeTableChart = Boolean(inlineTable || (!blockStaleArtifactFallback && /lasttable|table|tablo/.test(sourceHint) && (memory.lastTable?.rows?.length || tableFromHistory(memory, userText)?.rows?.length)));
+    const shouldRecomputeTableChart = Boolean(inlineTable || activeTable?.rows?.length || (!blockStaleArtifactFallback && /lasttable|table|tablo/.test(sourceHint) && (memory.lastTable?.rows?.length || tableFromHistory(memory, userText)?.rows?.length)));
     if (shouldRecomputeTableChart) {
-      const selectedTableRaw = rankedSubsetTableForIntent(inlineTable || (blockStaleArtifactFallback ? null : memory.lastTable) || (blockStaleArtifactFallback ? null : tableFromHistory(memory, userText)), userText);
+      const selectedTableRaw = rankedSubsetTableForIntent(inlineTable || activeTable || (blockStaleArtifactFallback ? null : memory.lastTable) || (blockStaleArtifactFallback ? null : tableFromHistory(memory, userText)), userText);
       const tablePalette = paletteFromTable(selectedTableRaw);
       const chartInput = selectedTableRaw?.rows?.length ? tableToChartInput(selectedTableRaw, userText) : null;
       if (chartInput) {
@@ -440,10 +447,14 @@ function enrichToolCallInput(call, req) {
     }
 
     if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
-      const selectedTableRaw = rankedSubsetTableForIntent(inlineTable || (blockStaleArtifactFallback ? null : memory.lastTable) || (blockStaleArtifactFallback ? null : tableFromHistory(memory, userText)), userText);
+      const selectedTableRaw = rankedSubsetTableForIntent(inlineTable || activeTable || (blockStaleArtifactFallback ? null : memory.lastTable) || (blockStaleArtifactFallback ? null : tableFromHistory(memory, userText)), userText);
       const tablePalette = paletteFromTable(selectedTableRaw);
       const selectedTable = tablePalette && selectedChart?.data ? null : selectedTableRaw;
-      const preferExistingChart = !inlineTable && (userSpecificallyReferencesChart(userText) || tablePalette || isStyleOnlyChartModify(userText, memory)) && selectedChart?.data;
+      const activeIsChart = active?.type === "chart" && (active.chart?.data || active.ui?.data);
+      const preferExistingChart = !selectedTable?.rows?.length
+        && !inlineTable
+        && selectedChart?.data
+        && (activeIsChart || explicitHistoricalArtifactReference(userText) || tablePalette || isStyleOnlyChartModify(userText, memory));
       const chartInput = preferExistingChart
         ? chartToChartInput(selectedChart, userText)
         : selectedTable?.rows?.length
@@ -541,6 +552,7 @@ function latestUserIntentText(req) {
 function requestedToolWork(req) {
   const userText = latestUserIntentText(req);
   if (classifySemanticIntent(userText, hydrateMemoryFromRequest(req)) === "search_research") return false;
+  if (wantsTimeFromText(userText)) return true;
   return isHardToolRequest(userText) && likelyToolIntent(userText);
 }
 
@@ -762,7 +774,7 @@ function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
   if (tool === "webfetch") return wantsWebFetchFromText(userText);
   if (tool === "ocr") return wantsOcrFromText(userText);
   if (tool === "chartdata") {
-    if (shouldBlockStaleArtifactFallback(memory, userText)) return false;
+    if (shouldBlockStaleArtifactFallback(memory, userText) && !parseInlineTableObject(userText) && !chartableTableFromContent(memory.activeContent)?.rows?.length) return false;
     return (wantsChartFromText(userText) || isStyleOnlyChartModify(userText, memory)) && !isChartExportOnlyRequest(userText);
   }
   if (tool === "mermaid") return wantsMermaidFromText(userText);
@@ -1081,12 +1093,65 @@ function isMultiStepCommandText(text = "") {
   return commandLines >= 2 && commandLines / lines.length >= 0.6;
 }
 
+function numericFactIntentText(value = "") {
+  return normalizeIntentText(value)
+    .replace(/[ıİ]/g, "i")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[çÇ]/g, "c")
+    .replace(/[ğĞ]/g, "g")
+    .replace(/[öÖ]/g, "o")
+    .replace(/[şŞ]/g, "s")
+    .replace(/[üÜ]/g, "u")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseNumericFactTableObject(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw || isMultiStepCommandText(raw)) return null;
+  const normalized = numericFactIntentText(raw);
+  if (!/\b(nufus(?:u)?|population)\b/.test(normalized)) return null;
+
+  const rows = [];
+  const seen = new Set();
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines.length ? lines : [raw]) {
+    const q = numericFactIntentText(line);
+    const match = q.match(/([a-z0-9 .'-]{2,80}?)\s+nufus(?:u)?\s+(?:yaklasik|ortalama|tahmini)?\s*(-?\d+(?:[.,]\d+)?)(?:\s*(milyon|bin|k|m))?/);
+    if (!match) continue;
+    const subject = String(match[1] || "").replace(/\b(bana|bir|bu|su|şu)\b/g, " ").replace(/\s+/g, " ").trim();
+    const value = [match[2], match[3]].filter(Boolean).join(" ");
+    if (!subject || !value) continue;
+    const key = `${subject}:${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ Etiket: `${subject} nufusu`, "DeÄŸer": value });
+  }
+
+  return rows.length ? { headers: ["Etiket", "DeÄŸer"], rows, source: "numeric-fact" } : null;
+}
+
 function parseInlineTableObject(text = "") {
   const source = String(text || "");
   const table = parseFirstMarkdownTableObject(source) || parseCsvLikeTableObject(source) || parseLooseInlineTableObject(source);
   if (table) return table;
   if (isMultiStepCommandText(source)) return null;
-  return parseInlineKeyValueTableObject(source);
+  return parseInlineKeyValueTableObject(source) || parseNumericFactTableObject(source);
+}
+
+function explicitHistoricalArtifactReference(userText = "") {
+  const q = normalizeIntentText(userText);
+  return /\b(ilk|birinci|onceki|bir onceki|az onceki|son)\b.*\b(tablo|tabloyu|grafik|grafigi|chart|dosya|dosyayi|metin|yazi)\b/.test(q)
+    || /\b(son tablo|son grafik|son dosya|ilk tablo|ilk grafik|onceki tablo|onceki grafik)\b/.test(q);
+}
+
+function genericArtifactFollowUpText(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw || /\n/.test(raw) || explicitHistoricalArtifactReference(raw)) return false;
+  if (parseInlineTableObject(raw)) return false;
+  return isOnlyTransformCommand(raw)
+    || /^(bunu|sunu|onu)?\s*(pdf|excel|xlsx|xls|zip|word|docx|csv|json|html|grafik|chart)\s*(yap|olustur|hazirla|ver|indir|kaydet|cevir|donustur|ciz|goster)?$/.test(normalizeIntentText(raw));
 }
 
 function bareChartFollowUpText(text = "") {
@@ -1110,8 +1175,7 @@ function chartableTableFromContent(content = {}) {
 
 function shouldBlockStaleArtifactFallback(memory = {}, userText = "") {
   if (!memory?.activeContent || memory.activeContent.type !== "text") return false;
-  if (!bareChartFollowUpText(userText)) return false;
-  return !chartableTableFromContent(memory.activeContent)?.rows?.length;
+  return genericArtifactFollowUpText(userText) || bareChartFollowUpText(userText);
 }
 
 function syncRankedSubsetActiveTable(memory = {}, baseTable = null, activeTable = null, title = "LUCY Tablosu") {
@@ -1290,7 +1354,7 @@ function activeContentTable(content = {}) {
   if (!content || typeof content !== "object") return null;
   if (content.type === "table" && content.table?.rows?.length) return content.table;
   if (content.table?.rows?.length) return content.table;
-  if (content.text) return parseFirstMarkdownTableObject(content.text) || parseCsvLikeTableObject(content.text);
+  if (content.text) return parseFirstMarkdownTableObject(content.text) || parseCsvLikeTableObject(content.text) || parseNumericFactTableObject(content.text);
   return null;
 }
 
@@ -1355,7 +1419,7 @@ function resolveActiveContent(req, answer = "") {
 
   // Model bu turda gerçek içerik ürettiyse onu kullan.
   if (answerText && answerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText))) {
-    const table = parseFirstMarkdownTableObject(answerText) || parseCsvLikeTableObject(answerText);
+    const table = parseFirstMarkdownTableObject(answerText) || parseCsvLikeTableObject(answerText) || parseNumericFactTableObject(answerText);
     return table
       ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(answerText, "LUCY Tablosu"), source: "assistant-answer" }
       : { type: "text", text: answerText, title: contentTitleFromText(answerText, "LUCY İçeriği"), source: "assistant-answer" };
@@ -1367,8 +1431,12 @@ function resolveActiveContent(req, answer = "") {
 
   // "bunu pdf/docx/txt yap" gibi genel dönüşümlerde en son gerçek asistan metni
   // aktif tool tablosundan daha değerlidir. Bu, textStats çıktısının şiiri ezmesini engeller.
+  if (memory.activeContent && ["chart", "mermaid", "file"].includes(String(memory.activeContent.type || "").toLowerCase())) {
+    return memory.activeContent;
+  }
+
   const latestAssistant = latestAssistantContentObject(req);
-  if (latestAssistant && (isOnlyTransformCommand(userText) || wantsPdfFromText(userText) || wantsDocumentFromText(userText) || wantsTextStatsFromText(userText))) {
+  if (latestAssistant && (isOnlyTransformCommand(userText) || wantsPdfFromText(userText) || wantsExcelFromText(userText) || wantsZipFromText(userText) || wantsDocumentFromText(userText) || wantsTextStatsFromText(userText))) {
     return latestAssistant;
   }
 
@@ -1449,10 +1517,10 @@ function isToolGeneratedAnswerText(text = "") {
 
 function transformPrefersTypedSource(userText = "") {
   const q = normalizeIntentText(userText);
-  if (/\b(son tablo|tabloyu|tablo|excel|xlsx|xls)\b/.test(q)) return "table";
-  if (/\b(son grafik|grafik|chart|pasta|pie|cizgi|line|bar|sutun|renkli|renklendir|palet|tema)\b/.test(q) && !wantsMermaidFromText(q)) return "chart";
+  if (/\b(son tablo|ilk tablo|onceki tablo|tabloyu|bu tablo|tablo)\b/.test(q)) return "table";
+  if (/\b(son grafik|ilk grafik|onceki grafik|bu grafik|grafigi|chart)\b/.test(q) && !wantsMermaidFromText(q)) return "chart";
   if (/\b(son diyagram|diyagram|mermaid|akis|akış|sema|şema|flowchart)\b/.test(q)) return "mermaid";
-  if (/\b(son dosya|dosyayi|dosyayı|pdfi|exceli|zipi)\b/.test(q)) return "file";
+  if (/\b(son dosya|onceki dosya|dosyayi|dosyayı|pdfi|exceli|zipi)\b/.test(q)) return "file";
   return "text";
 }
 
@@ -1464,7 +1532,7 @@ function latestAssistantContentObject(req) {
     if (role !== "assistant") continue;
     const text = stripToolNoise(messageText(message));
     if (!text || isToolGeneratedAnswerText(text)) continue;
-    const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text) || parseLooseInlineTableObject(text);
+    const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text) || parseLooseInlineTableObject(text) || parseNumericFactTableObject(text);
     if (table?.rows?.length) return { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(text, "LUCY Tablosu"), source: "latest-assistant" };
     return { type: "text", text, title: contentTitleFromText(text, "LUCY İçeriği"), source: "latest-assistant" };
   }
@@ -1492,7 +1560,7 @@ function rememberText(memory, text = "") {
   if (!clean || clean.length < 2) return memory;
   if (isGeneratedStatusOnlyText(text) || isToolGeneratedAnswerText(text)) return memory;
   memory.lastText = clean;
-  const table = parseFirstMarkdownTableObject(clean) || parseCsvLikeTableObject(clean) || parseLooseInlineTableObject(clean);
+  const table = parseFirstMarkdownTableObject(clean) || parseCsvLikeTableObject(clean) || parseLooseInlineTableObject(clean) || parseNumericFactTableObject(clean);
   if (table) {
     memory.lastTable = table;
     setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(clean, "LUCY Tablosu"), source: "text" });
@@ -1564,7 +1632,7 @@ function rememberToolResult(req, call = {}, result = {}) {
     // Dosya üretmek aktif kaynak içeriğini ezmesin: "bunu pdf yap" sonrası "bunu excel yap" hâlâ aynı tablo/metni kullanmalı.
     if (toolName === "document" && String(input.content || input.text || "").trim()) {
       const text = String(input.content || input.text || "");
-      const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text);
+      const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text) || parseNumericFactTableObject(text);
       if (table) setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: input.title || result.title || "LUCY Belgesi", source: "document" });
       else setActiveContent(memory, { type: "text", text, title: input.title || result.title || "LUCY Belgesi", source: "document" });
     }
@@ -2262,7 +2330,11 @@ function buildImplicitToolCalls(answer = "", req) {
     const selectedTableRaw = rankedSubsetTableForIntent(freshInlineTable || activeTable || (blockStaleArtifactFallback ? null : tableFromHistory(memory, userText)), userText);
     const tablePalette = paletteFromTable(selectedTableRaw);
     const selectedTable = tablePalette && selectedChart?.data ? null : selectedTableRaw;
-    const preferExistingChart = !freshInlineTable && (userSpecificallyReferencesChart(userText) || tablePalette) && selectedChart?.data;
+    const activeIsChart = activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data);
+    const preferExistingChart = !selectedTable?.rows?.length
+      && !freshInlineTable
+      && selectedChart?.data
+      && (activeIsChart || explicitHistoricalArtifactReference(userText) || tablePalette);
     const chartInput = preferExistingChart
       ? chartToChartInput(selectedChart, userText)
       : selectedTable?.rows?.length

@@ -25,6 +25,20 @@ function normalizeIntentText(value = "") {
   return normalizeToolIntentText(decodeHtmlEntities(value));
 }
 
+function timeIntentText(value = "") {
+  return normalizeIntentText(value)
+    .replace(/[ıİ]/g, "i")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[çÇ]/g, "c")
+    .replace(/[ğĞ]/g, "g")
+    .replace(/[öÖ]/g, "o")
+    .replace(/[şŞ]/g, "s")
+    .replace(/[üÜ]/g, "u")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function toolMetaOrStyleReference(text = "") {
   const q = normalizeIntentText(text);
   const meta = /\b(nedir|ne demek|ne ise yarar|nasil calisir|mantigi|anlat|acikla|ornek ver|farki ne)\b/.test(q);
@@ -200,9 +214,12 @@ function wantsCalculatorFromText(text = "") {
 }
 
 function wantsTimeFromText(text = "") {
-  const q = normalizeIntentText(text);
+  const q = timeIntentText(text);
   // "saat/tarih" tek başına geniş; soru kalıbı veya bugün/şimdi bağlamı varsa time tool.
   return /\b(saat kac|saat nedir|simdi saat|guncel saat|saat ne|kacinci saat|tarih nedir|bugunun tarihi|bugun tarih|bugun kac|bugunun saati|simdi kac|zaman nedir|gunun tarihi|tarih ne)\b/.test(q)
+    || /\b(su an|simdi|guncel|canli)\b.*\b(saat|saati|saatini|saatleri|saatlerini)\b/.test(q)
+    || /\b(saat|saati|saatini|saatleri|saatlerini)\b.*\b(su an|simdi|guncel|canli)\b/.test(q)
+    || /\b(sehir|sehirler|sehirlerin|baskent|baskentler|baskentlerin|ulke|ulkelerin)\b.*\b(saat|saati|saatini|saatleri|saatlerini)\b/.test(q)
     || /^(saat|zaman)$/.test(q.trim());
 }
 
