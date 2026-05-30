@@ -2735,11 +2735,93 @@ function requestHasResolvableTypedReference(req) {
   return false;
 }
 
+function asciiIntentText(text = "") {
+  return normalizeIntentText(text)
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u0131\u0130]/g, "i")
+    .replace(/[\u011f\u011e]/g, "g")
+    .replace(/[\u00fc\u00dc]/g, "u")
+    .replace(/[\u015f\u015e]/g, "s")
+    .replace(/[\u00f6\u00d6]/g, "o")
+    .replace(/[\u00e7\u00c7]/g, "c")
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function recordPlannerClarificationDebug(req = null, decision = {}, details = {}) {
+  if (!req || typeof req !== "object") return;
+  const referenceDebug = req.__lucyReferenceDebug || {};
+  const frame = req.__lucyUnderstandingFrame || null;
+  req.__lucyPlannerClarificationDebug = {
+    plannerDecision: cloneJsonSafe(decision),
+    bypassed: Boolean(details.bypassed),
+    bypassReason: details.bypassReason || "",
+    frameSuggestedArtifact: details.frameSuggestedArtifact || referenceDebug.frameSuggestedArtifact || null,
+    referenceConfidence: details.referenceConfidence ?? referenceDebug.confidence ?? frame?.confidence ?? null,
+  };
+}
+
+function legacySummaryHasConcreteArtifact(summary = null) {
+  if (!summary || typeof summary !== "object") return false;
+  const type = String(summary.type || "").toLowerCase();
+  if (type === "file" || type === "pdf") return Boolean(summary.filename || summary.title);
+  if (type === "chart") return Number(summary.chartLabels || 0) > 0;
+  if (type === "table") return Number(summary.tableRows || 0) > 0;
+  if (type === "mermaid") return true;
+  return false;
+}
+
+function frameFileArtifactCanBypassPlannerClarification(decision = {}, req = null) {
+  if (decision?.decision !== "ASK_CLARIFICATION" || !req || typeof req !== "object") return false;
+
+  const memory = hydrateMemoryFromRequest(req);
+  const frame = req.__lucyUnderstandingFrame || buildUnderstandingFrame(req, memory);
+  req.__lucyUnderstandingFrame = frame;
+
+  const referenceDebug = req.__lucyReferenceDebug || {};
+  const frameSuggestedArtifact = referenceDebug.frameSuggestedArtifact || frameSuggestedArtifactForDebug(frame, memory, req);
+  const referenceConfidence = Number(referenceDebug.confidence ?? frame.confidence ?? 0);
+  const userText = latestUserIntentText(req);
+  const q = asciiIntentText(userText);
+  const outputTargets = new Set(Array.isArray(frame.outputTargets) ? frame.outputTargets : []);
+  const primaryIntent = String(frame.primaryIntent || "");
+  const artifactAction = wantsZipFromText(userText) || wantsPdfFromText(userText) || wantsExcelFromText(userText)
+    || wantsDocumentFromText(userText) || wantsChartFromText(userText)
+    || ["zip", "pdf", "excel", "document", "chart"].some((target) => outputTargets.has(target));
+  const vagueReference = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|sunu|sunun|suna|ayni seyi|aynisini|az onceki cikti|az onceki dosya|son cikti|mevcut)\b/.test(q);
+  const artifactType = String(frameSuggestedArtifact?.type || "").toLowerCase();
+  const isFileOrPdfArtifact = artifactType === "file" || artifactType === "pdf";
+  const allowedIntent = ["export", "transform_filter", "style_only", "tool_action", "multi_step_task"].includes(primaryIntent);
+  const blockedIntent = ["search_research", "read_extract", "communication", "chat", "unknown"].includes(primaryIntent);
+
+  const finish = (bypassed, bypassReason) => {
+    recordPlannerClarificationDebug(req, decision, { bypassed, bypassReason, frameSuggestedArtifact, referenceConfidence });
+    return bypassed;
+  };
+
+  if (legacySummaryHasConcreteArtifact(referenceDebug.legacyResolvedArtifact)) return finish(false, "legacy_artifact_present");
+  if (!artifactAction) return finish(false, "not_artifact_action");
+  if (!vagueReference) return finish(false, "not_vague_reference");
+  if (blockedIntent || !allowedIntent) return finish(false, "intent_not_artifact_work");
+  if (referenceConfidence < 0.8) return finish(false, "low_reference_confidence");
+  if (!isFileOrPdfArtifact) return finish(false, "no_file_or_pdf_frame_artifact");
+
+  return finish(true, "frame_file_artifact_resolves_planner_ambiguity");
+}
+
 function shouldBypassPlannerClarification(decision = {}, req = null) {
   if (decision?.decision !== "ASK_CLARIFICATION") return false;
-  if (requestHasResolvableTypedReference(req)) return true;
-  if (resolveClarificationFollowUpText(req)) return true;
-  return false;
+  if (requestHasResolvableTypedReference(req)) {
+    recordPlannerClarificationDebug(req, decision, { bypassed: true, bypassReason: "legacy_resolvable_typed_reference" });
+    return true;
+  }
+  if (resolveClarificationFollowUpText(req)) {
+    recordPlannerClarificationDebug(req, decision, { bypassed: true, bypassReason: "clarification_followup_resolved" });
+    return true;
+  }
+  return frameFileArtifactCanBypassPlannerClarification(decision, req);
 }
 
 function deepSeekPlannerEnabled() {
