@@ -1441,6 +1441,10 @@ function artifactDebugKey(summary = null) {
 }
 
 function frameSuggestedArtifactForDebug(frame = {}, memory = {}, req = null) {
+  return artifactDebugSummary(frameSuggestedContentForResolver(frame, memory, req));
+}
+
+function frameSuggestedContentForResolver(frame = {}, memory = {}, req = null) {
   const refs = frame.references || {};
   const targetTypes = Array.isArray(refs.targetTypes) ? refs.targetTypes : [];
   const targets = new Set(Array.isArray(frame.outputTargets) ? frame.outputTargets : []);
@@ -1449,36 +1453,61 @@ function frameSuggestedArtifactForDebug(frame = {}, memory = {}, req = null) {
 
   if (targetTypes.includes("chart") || sourceRequirement === "chart") {
     const chart = chartFromHistory(memory, userText) || memory.lastChart;
-    if (chart?.data) return artifactDebugSummary({ type: "chart", chart, title: chart.title || "Grafik", source: "frame-chart" });
+    if (chart?.data) return { type: "chart", chart, ui: chartUiFromMemory(chart, chart.title || "Grafik"), title: chart.title || "Grafik", source: "frame-chart" };
   }
 
   if (targetTypes.includes("table") || sourceRequirement === "table_or_dataset" || sourceRequirement === "table_or_numeric_data") {
     const latestAssistant = latestAssistantContentObject(req);
     const table = tableFromHistory(memory, userText) || activeContentTable(memory.activeContent) || activeContentTable(latestAssistant) || memory.lastTable;
-    if (table?.rows?.length) return artifactDebugSummary({ type: "table", table, title: "LUCY Tablosu", source: "frame-table" });
+    if (table?.rows?.length) return { type: "table", table, text: tableToMarkdown(table), title: "LUCY Tablosu", source: "frame-table" };
   }
 
   if (targetTypes.includes("file") || sourceRequirement === "generated_file" || (targets.has("zip") && !targetTypes.includes("chart") && !targetTypes.includes("table"))) {
     const file = selectGeneratedFileFromMemory(userText, memory, req, { allowZip: false }) || memory.lastFile;
-    if (file?.storedFilename || file?.filename) return artifactDebugSummary({ type: "file", file, title: file.filename || file.storedFilename, source: "frame-file" });
+    if (file?.storedFilename || file?.filename) return { type: "file", file, title: file.filename || file.storedFilename, source: "frame-file" };
   }
 
   if (targetTypes.includes("text")) {
     const text = memory.activeContent?.type === "text" ? memory.activeContent.text : memory.lastText;
-    if (String(text || "").trim()) return artifactDebugSummary({ type: "text", text, title: "LUCY Metni", source: "frame-text" });
+    if (String(text || "").trim()) return { type: "text", text, title: "LUCY Metni", source: "frame-text" };
   }
 
   if (sourceRequirement === "active_artifact" || sourceRequirement === "working_artifact_chain") {
-    if (memory.activeContent) return artifactDebugSummary(memory.activeContent, "frame-activeContent");
+    if (memory.activeContent) return { ...cloneJsonSafe(memory.activeContent), source: "frame-activeContent" };
     const latestAssistant = latestAssistantContentObject(req);
-    if (latestAssistant) return artifactDebugSummary(latestAssistant, "frame-latestAssistant");
-    if (memory.lastChart?.data) return artifactDebugSummary({ type: "chart", chart: memory.lastChart, title: memory.lastChart.title || "Grafik", source: "frame-lastChart" });
-    if (memory.lastTable?.rows?.length) return artifactDebugSummary({ type: "table", table: memory.lastTable, title: "LUCY Tablosu", source: "frame-lastTable" });
-    if (memory.lastFile?.storedFilename || memory.lastFile?.filename) return artifactDebugSummary({ type: "file", file: memory.lastFile, title: memory.lastFile.filename || memory.lastFile.storedFilename, source: "frame-lastFile" });
-    if (memory.lastText) return artifactDebugSummary({ type: "text", text: memory.lastText, title: "LUCY Metni", source: "frame-lastText" });
+    if (latestAssistant) return { ...latestAssistant, source: "frame-latestAssistant" };
+    if (memory.lastChart?.data) return { type: "chart", chart: memory.lastChart, ui: chartUiFromMemory(memory.lastChart, memory.lastChart.title || "Grafik"), title: memory.lastChart.title || "Grafik", source: "frame-lastChart" };
+    if (memory.lastTable?.rows?.length) return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "frame-lastTable" };
+    if (memory.lastFile?.storedFilename || memory.lastFile?.filename) return { type: "file", file: memory.lastFile, title: memory.lastFile.filename || memory.lastFile.storedFilename, source: "frame-lastFile" };
+    if (memory.lastText) return { type: "text", text: memory.lastText, title: "LUCY Metni", source: "frame-lastText" };
   }
 
   return null;
+}
+
+function frameResolverAdoptionAllowed(frame = {}, suggestedContent = null) {
+  if (!suggestedContent) return false;
+  if (Number(frame.confidence || 0) < 0.8) return false;
+  const intent = String(frame.primaryIntent || "");
+  const targets = new Set(Array.isArray(frame.outputTargets) ? frame.outputTargets : []);
+  if (["search_research", "read_extract", "communication", "chat", "unknown"].includes(intent)) return false;
+  const artifactTargets = ["pdf", "zip", "document", "excel", "chart"];
+  if (!artifactTargets.some((target) => targets.has(target))) return false;
+  return ["export", "style_only", "transform_filter", "tool_action", "multi_step_task"].includes(intent)
+    || artifactTargets.some((target) => targets.has(target));
+}
+
+function adoptFrameResolvedContent(req = null, memory = {}, legacyContent = null) {
+  if (legacyContent) return legacyContent;
+  if (!req || typeof req !== "object") return null;
+  const frame = req.__lucyUnderstandingFrame || buildUnderstandingFrame(req, memory);
+  req.__lucyUnderstandingFrame = frame;
+  const suggested = frameSuggestedContentForResolver(frame, memory, req);
+  if (!frameResolverAdoptionAllowed(frame, suggested)) return null;
+  const adopted = cloneJsonSafe(suggested);
+  adopted.source = adopted.source || "frame-adopted";
+  adopted.resolvedBy = "understandingFrame";
+  return adopted;
 }
 
 function referenceMismatchReason(legacy = null, suggested = null) {
@@ -1532,7 +1561,7 @@ function inlineContentFromToolRequest(userText = "") {
   return "";
 }
 
-function resolveActiveContent(req, answer = "") {
+function resolveActiveContent(req, answer = "", options = {}) {
   const memory = hydrateMemoryFromRequest(req);
   const userText = latestUserIntentText(req);
   const answerText = stripToolNoise(answer);
@@ -1578,12 +1607,14 @@ function resolveActiveContent(req, answer = "") {
   }
 
   if (memory.activeContent && !isToolGeneratedAnswerText(activeContentToText(memory.activeContent, ""))) return memory.activeContent;
-  if (blockStaleArtifactFallback) return null;
+  if (blockStaleArtifactFallback) {
+    return options.allowFrameAdoption === false ? null : adoptFrameResolvedContent(req, memory, null);
+  }
   if (memory.lastTable?.rows?.length) return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "lastTable" };
   if (memory.lastChart?.data) return { type: "chart", chart: memory.lastChart, ui: chartUiFromMemory(memory.lastChart, "Grafik"), title: "Grafik", source: "lastChart" };
   if (memory.lastMermaid?.code) return { type: "mermaid", code: memory.lastMermaid.code, ui: mermaidUiFromMemory(memory.lastMermaid, "Mermaid diyagram"), title: "Mermaid diyagram", source: "lastMermaid" };
   if (memory.lastText) return { type: "text", text: memory.lastText, title: contentTitleFromText(memory.lastText, "LUCY İçeriği"), source: "lastText" };
-  return null;
+  return options.allowFrameAdoption === false ? null : adoptFrameResolvedContent(req, memory, null);
 }
 
 function rememberLucyWidget(memory, widget = {}) {
@@ -2860,7 +2891,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   if (req && typeof req === "object") {
     req.__lucyUnderstandingFrame = buildUnderstandingFrame(req, memory);
   }
-  recordReferenceFrameDebug(req, memory, resolveActiveContent(req, answer));
+  recordReferenceFrameDebug(req, memory, resolveActiveContent(req, answer, { allowFrameAdoption: false }));
   const userText = latestUserIntentText(req);
   const aiDecision = await buildAiPlannerDecision(req);
 
