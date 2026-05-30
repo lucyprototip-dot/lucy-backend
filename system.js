@@ -12,6 +12,7 @@ const ExcelJS = require("exceljs");
 const PDFDocument = require("pdfkit");
 const { renderPdfBuffer, renderPdfKitBuffer } = require("./core/render/pdfRenderEngine");
 const { envBool, envInt, isAllowedUploadMime, uploadStatusForError, assertPublicHttpUrl } = require("./core/securityGuards");
+const { classifySemanticIntent } = require("./core/toolIntentDetector");
 
 const {
   publicBaseUrl,
@@ -465,7 +466,8 @@ function isUsdTryQuestion(text = "") {
 
 function isWebMode(body = {}) {
   const mode = String(body.mode || body.modeId || "").toLowerCase();
-  return Boolean(body.webSearch) || mode === "web" || mode.includes("web");
+  const lastUserText = getLastUserText(body.messages) || body.prompt || body.message || body.text || "";
+  return Boolean(body.webSearch) || mode === "web" || mode.includes("web") || classifySemanticIntent(lastUserText) === "search_research";
 }
 
 async function getUsdTryRate() {

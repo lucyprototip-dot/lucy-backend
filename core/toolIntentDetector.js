@@ -33,19 +33,100 @@ function toolMetaOrStyleReference(text = "") {
   return (meta || style) && !action;
 }
 
+function semanticText(text = "") {
+  return normalizeIntentText(text)
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u0131\u0130]/g, "i")
+    .replace(/[\u011f\u011e]/g, "g")
+    .replace(/[\u00fc\u00dc]/g, "u")
+    .replace(/[\u015f\u015e]/g, "s")
+    .replace(/[\u00f6\u00d6]/g, "o")
+    .replace(/[\u00e7\u00c7]/g, "c")
+    .replace(/[^a-z0-9\s'/.-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasSearchResearchIntent(q = "") {
+  const searchAction = /\b(ara|arastir|bul|oner|tavsiye|link|kaynak|listele)\b/.test(q)
+    || /\b(linkini|linklerini|sitesini|adresini)\b/.test(q);
+  const searchSubject = /\b(program|uygulama|app|android|ios|okuyucu|duzeltici|editor|alternatif|ucretsiz|reklamsiz|indirilecek|market|play store|store)\b/.test(q)
+    || /\b(pdf|word|docx|txt|excel|xlsx|xls|zip|qr|ocr|grafik|tablo)\b/.test(q);
+  return Boolean(searchAction && searchSubject);
+}
+
+function hasReadExtractIntent(q = "") {
+  return /\b(pdf|word|docx|txt|excel|xlsx|xls|dosya|belge|resim|gorsel|foto|fotograf)\b.*\b(oku|ozetle|icerigini|icerik|metin|yazi|cikar|extract|anlat|analiz)\b/.test(q)
+    || /\b(oku|ozetle|icerigini|metin|yazi|cikar|extract|analiz)\b.*\b(pdf|word|docx|txt|excel|xlsx|xls|dosya|belge|resim|gorsel|foto|fotograf)\b/.test(q)
+    || /\b(resimden|gorselden|fotograftan)\b.*\b(yazi|metin)\b.*\b(cikar|oku)\b/.test(q);
+}
+
+function hasExportIntent(q = "") {
+  const exportVerb = /\b(yap|olustur|hazirla|kaydet|indir|ver|gonder|aktar|cevir|donustur)\b/;
+  const exportType = /\b(pdf|excel|xlsx|xls|word|docx|txt|markdown|md|csv|json|html|zip)\b/;
+  const sourceRef = /\b(bunu|sunlari|sunu|metni|icerigi|tabloyu|grafigi|grafik|dosyayi|son|onceki|exceli|pdfi|raporu)\b/;
+  return (exportType.test(q) && exportVerb.test(q))
+    || (sourceRef.test(q) && exportType.test(q))
+    || /\b(pdf|excel|xlsx|word|docx|zip)\s+olarak\b/.test(q)
+    || /\b(arsivle|sikistir)\b/.test(q);
+}
+
+function hasTransformFilterIntent(q = "") {
+  return /\b(en\s+(pahali|ucuz|yuksek|dusuk|buyuk|kucuk|fazla)|top\s+\d+|\d+\s+(urun|kalem|satir|kayit)|filtrele|sirala|sirali)\b/.test(q)
+    || /\b(tablo|tabloyu|veri|dataset|liste)\b.*\b(grafik|chart|pasta|cizgi|cubuk|bar|sutun|gorsellestir|cevir|donustur)\b/.test(q)
+    || /\b(grafik|chart|pasta|cizgi|cubuk|bar|sutun|gorsellestir)\b.*\b(yap|olustur|hazirla|ciz|goster)\b/.test(q);
+}
+
+function hasStyleOnlyIntent(q = "", memory = {}) {
+  const style = /\b(renk|renkli|renklerini|renkleri|renkte|renklerde|renklendir|palet|palette|tema|stil|sari|lacivert|mavi|mor|neon|pastel|monokrom|siyah|beyaz)\b/.test(q);
+  const action = /\b(yap|olsun|degistir|kullan|uygula|cevir|donustur)\b/.test(q);
+  const chartRef = /\b(ayni|bunu|son|mevcut|grafik|grafigi|chart|pasta|cizgi|cubuk|bar|sutun)\b/.test(q) || Boolean(memory?.lastChart?.data);
+  return Boolean(style && action && chartRef && !/\b(pdf|excel|xlsx|zip|word|docx|dosya|tablo|metin)\b/.test(q));
+}
+
+function hasCommunicationIntent(q = "") {
+  return /\b(mail|maili|email|eposta|e posta|telegram|whatsapp|whatsappa|wp)\b.*\b(gonder|at|ilet)\b/.test(q)
+    || /\b(gonder|at|ilet)\b.*\b(mail|maili|email|eposta|e posta|telegram|whatsapp|whatsappa|wp)\b/.test(q);
+}
+
+function classifySemanticIntent(text = "", memory = {}) {
+  const q = semanticText(text);
+  if (!q) return "unknown";
+  if (hasSearchResearchIntent(q)) return "search_research";
+  if (hasCommunicationIntent(q)) return "communication";
+  if (hasReadExtractIntent(q)) return "read_extract";
+  if (hasStyleOnlyIntent(q, memory)) return "style_only";
+  if (hasExportIntent(q)) return "export";
+  if (hasTransformFilterIntent(q)) return "transform_filter";
+  return "unknown";
+}
+
 function wantsPdfFromText(text = "") {
-  const q = normalizeIntentText(text);
-  return /\bpdf\b|pdf olarak|pdf yap|pdf yaz|pdf hazirla|pdf gonder|pdf indir|rapor pdf/.test(q);
+  const intent = classifySemanticIntent(text);
+  if (intent === "search_research" || intent === "read_extract") return false;
+  const q = semanticText(text);
+  return /\bpdf\b.*\b(yap|olustur|hazirla|kaydet|indir|ver|gonder|aktar|cevir|donustur|yaz)\b/.test(q)
+    || /\b(bunu|sunu|metni|icerigi|tabloyu|grafigi|grafik|dosyayi|son|onceki|exceli|raporu)\b.*\bpdf\b/.test(q)
+    || /\bpdf\s+olarak\b|\brapor\s+pdf\b/.test(q);
 }
 
 function wantsExcelFromText(text = "") {
-  const q = normalizeIntentText(text);
-  return /\bexcel\b|\bxlsx\b|\bxls\b|e-tablo|spreadsheet|calisma kitabi|tabloyu excel|excel olarak|xlsx olarak/.test(q);
+  const intent = classifySemanticIntent(text);
+  if (intent === "search_research" || intent === "read_extract") return false;
+  const q = semanticText(text);
+  return /\b(excel|xlsx|xls|e-tablo|spreadsheet|calisma kitabi)\b.*\b(yap|olustur|hazirla|kaydet|indir|ver|gonder|aktar|cevir|donustur)\b/.test(q)
+    || /\b(tabloyu|bunu|sunu|son|onceki|metni|icerigi)\b.*\b(excel|xlsx|xls)\b/.test(q)
+    || /\b(excel|xlsx|xls)\s+olarak\b/.test(q);
 }
 
 function wantsZipFromText(text = "") {
-  const q = normalizeIntentText(text);
-  return /\bzip\b|arsiv|arsivle|sikistir|zip olarak|zip yap|zip gonder|zip indir/.test(q);
+  const intent = classifySemanticIntent(text);
+  if (intent === "search_research" || intent === "read_extract") return false;
+  const q = semanticText(text);
+  return /\b(zip|arsiv)\b.*\b(yap|olustur|hazirla|kaydet|indir|ver|gonder|aktar)\b/.test(q)
+    || /\b(bunu|sunu|son|onceki|dosyayi|exceli|pdfi)\b.*\b(zip|arsiv)\b/.test(q)
+    || /\b(arsivle|sikistir)\b/.test(q);
 }
 
 function wantsChartFromText(text = "") {
@@ -59,12 +140,14 @@ function wantsChartFromText(text = "") {
 }
 
 function wantsDocumentFromText(text = "") {
+  const intent = classifySemanticIntent(text);
+  if (intent === "search_research" || intent === "read_extract") return false;
   const q = normalizeIntentText(text);
   // Genel kelimeler tek başına tool tetiklemesin; ama "yap/olustur/kaydet/ver/indir" gibi
   // net çıktı fiilleriyle gelirse document tool çalışsın.
   return (
     /\b(txt dosya|markdown dosya|md dosya|docx belge|belge olustur|belge hazirla|metin belgesi|dosya yap|dosya hazirla|dosya olarak kaydet|dosya olarak ver|csv dosya|json dosya|html dosya)\b/.test(q)
-    || /\b(word|docx|belge|txt|markdown|md|csv|json|html)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|cikar|çıkar|donustur|cevir)\b/.test(q)
+    || /\b(word|docx|belge|txt|markdown|md|csv|json|html)\b.*\b(yap|olustur|hazirla|kaydet|ver|indir|cikar|çıkar|donustur|cevir|aktar)\b/.test(q)
     || /\b(bunu|sunlari|metni|icerigi|tabloyu|onceki|son)\b.*\b(word|docx|belge|txt|markdown|md|csv|json|html)\b/.test(q)
   );
 }
@@ -168,6 +251,7 @@ function stripToolNoise(text = "") {
 
 module.exports = {
   normalizeIntentText,
+  classifySemanticIntent,
   wantsPdfFromText,
   wantsExcelFromText,
   wantsZipFromText,

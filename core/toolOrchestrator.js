@@ -6,6 +6,7 @@ const { normalizeToolIntentText, detectChartType, detectVisualStyle, detectColor
 const { planToolCallsWithDeepSeek, planLucyActionWithDeepSeek, aiPlannerEnabled } = require("./toolPlanner");
 const {
   normalizeIntentText,
+  classifySemanticIntent,
   wantsPdfFromText,
   wantsExcelFromText,
   wantsZipFromText,
@@ -370,9 +371,10 @@ function enrichToolCallInput(call, req) {
   const userText = latestUserIntentText(req);
 
   if (toolName === "excel" && !(Array.isArray(input.rows) && input.rows.length) && !String(input.text || input.content || input.value || "").trim()) {
-    if (memory.lastTable?.rows?.length) {
-      input.rows = memory.lastTable.rows;
-      input.headers = memory.lastTable.headers;
+    const selectedTable = rankedSubsetTableForIntent(memory.lastTable, userText);
+    if (selectedTable?.rows?.length) {
+      input.rows = selectedTable.rows;
+      input.headers = selectedTable.headers;
       input.title = input.title || "LUCY Tablosu";
     } else if (memory.lastText) {
       input.text = memory.lastText;
@@ -385,7 +387,7 @@ function enrichToolCallInput(call, req) {
     if (active?.type === "chart" && active.chart) input.chart = active.chart;
     else if (active?.type === "mermaid" && active.code) input.mermaid = active.code;
     else if (activeText) input.text = activeText;
-    else if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(memory.lastTable);
+    else if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(rankedSubsetTableForIntent(memory.lastTable, userText));
     else if (memory.lastText) input.text = memory.lastText;
     else if (memory.lastChart?.data) input.text = JSON.stringify(memory.lastChart.data, null, 2);
   }
@@ -422,7 +424,7 @@ function enrichToolCallInput(call, req) {
     const sourceHint = String(input.source || "").toLowerCase();
     const shouldRecomputeTableChart = Boolean(inlineTable || (/lasttable|table|tablo/.test(sourceHint) && (memory.lastTable?.rows?.length || tableFromHistory(memory, userText)?.rows?.length)));
     if (shouldRecomputeTableChart) {
-      const selectedTableRaw = inlineTable || tableFromHistory(memory, userText) || memory.lastTable;
+      const selectedTableRaw = rankedSubsetTableForIntent(inlineTable || memory.lastTable || tableFromHistory(memory, userText), userText);
       const tablePalette = paletteFromTable(selectedTableRaw);
       const chartInput = selectedTableRaw?.rows?.length ? tableToChartInput(selectedTableRaw, userText) : null;
       if (chartInput) {
@@ -437,7 +439,7 @@ function enrichToolCallInput(call, req) {
     }
 
     if (!(Array.isArray(labels) && labels.length && Array.isArray(values) && values.length)) {
-      const selectedTableRaw = inlineTable || tableFromHistory(memory, userText) || memory.lastTable;
+      const selectedTableRaw = rankedSubsetTableForIntent(inlineTable || memory.lastTable || tableFromHistory(memory, userText), userText);
       const tablePalette = paletteFromTable(selectedTableRaw);
       const selectedTable = tablePalette && selectedChart?.data ? null : selectedTableRaw;
       const preferExistingChart = !inlineTable && (userSpecificallyReferencesChart(userText) || tablePalette || isStyleOnlyChartModify(userText, memory)) && selectedChart?.data;
@@ -458,7 +460,7 @@ function enrichToolCallInput(call, req) {
   }
 
   if (toolName === "mermaid" && !String(input.code || input.mermaid || "").trim()) {
-    const selectedTable = tableFromHistory(memory, userText) || memory.lastTable;
+    const selectedTable = rankedSubsetTableForIntent(tableFromHistory(memory, userText) || memory.lastTable, userText);
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
     const generated = selectedTable?.rows?.length
       ? tableToMermaidCode(selectedTable, input.title || "LUCY Diyagramı", userText)
@@ -475,11 +477,12 @@ function enrichToolCallInput(call, req) {
   }
 
   if (toolName === "textstats" && !String(input.text || "").trim()) {
-    input.text = memory.lastText || tableToMarkdown(memory.lastTable) || latestUserIntentText(req);
+    input.text = memory.lastText || tableToMarkdown(rankedSubsetTableForIntent(memory.lastTable, userText)) || latestUserIntentText(req);
   }
 
   if (toolName === "document" && !String(input.content || input.text || input.markdown || "").trim()) {
-    input.content = memory.lastTable?.rows?.length ? tableToMarkdown(memory.lastTable) : memory.lastText;
+    const selectedTable = rankedSubsetTableForIntent(memory.lastTable, userText);
+    input.content = selectedTable?.rows?.length ? tableToMarkdown(selectedTable) : memory.lastText;
   }
 
   if (toolName === "ocr") {
@@ -534,6 +537,7 @@ function latestUserIntentText(req) {
 
 function requestedToolWork(req) {
   const userText = latestUserIntentText(req);
+  if (classifySemanticIntent(userText, hydrateMemoryFromRequest(req)) === "search_research") return false;
   return isHardToolRequest(userText) && likelyToolIntent(userText);
 }
 
@@ -644,6 +648,8 @@ function hasFreshInlineChartData(userText = "") {
 
 function isChartExportOnlyRequest(userText = "") {
   const q = normalizeIntentText(userText);
+  if (/\b(tablo|tabloyu|veri|dataset|liste)\b.*\b(graf|chart|pasta|pie|cizgi|Ã§izgi|bar|sutun|sÃ¼tun|cubuk|Ã§ubuk)\b.*\b(yap|olustur|oluÅŸtur|ciz|Ã§iz|hazirla|hazÄ±rla|goster|gÃ¶ster|cevir|Ã§evir|donustur|dÃ¶nÃ¼ÅŸtÃ¼r)\b/.test(q)
+    || /\b(tablo|tabloyu|veri|dataset|liste)\b.*\b(cevir|Ã§evir|donustur|dÃ¶nÃ¼ÅŸtÃ¼r)\b.*\b(graf|chart|pasta|pie|cizgi|Ã§izgi|bar|sutun|sÃ¼tun|cubuk|Ã§ubuk)\b/.test(q)) return false;
   return wantsPdfFromText(q)
     && userSpecificallyReferencesChart(q)
     && !hasFreshInlineChartData(userText)
@@ -733,9 +739,15 @@ function isUsableToolCall(call = {}) {
 function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
   const tool = normalizeToolName(call.tool || "");
   const userText = latestUserIntentText(req);
+  const memory = hydrateMemoryFromRequest(req);
+  const semanticIntent = classifySemanticIntent(userText, memory);
 
   const brainBlock = shouldBlockToolForConversation(userText, tool);
   if (brainBlock?.block) return false;
+
+  if (semanticIntent === "search_research" && ["pdf", "excel", "document", "zip", "chartdata", "qr", "mermaid", "ocr"].includes(tool)) {
+    return false;
+  }
 
   // File read/list commands are deterministic and always own the "oku/listele" intent.
   if (wantsFileManagerFromText(userText)) return tool === "filemanager";
@@ -746,11 +758,10 @@ function isToolCallAllowedByCurrentIntent(call = {}, req = null) {
   if (tool === "webfetch") return wantsWebFetchFromText(userText);
   if (tool === "ocr") return wantsOcrFromText(userText);
   if (tool === "chartdata") {
-    const memory = hydrateMemoryFromRequest(req);
     return (wantsChartFromText(userText) || isStyleOnlyChartModify(userText, memory)) && !isChartExportOnlyRequest(userText);
   }
   if (tool === "mermaid") return wantsMermaidFromText(userText);
-  if (tool === "excel") return wantsExcelFromText(userText) && !isExcelFileToPdfRequest(userText);
+  if (tool === "excel") return wantsExcelFromText(userText);
   if (tool === "pdf") return wantsPdfFromText(userText);
   if (tool === "document") return wantsDocumentFromText(userText);
   if (tool === "qr") return wantsQrFromText(userText);
@@ -802,10 +813,7 @@ function validateToolInput(call = {}, req = null) {
 
   if (tool === "pdf") {
     const hasText = String(input.text || input.content || input.value || "").trim();
-    const hasRows = Array.isArray(input.rows || input.table?.rows) && (input.rows || input.table.rows).length > 0;
-    const hasChart = Boolean(input.chart || input.chartData || input.data?.labels);
-    const hasMermaid = Boolean(String(input.mermaid || input.mermaidCode || input.code || input.diagramCode || "").trim());
-    if (!hasText && !hasRows && !hasChart && !hasMermaid && !memory.lastTable?.rows?.length && !memory.lastText) return fail("PDF için önce metin, tablo veya rapor içeriği gerekli aşkım.", "pdf_source_required");
+    if (!hasText && !memory.lastTable?.rows?.length && !memory.lastText) return fail("PDF için önce metin, tablo veya rapor içeriği gerekli aşkım.", "pdf_source_required");
   }
 
   if (tool === "ocr") {
@@ -1367,7 +1375,6 @@ function isToolGeneratedAnswerText(text = "") {
 
 function transformPrefersTypedSource(userText = "") {
   const q = normalizeIntentText(userText);
-  if (isExcelFileToPdfRequest(q)) return "file";
   if (/\b(son tablo|tabloyu|tablo|excel|xlsx|xls)\b/.test(q)) return "table";
   if (/\b(son grafik|grafik|chart|pasta|pie|cizgi|line|bar|sutun|renkli|renklendir|palet|tema)\b/.test(q) && !wantsMermaidFromText(q)) return "chart";
   if (/\b(son diyagram|diyagram|mermaid|akis|akış|sema|şema|flowchart)\b/.test(q)) return "mermaid";
@@ -1690,6 +1697,62 @@ function tableFromHistory(memory = {}, userText = "") {
   if (ref === "previous") return unique[Math.max(0, unique.length - 2)] || unique[unique.length - 1];
   if (typeof ref === "number") return unique[ref] || unique[unique.length - 1];
   return unique[unique.length - 1];
+}
+
+function rankedSubsetSpecFromText(userText = "") {
+  const q = normalizeIntentText(userText);
+  const match = q.match(/\b(?:en\s+(?:pahali|yuksek|buyuk|fazla|ucuz|dusuk|kucuk)|top)\s+(\d{1,2})\b/)
+    || q.match(/\b(\d{1,2})\s+(?:urun|kalem|satir|kayit)\b.*\b(?:en\s+)?(?:pahali|yuksek|buyuk|fazla|ucuz|dusuk|kucuk|top)\b/);
+  if (!match) return null;
+  const limit = Math.max(1, Math.min(50, Number(match[1]) || 0));
+  if (!limit) return null;
+  const direction = /\b(ucuz|dusuk|kucuk|az)\b/.test(q) ? "asc" : "desc";
+  return { limit, direction };
+}
+
+function scoreRankedSubsetHeader(header = "", userText = "") {
+  const h = normalizeIntentText(header);
+  const q = normalizeIntentText(userText);
+  let score = 0;
+  if (/^#|^no$|^id$|sira/.test(h)) score -= 100;
+  if (/pahali|ucuz|fiyat|price/.test(q)) {
+    if (/birim fiyat|tahmini fiyat|fiyat|price/.test(h)) score += 160;
+    if (/toplam|total|tutar|amount|bedel/.test(h)) score += 120;
+  }
+  if (/toplam|tutar|gelir|satis|ciro|deger|value|amount|total/.test(q)) {
+    if (/toplam|total|tutar|amount|bedel|gelir|satis|ciro|deger|value/.test(h)) score += 160;
+  }
+  if (/toplam|total/.test(h)) score += 80;
+  if (/tutar|amount|bedel/.test(h)) score += 70;
+  if (/fiyat|price/.test(h)) score += 65;
+  if (/gelir|satis|ciro|revenue|sales/.test(h)) score += 55;
+  if (/deger|value/.test(h)) score += 35;
+  if (/miktar|adet|quantity|count/.test(h)) score += 8;
+  return score;
+}
+
+function rankedSubsetTableForIntent(table = null, userText = "") {
+  const spec = rankedSubsetSpecFromText(userText);
+  if (!spec || !table?.headers?.length || !table?.rows?.length) return table;
+  const numericHeaders = table.headers.filter((header) => table.rows.some((row) => numberFromCell(row?.[header]) !== null));
+  if (!numericHeaders.length) return table;
+  const valueHeader = numericHeaders
+    .map((header, index) => ({ header, score: scoreRankedSubsetHeader(header, userText) + (numericHeaders.length - index) * 0.01 }))
+    .sort((a, b) => b.score - a.score)[0]?.header || numericHeaders[0];
+  const rankedRows = table.rows
+    .map((row, index) => ({ row, index, value: numberFromCell(row?.[valueHeader]) }))
+    .filter((item) => item.value !== null)
+    .sort((a, b) => spec.direction === "asc" ? (a.value - b.value || a.index - b.index) : (b.value - a.value || a.index - b.index))
+    .slice(0, spec.limit)
+    .map((item) => item.row);
+  if (!rankedRows.length) return table;
+  return {
+    ...table,
+    rows: rankedRows,
+    headers: table.headers,
+    derivedFrom: table.derivedFrom || "ranked-subset",
+    filter: { type: "ranked-subset", limit: spec.limit, direction: spec.direction, valueHeader },
+  };
 }
 
 function chartFromHistory(memory = {}, userText = "") {
@@ -2049,13 +2112,6 @@ function userAskedMultiOutputChain(userText = "") {
   return outputKinds >= 2 || /\b(hem|ve|sonra|ardindan|ardından|ayrica|ayrıca|birlikte|hepsini)\b/.test(q);
 }
 
-function isExcelFileToPdfRequest(userText = "") {
-  const q = normalizeIntentText(userText);
-  if (!wantsPdfFromText(q) || !/\b(excel|xlsx|xls)\b/.test(q)) return false;
-  if (/\b(hem|ve|sonra|ardindan|ardÄ±ndan|ayrica|ayrÄ±ca|birlikte|hepsini)\b/.test(q)) return false;
-  return /\b(dosya|dosyasi|dosyasini|exceli)\b/.test(q);
-}
-
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
@@ -2065,7 +2121,8 @@ function buildImplicitToolCalls(answer = "", req) {
   const userInlineTable = parseFirstMarkdownTableObject(userText) || parseCsvLikeTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
   const inlineTable = userInlineTable || parseFirstMarkdownTableObject(source) || parseCsvLikeTableObject(source) || parseLooseInlineTableObject(source) || parseInlineKeyValueTableObject(source);
   // Kullanıcı mesajındaki yeni veri her zaman eski context'ten önce gelir.
-  const activeTable = inlineTable || activeContentTable(activeContent) || memory.lastTable;
+  const activeTable = rankedSubsetTableForIntent(inlineTable || activeContentTable(activeContent) || memory.lastTable, userText);
+  const rankedSubsetRequested = Boolean(rankedSubsetSpecFromText(userText));
   const hasFreshUserContent = Boolean(userInlineContent || userInlineTable);
   if (hasFreshUserContent && activeContent && typeof activeContent === "object") {
     activeContent.title = contentTitleFromText(userInlineContent || userText, activeTable ? "LUCY Tablosu" : "LUCY Ciktisi");
@@ -2124,7 +2181,7 @@ function buildImplicitToolCalls(answer = "", req) {
   } else if (wantsChartFromText(userText) && !isChartExportOnlyRequest(userText)) {
     const freshInlineTable = parseFirstMarkdownTableObject(userText) || parseCsvLikeTableObject(userText) || parseLooseInlineTableObject(userText) || parseInlineKeyValueTableObject(userText);
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
-    const selectedTableRaw = freshInlineTable || tableFromHistory(memory, userText) || activeTable;
+    const selectedTableRaw = rankedSubsetTableForIntent(freshInlineTable || activeTable || tableFromHistory(memory, userText), userText);
     const tablePalette = paletteFromTable(selectedTableRaw);
     const selectedTable = tablePalette && selectedChart?.data ? null : selectedTableRaw;
     const preferExistingChart = !freshInlineTable && (userSpecificallyReferencesChart(userText) || tablePalette) && selectedChart?.data;
@@ -2158,7 +2215,7 @@ function buildImplicitToolCalls(answer = "", req) {
 
   if (wantsMermaidFromText(userText) && !wantsChartFromText(userText)) {
     // Aynı mesajda hem grafik hem diyagram istenirse grafik öncelikli; mermaid ayrıca çalışmaz
-    const selectedTable = tableFromHistory(memory, userText) || activeTable;
+    const selectedTable = rankedSubsetTableForIntent(tableFromHistory(memory, userText) || activeTable, userText);
     const selectedChart = chartFromHistory(memory, userText) || memory.lastChart;
     if (memory.lastMermaid?.code && /daha\s+(karmasik|detayli|genis|buyuk)|gelistir|ayrintili|renkli/.test(normalizeIntentText(userText)) && !selectedTable?.rows?.length && !selectedChart?.data) {
       calls.push({ tool: "mermaid", input: { code: memory.lastMermaid.code, title, userText } });
@@ -2174,7 +2231,7 @@ function buildImplicitToolCalls(answer = "", req) {
     }
   }
 
-  if (wantsExcelFromText(userText) && !isExcelFileToPdfRequest(userText)) {
+  if (wantsExcelFromText(userText)) {
     const activeChartData = activeContent?.type === "chart" ? (activeContent.chart?.data || activeContent.ui?.data || null) : null;
     const excelInput = activeTable?.rows?.length
       ? { title, sheetName: title.slice(0, 31), rows: activeTable.rows, headers: activeTable.headers, filename: `${stem || "lucy-tablo"}.xlsx` }
@@ -2205,7 +2262,7 @@ function buildImplicitToolCalls(answer = "", req) {
       pdfInput.mermaid = activeContent.code || activeContent.mermaid;
       pdfInput.text = "";
     } else {
-      pdfInput.text = activeTable?.rows?.length && (isOnlyTransformCommand(userText) || isExcelFileToPdfRequest(userText)) ? tableToMarkdown(activeTable) : source;
+      pdfInput.text = activeTable?.rows?.length && (isOnlyTransformCommand(userText) || rankedSubsetRequested) ? tableToMarkdown(activeTable) : source;
     }
     calls.push({ tool: "pdf", input: pdfInput });
   }
@@ -2224,7 +2281,7 @@ function buildImplicitToolCalls(answer = "", req) {
 
   if (wantsDocumentFromText(userText)) {
     const format = documentFormatFromText(userText);
-    const inlineContent = documentInlineContentFromText(userText);
+    const inlineContent = rankedSubsetRequested ? "" : documentInlineContentFromText(userText);
     const content = inlineContent || (activeTable?.rows?.length && format !== "json" && format !== "csv" ? tableToMarkdown(activeTable) : source);
     const docTitle = inlineContent ? contentTitleFromText(inlineContent, "LUCY Test Notu") : title;
     const docStem = safeOutputStem(docTitle || stem || "lucy-belge");
@@ -2350,12 +2407,9 @@ function resolveClarificationFollowUpText(req) {
 function requestHasResolvableTypedReference(req) {
   const text = normalizeIntentText(latestUserIntentText(req));
   const memory = hydrateMemoryFromRequest(req);
-  if (isChartExportOnlyRequest(text) && memory.lastChart?.data) return true;
-  if (isExcelFileToPdfRequest(text) && memory.lastExcel?.storedFilename) return true;
-  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyası|dosyasi|dosyasını|dosyasini|dosyayı|dosyayi|excel|xlsx|xls|metin|yazi|yazı|diyagram|şema|sema)\b/.test(text);
+  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyayı|dosyayi|metin|yazi|yazı|diyagram|şema|sema)\b/.test(text);
   const hasVagueCurrentSource = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|son|en son|mevcut)\b/.test(text);
   const hasAction = currentUserHasClearAction(text);
-  if (/\b(grafigini|pasta|pie)\b/.test(text) && hasAction && memory.lastChart?.data) return true;
   if (hasTypedSource && hasAction) return true;
   if (hasVagueCurrentSource && hasAction && memory.activeContent?.type === "chart" && memory.lastChart?.data) return true;
   return false;
@@ -2571,8 +2625,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     || tableFromHistory(chartMemory, userText)
     || chartMemory.lastTable?.rows?.length
   ));
-  const explicitlyUsesTableSource = /\b(tablo|tabloyu|tablodan|table)\b/.test(normalizeIntentText(userText));
-  if (!forceStyleChart && tableBackedChartRequest && (explicitlyUsesTableSource || !userSpecificallyReferencesChart(userText))) {
+  if (!forceStyleChart && tableBackedChartRequest && !userSpecificallyReferencesChart(userText)) {
     // Tablo -> grafik deterministik kalmali; planner'in tahmini labels/values secimi tablo motorunu ezmemeli.
     toolCalls = [implicitChartCall];
   }
