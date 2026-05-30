@@ -130,6 +130,7 @@ function scoreHeaderForQuery(header = "", userText = "", chartType = "bar") {
   const q = normalizeToolIntentText(chartIntentText(userText));
   let score = 0;
 
+  if (/urun|ürün|product|ad|adi|adı|isim|ismi|model|kategori|category|aciklama|açıklama|description/.test(h)) score -= 220;
   if (/^#|^no$|^id$|sira|sıra/.test(h)) score -= 90;
   if (/not|aciklama|açıklama|kategori|category|birim$|unit$/.test(h)) score -= 40;
   if (/toplam|total/.test(q) && /toplam|total/.test(h)) score += 140;
@@ -262,7 +263,8 @@ function columnTotalsByHeaders(table, headers = []) {
 
 function wantsColumnSummary(userText = "") {
   const q = normalizeToolIntentText(userText);
-  return /kolon toplam|sutun toplam|sütun toplam|kolonlari|kolonları|sutunlari|sütunları|ozet|özet|metrik|metrikleri|numeric kolon|sayisal kolon|sayısal kolon/.test(q)
+  if (/yonetici\s+ozeti|yönetici\s+özeti|executive\s+summary|kisa\s+ozet|kısa\s+özet/.test(q)) return false;
+  return /kolon toplam|sutun toplam|sütun toplam|kolonlari|kolonları|sutunlari|sütunları|metrik|metrikleri|numeric kolon|sayisal kolon|sayısal kolon/.test(q)
     || /(metrik|kolon|sutun|sütun).*(karsilastir|karşılaştır)/.test(q);
 }
 

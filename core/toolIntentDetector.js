@@ -49,11 +49,13 @@ function semanticText(text = "") {
 }
 
 function hasSearchResearchIntent(q = "") {
-  const searchAction = /\b(ara|arastir|bul|oner|tavsiye|link|kaynak|listele)\b/.test(q)
-    || /\b(linkini|linklerini|sitesini|adresini)\b/.test(q);
-  const searchSubject = /\b(program|uygulama|app|android|ios|okuyucu|duzeltici|editor|alternatif|ucretsiz|reklamsiz|indirilecek|market|play store|store)\b/.test(q)
-    || /\b(pdf|word|docx|txt|excel|xlsx|xls|zip|qr|ocr|grafik|tablo)\b/.test(q);
-  return Boolean(searchAction && searchSubject);
+  const appSubject = /\b(program|uygulama|app|android|ios|okuyucu|duzeltici|editor|alternatif|market|play store|store)\b/.test(q);
+  const appQualifier = /\b(ucretsiz|reklamsiz)\b/.test(q) && /\b(program|uygulama|app|okuyucu|duzeltici|editor)\b/.test(q);
+  const appAction = /\b(ara|arastir|bul|oner|tavsiye|listele)\b/.test(q);
+  const webAction = /\b(arastir|internette ara|webde ara|web'de ara|google'da ara|google da ara)\b/.test(q);
+  const linkAction = /\b(link|linkini|linklerini|kaynak|kaynaklarini|site|sitesini|adresini)\b.*\b(bul|ver|goster|listele|ara)\b/.test(q)
+    || /\b(bul|ver|goster|listele|ara)\b.*\b(link|linkini|linklerini|kaynak|kaynaklarini|site|sitesini|adresini)\b/.test(q);
+  return Boolean(webAction || linkAction || ((appSubject || appQualifier) && appAction));
 }
 
 function hasReadExtractIntent(q = "") {
@@ -73,7 +75,8 @@ function hasExportIntent(q = "") {
 }
 
 function hasTransformFilterIntent(q = "") {
-  return /\b(en\s+(pahali|ucuz|yuksek|dusuk|buyuk|kucuk|fazla)|top\s+\d+|\d+\s+(urun|kalem|satir|kayit)|filtrele|sirala|sirali)\b/.test(q)
+  return /\b(en\s+(pahali|ucuz|yuksek|dusuk|buyuk|kucuk|fazla)|top\s+\d+|ilk\s+\d+|\d+\s+(urun|kalem|satir|kayit|kaydi)|filtrele|sirala|sirali)\b/.test(q)
+    || /\b(tablodan|veriden|tablo|veri|dataset)\b.*\bbul\b/.test(q)
     || /\b(tablo|tabloyu|veri|dataset|liste)\b.*\b(grafik|chart|pasta|cizgi|cubuk|bar|sutun|gorsellestir|cevir|donustur)\b/.test(q)
     || /\b(grafik|chart|pasta|cizgi|cubuk|bar|sutun|gorsellestir)\b.*\b(yap|olustur|hazirla|ciz|goster)\b/.test(q);
 }
@@ -93,12 +96,12 @@ function hasCommunicationIntent(q = "") {
 function classifySemanticIntent(text = "", memory = {}) {
   const q = semanticText(text);
   if (!q) return "unknown";
-  if (hasSearchResearchIntent(q)) return "search_research";
   if (hasCommunicationIntent(q)) return "communication";
   if (hasReadExtractIntent(q)) return "read_extract";
   if (hasStyleOnlyIntent(q, memory)) return "style_only";
   if (hasExportIntent(q)) return "export";
   if (hasTransformFilterIntent(q)) return "transform_filter";
+  if (hasSearchResearchIntent(q)) return "search_research";
   return "unknown";
 }
 
@@ -153,6 +156,8 @@ function wantsDocumentFromText(text = "") {
 }
 
 function wantsQrFromText(text = "") {
+  const intent = classifySemanticIntent(text);
+  if (intent === "search_research" || intent === "read_extract") return false;
   const q = normalizeIntentText(text);
   return /\bqr\b|karekod|qr kod/.test(q);
 }
