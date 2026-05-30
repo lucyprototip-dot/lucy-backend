@@ -52,10 +52,14 @@ function hasSearchResearchIntent(q = "") {
   const appSubject = /\b(program|uygulama|app|android|ios|okuyucu|duzeltici|editor|alternatif|market|play store|store)\b/.test(q);
   const appQualifier = /\b(ucretsiz|reklamsiz)\b/.test(q) && /\b(program|uygulama|app|okuyucu|duzeltici|editor)\b/.test(q);
   const appAction = /\b(ara|arastir|bul|oner|tavsiye|listele)\b/.test(q);
+  const linkTerm = /\b(link|linkini|linklerini|kaynak|kaynaklarini|site|sitesini|adresini)\b/.test(q);
   const webAction = /\b(arastir|internette ara|webde ara|web'de ara|google'da ara|google da ara)\b/.test(q);
   const linkAction = /\b(link|linkini|linklerini|kaynak|kaynaklarini|site|sitesini|adresini)\b.*\b(bul|ver|goster|listele|ara)\b/.test(q)
     || /\b(bul|ver|goster|listele|ara)\b.*\b(link|linkini|linklerini|kaynak|kaynaklarini|site|sitesini|adresini)\b/.test(q);
-  return Boolean(webAction || linkAction || ((appSubject || appQualifier) && appAction));
+  const sourceExportRef = /\b(bunu|sunlari|sunu|metni|icerigi|tabloyu|grafigi|grafik|dosyayi|son|onceki|exceli|pdfi|raporu)\b/.test(q)
+    && /\b(pdf|excel|xlsx|xls|word|docx|txt|markdown|md|csv|json|html|zip)\b/.test(q);
+  const appResearch = (appSubject || appQualifier) && (appAction || linkTerm);
+  return Boolean(webAction || appResearch || (linkAction && !sourceExportRef));
 }
 
 function hasReadExtractIntent(q = "") {
@@ -98,10 +102,10 @@ function classifySemanticIntent(text = "", memory = {}) {
   if (!q) return "unknown";
   if (hasCommunicationIntent(q)) return "communication";
   if (hasReadExtractIntent(q)) return "read_extract";
-  if (hasStyleOnlyIntent(q, memory)) return "style_only";
-  if (hasExportIntent(q)) return "export";
   if (hasTransformFilterIntent(q)) return "transform_filter";
   if (hasSearchResearchIntent(q)) return "search_research";
+  if (hasStyleOnlyIntent(q, memory)) return "style_only";
+  if (hasExportIntent(q)) return "export";
   return "unknown";
 }
 
