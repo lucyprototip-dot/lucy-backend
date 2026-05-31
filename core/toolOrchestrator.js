@@ -1724,11 +1724,13 @@ function cleanExportSourceText(text = "") {
     if (/^-{3,}$/.test(trimmed)) continue;
     if (isExportStatusLine(trimmed)) continue;
     if (isConversationalWrapperLine(trimmed)) continue;
+    if (isClarificationAnswerText(trimmed)) continue;
     if (/\b(lucyfiler|lucyfileref|storedfilename|downloadurl|generated\/)\b/.test(normalized)) continue;
     kept.push(trimmed);
   }
 
   const cleaned = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (!cleaned && isClarificationAnswerText(raw)) return "";
   return cleaned || raw;
 }
 
@@ -1917,6 +1919,16 @@ function resolveActiveContent(req, answer = "", options = {}) {
       : { type: "text", text: answerText, title: contentTitleFromText(answerText, "LUCY İçeriği"), source: "assistant-answer" };
   }
 
+  if (!freshContentRequest && userReferencesReportLike(userText)) {
+    const latestAssistant = latestAssistantContentObject(req);
+    if (latestAssistant && !isClarificationAnswerText(activeContentToText(latestAssistant, ""))) return latestAssistant;
+    if (memory.lastText && !isClarificationAnswerText(memory.lastText)) {
+      const clean = cleanExportSourceText(memory.lastText) || stripToolNoise(memory.lastText);
+      if (clean) return { type: "text", text: clean, title: contentTitleFromText(clean, "LUCY Rapor"), source: "report-lastText" };
+    }
+    if (memory.lastTable?.rows?.length) return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "report-lastTable" };
+  }
+
   if (freshContentRequest) return null;
 
   const preferred = transformPrefersTypedSource(userText);
@@ -1982,6 +1994,37 @@ function extractLucyWidgetsFromText(text = "") {
   return widgets;
 }
 
+
+function isClarificationAnswerText(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+  if (hasMarkdownTable(raw) || /```(?:lucy-widget|mermaid)/i.test(raw)) return false;
+  if (/\b(lucyfileref|lucyfiler|storedfilename|downloadurl|generated\/)\b/i.test(raw)) return false;
+  const clean = normalizeIntentText(stripToolNoise(raw));
+  if (!clean) return false;
+  const asksClarification = /\b(hangi|hangisini|hangisini kast|hangi raporu|hangi dosyayi|hangi dosyayı|hangi icerigi|hangi içeriği|tam olarak|netlestir|netleştir|belirt|kastettin|kastediyorsun|kastediyorsunuz|yoksa baska|yoksa başka|ne yapmami|ne yapmamı|ne yapmam)\b/.test(clean);
+  const isMostlyQuestion = clean.length < 320 || /\?$/.test(raw);
+  const hasRealContentSignal = /\b(rapor|analiz|tablo|liste|siir|şiir)\b/.test(clean) && (hasMarkdownTable(raw) || clean.split(/\s+/).length > 90);
+  return Boolean(asksClarification && isMostlyQuestion && !hasRealContentSignal);
+}
+
+function hasUsableMemoryContent(memory = {}) {
+  if (!memory || typeof memory !== "object") return false;
+  if (memory.lastTable?.rows?.length) return true;
+  if (memory.lastChart?.data) return true;
+  if (memory.lastMermaid?.code) return true;
+  if (memory.lastFile?.storedFilename || memory.lastFile?.filename) return true;
+  if (memory.activeContent && !isClarificationAnswerText(activeContentToText(memory.activeContent, ""))) return true;
+  if (memory.lastText && !isClarificationAnswerText(memory.lastText)) return true;
+  return false;
+}
+
+function userReferencesReportLike(text = "") {
+  const q = normalizeIntentText(text);
+  if (!q) return false;
+  return /\b(bu rapor|bu raporu|bu raporun|raporu|raporunu|son rapor|son raporu|onun raporu|onun raporunu|konustuk|konuştuk)\b/.test(q);
+}
+
 function isGeneratedStatusOnlyText(text = "") {
   const clean = normalizeIntentText(stripToolNoise(text));
   if (!clean) return false;
@@ -1995,6 +2038,7 @@ function isToolGeneratedAnswerText(text = "") {
   const raw = String(text || "");
   const clean = normalizeIntentText(stripToolNoise(raw));
   if (!clean) return false;
+  if (isClarificationAnswerText(raw)) return true;
   if (isGeneratedStatusOnlyText(raw)) return true;
 
   // Tool sonuçları aktif içerik olarak ezmesin. Örn. şiir yazıldıktan sonra
@@ -2026,8 +2070,10 @@ function latestAssistantContentObject(req) {
     const message = messages[i] || {};
     const role = String(message.role || message.sender || "").toLowerCase();
     if (role !== "assistant") continue;
-    const text = stripToolNoise(messageText(message));
-    if (!text || isToolGeneratedAnswerText(text)) continue;
+    const rawText = messageText(message);
+    if (isClarificationAnswerText(rawText)) continue;
+    const text = cleanExportSourceText(rawText) || stripToolNoise(rawText);
+    if (!text || isToolGeneratedAnswerText(text) || isClarificationAnswerText(text)) continue;
     const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text) || parseLooseInlineTableObject(text) || parseNumericFactTableObject(text);
     if (table?.rows?.length) return { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(text, "LUCY Tablosu"), source: "latest-assistant" };
     return { type: "text", text, title: contentTitleFromText(text, "LUCY İçeriği"), source: "latest-assistant" };
@@ -2054,6 +2100,7 @@ function typedContentFromMemory(memory = {}, preferred = "text") {
 function rememberText(memory, text = "") {
   const clean = stripToolNoise(text);
   if (!clean || clean.length < 2) return memory;
+  if (isClarificationAnswerText(clean)) return memory;
   if (isGeneratedStatusOnlyText(text) || isToolGeneratedAnswerText(text)) return memory;
   memory.lastText = clean;
   const table = parseFirstMarkdownTableObject(clean) || parseCsvLikeTableObject(clean) || parseLooseInlineTableObject(clean) || parseNumericFactTableObject(clean);
@@ -2184,8 +2231,8 @@ function sourceFromMemory(req, answer = "") {
   if (activeText) return activeText;
 
   const memory = hydrateMemoryFromRequest(req);
-  const answerText = stripToolNoise(answer);
-  if (answerText && answerText.length > 30) return answerText;
+  const answerText = cleanExportSourceText(answer) || stripToolNoise(answer);
+  if (answerText && answerText.length > 30 && !isClarificationAnswerText(answerText)) return answerText;
   if (memory.lastTable?.rows?.length) return tableToMarkdown(memory.lastTable);
   if (memory.lastText) return memory.lastText;
   return latestUsefulConversationContent(req, answer);
@@ -2290,8 +2337,10 @@ function recentMessageTextBeforeLastUser(req, roleWanted = "") {
     if (!passedLastUser && role === "user") { passedLastUser = true; continue; }
     if (!passedLastUser) continue;
     if (roleWanted && role !== roleWanted) continue;
-    const text = stripToolNoise(messageText(message));
-    if (text && !isToolGeneratedAnswerText(text)) return text;
+    const rawText = messageText(message);
+    if (isClarificationAnswerText(rawText)) continue;
+    const text = cleanExportSourceText(rawText) || stripToolNoise(rawText);
+    if (text && !isToolGeneratedAnswerText(text) && !isClarificationAnswerText(text)) return text;
   }
   return "";
 }
@@ -3133,6 +3182,7 @@ function sourcePrefixFromText(text = "") {
   const q = normalizeIntentText(text);
   if (/\b(grafik|grafiği|grafigi|chart|pasta|pie|cizgi|çizgi|bar|sutun|sütun)\b/.test(q)) return "son grafiği";
   if (/\b(tablo|tabloyu|tablom)\b/.test(q)) return "son tabloyu";
+  if (/\b(rapor|raporu|raporunu|raporun)\b/.test(q)) return "son raporu";
   if (/\b(dosya|dosyayi|dosyayı|pdf|excel|zip|word|docx)\b/.test(q)) return "son dosyayı";
   if (/\b(metin|yazi|yazı|siir|şiir)\b/.test(q)) return "son metni";
   if (/\b(son|en son|az onceki|az önceki|bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|yaptigini|yaptığını)\b/.test(q)) return "son çıktıyı";
@@ -3191,11 +3241,12 @@ function resolveClarificationFollowUpText(req) {
 function requestHasResolvableTypedReference(req) {
   const text = normalizeIntentText(latestUserIntentText(req));
   const memory = hydrateMemoryFromRequest(req);
-  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyayı|dosyayi|metin|yazi|yazı|diyagram|şema|sema)\b/.test(text);
-  const hasVagueCurrentSource = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|son|en son|mevcut)\b/.test(text);
+  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyayı|dosyayi|metin|yazi|yazı|diyagram|şema|sema|rapor|raporu|raporunu)\b/.test(text);
+  const hasVagueCurrentSource = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|son|en son|mevcut|bu|o)\b/.test(text);
   const hasAction = currentUserHasClearAction(text);
-  if (hasTypedSource && hasAction) return true;
-  if (hasVagueCurrentSource && hasAction && memory.activeContent?.type === "chart" && memory.lastChart?.data) return true;
+  if (!hasAction) return false;
+  if (hasTypedSource && hasUsableMemoryContent(memory)) return true;
+  if (hasVagueCurrentSource && hasUsableMemoryContent(memory)) return true;
   return false;
 }
 
@@ -3301,7 +3352,7 @@ function buildClarificationMessage(decision = {}, req = null) {
   if (memory.lastChart?.data) options.push("son grafiği");
   if (memory.lastMermaid?.code) options.push("son diyagramı");
   if (memory.lastFile?.storedFilename) options.push("son dosyayı");
-  if (memory.lastText) options.push("son metni");
+  if (memory.lastText && !isClarificationAnswerText(memory.lastText)) options.push("son metni");
   if (options.length) return `Aşkım tam olarak hangisini kastettin: ${options.slice(0, 4).join(", ")} mı?`;
   return "Aşkım bunu tam anlayamadım. Biraz daha detay verir misin?";
 }
@@ -3312,6 +3363,7 @@ function shouldAskClarificationWithoutAi(req) {
   const vagueRef = /\b(bunu|onu|şunu|sunu|bu|o|son|en son|az onceki|az önceki|ilk|onceki|önceki)\b/.test(text);
   const mutation = /\b(renk|renkli|pastel|neon|kalin|kalın|cizgili|çizgili|degistir|değiştir|duzenle|düzenle|pdf yap|excel yap|word yap|zip yap|grafik yap|tablo yap)\b/.test(text);
   if (!vagueRef || !mutation) return "";
+  if (requestHasResolvableTypedReference(req)) return "";
   const memory = hydrateMemoryFromRequest(req);
   if (memory.activeContent?.type === "chart" && memory.lastChart?.data && userStyleMutationOnly(text)) return "";
   if (isChartExportOnlyRequest(text) && memory.lastChart?.data) return "";
