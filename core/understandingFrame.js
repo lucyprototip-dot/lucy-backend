@@ -74,6 +74,26 @@ function looksLikeStyleOnlyRequest(text = "") {
   return Boolean(hasStyle && hasChartRef && hasAction && !hasOutputFormat);
 }
 
+function looksLikeFreshContentGenerationRequest(text = "", references = {}) {
+  const q = normalizeIntentText(text);
+  if (!q) return false;
+
+  const hasVagueOrHistoricalReference = Boolean(
+    references?.hasVagueReference
+    || references?.ordinal
+    || /\b(bunu|sunu|şunu|onu|bunun|sunun|onun|son|en son|onceki|bir onceki|az onceki|ilk|birinci|yukaridaki|ustteki|mevcut)\b/.test(q)
+  );
+  if (hasVagueOrHistoricalReference) return false;
+
+  const hasGenerationVerb = /\b(hazirla|hazirlayip|olustur|oluştur|uret|üret|yaz|cikar|çıkar|duzenle|düzenle|taslak|ver)\b/.test(q);
+  const hasContentNoun = /\b(rapor|analiz|ozet|özet|metin|yazi|yazı|belge|dokuman|doküman|strateji|plan|liste|icerik|içerik)\b/.test(q);
+  const hasTopicSignal = /\b(hakkinda|hakkında|hakkina|hakkına|ile ilgili|konusunda|uzerine|üzerine|icin|için)\b/.test(q)
+    || /\b(ekonomi|ekonomisi|ulke|ülke|sirket|şirket|pazar|satis|satış|turkiye|türkiye|almanya|fransa|ingiltere|italya|ispanya|japonya|cin|çin|rusya|abd|amerika)\b/.test(q);
+
+  return Boolean(hasGenerationVerb && hasContentNoun && hasTopicSignal);
+}
+
+
 function outputTargetsFromText(text = "") {
   const targets = [];
   if (wantsPdfFromText(text)) targets.push("pdf");
@@ -159,7 +179,8 @@ function referencesFromText(text = "") {
 function sourceRequirementFromFrame(primaryIntent = "unknown", outputTargets = [], references = {}, text = "") {
   const q = normalizeIntentText(text);
   const targets = new Set(outputTargets);
-  if (taskSegmentsFromText(text).length > 1 && targets.size > 1) return "working_artifact_chain";
+  const freshContentRequest = looksLikeFreshContentGenerationRequest(text, references);
+  if (taskSegmentsFromText(text).length > 1 && targets.size > 1 && !freshContentRequest) return "working_artifact_chain";
   if (targets.has("time")) return "live_time";
   if (primaryIntent === "search_research") return "web_research";
   if (targets.has("webFetch")) return "web_page";
@@ -169,6 +190,7 @@ function sourceRequirementFromFrame(primaryIntent = "unknown", outputTargets = [
   if (primaryIntent === "style_only") return "chart";
   if (targets.has("chart")) return "table_or_numeric_data";
   if (targets.has("pdf") || targets.has("excel") || targets.has("document")) {
+    if (freshContentRequest && !references.hasVagueReference) return "fresh_generated_content";
     if (references.targetTypes.includes("chart")) return "chart";
     if (references.targetTypes.includes("table")) return "table";
     if (references.targetTypes.includes("file")) return "file";
@@ -182,7 +204,9 @@ function sourceRequirementFromFrame(primaryIntent = "unknown", outputTargets = [
 function utteranceTypeFromFrame(text = "", primaryIntent = "unknown", outputTargets = [], references = {}, contextAvailable = false) {
   const q = normalizeIntentText(text);
   const segments = taskSegmentsFromText(text);
+  const freshContentRequest = looksLikeFreshContentGenerationRequest(text, references);
   if (!String(text || "").trim()) return "empty";
+  if (freshContentRequest && outputTargets.length) return outputTargets.length > 1 ? "multi_step" : "task";
   if (segments.length > 1 && outputTargets.length) return "multi_step";
   if (references.hasVagueReference && (contextAvailable || outputTargets.length)) return "follow_up";
   if (contextAvailable && outputTargets.length && q.length <= 64) return "follow_up";

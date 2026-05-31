@@ -262,9 +262,12 @@ function isOnlyTransformCommand(text = "") {
   const q = normalizeIntentText(text).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
   if (!q) return false;
   const compact = q
-    .replace(/\b(bunu|sunlari|son|az onceki|onceki|yukardaki|yukaridaki|tabloyu|metni|icerigi|dosyayi|dosyaları|dosyalari|olarak|seklinde|lutfen|hadi|bana|gonder|hazirla|yap|yaz|ver|indir|cevir|donustur)\b/g, " ")
+    .replace(/\b(bunu|sunu|sunlari|onu|son|en son|az onceki|onceki|bir onceki|yukardaki|yukaridaki|ustteki|mevcut|tabloyu|metni|icerigi|dosyayi|dosyalari|olarak|seklinde|lutfen|hadi|bana|gonder|hazirla|yap|yaz|ver|indir|cevir|donustur)\b/g, " ")
     .replace(/\s+/g, " ").trim();
-  return /^(pdf|excel|xlsx|xls|zip|docx|word|csv|json)$/.test(compact) || q.length <= 42;
+  const bareFormat = /^(pdf|excel|xlsx|xls|zip|docx|word|csv|json)$/.test(compact);
+  const explicitReference = /\b(bunu|sunu|onu|son|en son|az onceki|onceki|bir onceki|yukardaki|yukaridaki|ustteki|mevcut|tabloyu|metni|icerigi|dosyayi|dosyalari)\b/.test(q);
+  const hasFormatAction = /\b(pdf|excel|xlsx|xls|zip|docx|word|csv|json)\b/.test(q) && /\b(yap|ver|indir|cevir|donustur|kaydet|hazirla|olustur)\b/.test(q);
+  return bareFormat || Boolean(explicitReference && hasFormatAction);
 }
 
 function stripToolNoise(text = "") {
