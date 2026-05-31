@@ -59,6 +59,7 @@ const {
   mermaidUiFromMemory,
 } = require("./chartMermaidEngine");
 const { buildUnderstandingFrame, frameSuggestedToolPermission } = require("./understandingFrame");
+const { buildLucyUnderstandingCore } = require("./lucyUnderstandingCore");
 
 dotenv.config();
 
@@ -3488,6 +3489,7 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   if (clarifiedIntent) req.__lucyEffectiveUserText = clarifiedIntent;
   if (req && typeof req === "object") {
     req.__lucyUnderstandingFrame = buildUnderstandingFrame(req, memory);
+    req.__lucyUnderstandingCore = buildLucyUnderstandingCore(req, { memory, frame: req.__lucyUnderstandingFrame, answer });
   }
   const legacyArtifactForDebug = resolveActiveContent(req, answer, { allowFrameAdoption: false });
   recordReferenceFrameDebug(req, memory, legacyArtifactForDebug);
