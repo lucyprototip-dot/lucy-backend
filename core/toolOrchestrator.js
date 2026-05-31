@@ -1682,6 +1682,27 @@ function isFreshContentGenerationRequest(userText = "", frame = null) {
   return Boolean(hasExportTarget && hasGenerationVerb && hasContentNoun && hasTopicSignal);
 }
 
+function isExportStatusLine(line = "") {
+  const normalized = normalizeIntentText(line);
+  if (!normalized) return false;
+  if (/\b(lucyfiler|lucyfileref|storedfilename|downloadurl|generated\/)\b/.test(normalized)) return true;
+  if (/\b(pdf|dosya|zip|excel|word)\b.*\b(hazirlandi|hazırlandı|hazirlaniyor|hazırlanıyor|hazirliyorum|hazırlıyorum|donusturuyorum|dönüştürüyorum|ceviriyorum|çeviriyorum|iletiyorum|indir|indirebilirsin|baglanti|bağlantı|birazdan|gelecek|hazir|hazır)\b/.test(normalized)) return true;
+  if (/\b(pdf|dosya)\b.*\b(ister misin|istersen|gonderebilirim|gönderebilirim|olusturup|oluşturup|olusturayim|oluşturayım)\b/.test(normalized)) return true;
+  if (/^(pdf|dosya|zip|excel|word)\s+(hazir|hazır|hazirlandi|hazırlandı)\b/.test(normalized)) return true;
+  return false;
+}
+
+function isConversationalWrapperLine(line = "") {
+  const normalized = normalizeIntentText(line);
+  if (!normalized) return false;
+  if (/^(tabii|tamam|olur|elbette|hemen|peki|harika)\b/.test(normalized)) return true;
+  if (/^(askim|aşkım|canim|canım)\b.*\b(hazirliyorum|hazırlıyorum|yazdim|yazdım|donustureyim|dönüştüreyim|iletiyorum|iste sana|işte sana)\b/.test(normalized)) return true;
+  if (/\b(daha detayli|daha detaylı|istersen|talep edebilirsin|hemen yaparim|hemen yaparım)\b/.test(normalized)) return true;
+  if (/^(ne dersin|dilersen|istersen|hazirsan|hazırsan)\b/.test(normalized)) return true;
+  if (/\b(yuregine|yüreğine)\b.*\b(mutlu|dokunabildiysem)\b/.test(normalized)) return true;
+  return false;
+}
+
 function cleanExportSourceText(text = "") {
   const raw = stripToolNoise(String(text || ""))
     .replace(/^\s*LUCYFILER\b.*$/gim, "")
@@ -1699,15 +1720,145 @@ function cleanExportSourceText(text = "") {
       continue;
     }
     if (/^-{3,}$/.test(trimmed)) continue;
-    if (/^(tabii|tamam|olur|elbette|hemen|peki|harika)\b/.test(normalized)) continue;
-    if (/\b(pdf|dosya)\b.*\b(ister misin|istersen|gonderebilirim|gönderebilirim|olusturup|oluşturup)\b/.test(normalized)) continue;
-    if (/\b(daha detayli|daha detaylı|istersen|talep edebilirsin|hemen yaparim|hemen yaparım)\b/.test(normalized)) continue;
+    if (isExportStatusLine(trimmed)) continue;
+    if (isConversationalWrapperLine(trimmed)) continue;
     if (/\b(lucyfiler|lucyfileref|storedfilename|downloadurl|generated\/)\b/.test(normalized)) continue;
     kept.push(trimmed);
   }
 
   const cleaned = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   return cleaned || raw;
+}
+
+function titleCaseTurkish(value = "") {
+  return String(value || "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => {
+      const lower = word.toLocaleLowerCase("tr-TR");
+      return lower.charAt(0).toLocaleUpperCase("tr-TR") + lower.slice(1);
+    })
+    .join(" ");
+}
+
+function stripFreshTopicCommandNoise(value = "") {
+  let text = String(value || "")
+    .replace(/[?.!,;:]+$/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  text = text.replace(/\b(bana|benim icin|benim için|lutfen|lütfen|kisa|kısa|oz|öz|bir|detayli|detaylı|profesyonel)\b/gi, " ");
+  text = text.replace(/\b(rapor|raporu|analiz|analizi|ozet|özet|metin|belge|dokuman|doküman)\b.*$/gi, " ");
+  text = text.replace(/\b(pdf|excel|word|docx|zip|olarak|seklinde|şeklinde|hazirla|hazırl\w*|olustur|oluştur|uret|üret|yaz|yap|ver|donustur|dönüştür|cevir|çevir|indir)\b/gi, " ");
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function freshTopicFromUserText(userText = "") {
+  const raw = String(userText || "").trim();
+  if (!raw) return "LUCY Raporu";
+  const patterns = [
+    /(?:bana\s+)?(.+?)\s+hakk[ıi]nda\b/i,
+    /(?:bana\s+)?(.+?)\s+ile\s+ilgili\b/i,
+    /(?:bana\s+)?(.+?)\s+konusunda\b/i,
+    /(?:bana\s+)?(.+?)\s+[üu]zerine\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    const topic = stripFreshTopicCommandNoise(match?.[1] || "");
+    if (topic) return titleCaseTurkish(topic);
+  }
+  const beforeOutput = raw.split(/\b(pdf|excel|word|docx|zip|olarak|seklinde|şeklinde|hazirla|hazırl\w*|olustur|oluştur|uret|üret|yaz|yap|ver|donustur|dönüştür|cevir|çevir)\b/i)[0] || raw;
+  const topic = stripFreshTopicCommandNoise(beforeOutput);
+  return titleCaseTurkish(topic || "LUCY Raporu");
+}
+
+function freshReportTitleFromUserText(userText = "") {
+  const topic = freshTopicFromUserText(userText);
+  const q = normalizeIntentText(userText);
+  if (/\b(ekonomi|ekonomisi|ekonomik|piyasa|finans|para politikasi|para politikası)\b/.test(q)) {
+    return /\bekonomi|ekonomisi\b/i.test(topic) ? `${topic} – Kısa Rapor` : `${topic} Ekonomisi – Kısa Rapor`;
+  }
+  if (/\b(ulke|ülke|baskent|nufus|nüfus|turizm|kultur|kültür)\b/.test(q) || /\bhakk[ıi]nda\b/.test(q)) {
+    return `${topic} – Kısa Rapor`;
+  }
+  if (/\b(analiz|analizi)\b/.test(q)) return `${topic} – Kısa Analiz`;
+  return `${topic} – Kısa Rapor`;
+}
+
+function weakFreshExportSourceReason(text = "") {
+  const raw = String(text || "").trim();
+  const clean = normalizeIntentText(raw);
+  if (!raw) return "empty";
+  if (/\b(pdf|dosya|rapor)\b.*\b(hazirlandi|hazırlanıyor|hazirlaniyor|hazirliyorum|hazırlıyorum|donusturuyorum|dönüştürüyorum|iletiyorum|indir|indirebilirsin|birazdan)\b/.test(clean)) return "status_or_promise_only";
+  if (/\braporda\b.*\b(basliklar|başlıklar|yer alacak|bulunacak)\b/.test(clean)) return "outline_promise_only";
+  if (/\b(pdf dosyasini|pdf dosyasını)\b.*\b(ister misin|gonderebilirim|gönderebilirim|olusturayim|oluşturayım)\b/.test(clean)) return "asks_before_output";
+  const words = clean.split(/\s+/).filter(Boolean).length;
+  const contentSignals = (clean.match(/\b(genel bakis|genel bakış|ekonomi|enflasyon|nufus|nüfus|turizm|degerlendirme|değerlendirme|risk|gorunum|görünüm|sonuc|sonuç|dis ticaret|dış ticaret|sektor|sektör)\b/g) || []).length;
+  if (words < 80 && contentSignals < 3) return "too_short_for_report";
+  return "";
+}
+
+function buildFreshGeneratedReportText(userText = "") {
+  const title = freshReportTitleFromUserText(userText);
+  const topic = title.replace(/\s+[–-]\s+Kısa\s+(Rapor|Analiz)$/i, "").trim() || freshTopicFromUserText(userText);
+  const q = normalizeIntentText(userText);
+  const isEconomic = /\b(ekonomi|ekonomisi|ekonomik|piyasa|finans|enflasyon|faiz|dis ticaret|dış ticaret|cari acik|cari açık)\b/.test(q);
+
+  if (isEconomic) {
+    return [
+      title,
+      "",
+      "Genel Çerçeve",
+      `${topic}, büyüme, enflasyon, istihdam, dış ticaret ve finansal koşulların birlikte değerlendirilmesi gereken dinamik bir ekonomik yapıya sahiptir. Kısa raporun amacı, mevcut görünümü sade ve karar almaya yardımcı olacak şekilde özetlemektir.`,
+      "",
+      "Büyüme ve Üretim",
+      "Ekonomik aktivite; iç talep, yatırım eğilimi, sanayi üretimi, hizmetler sektörü ve ihracat performansına bağlı olarak şekillenir. Kısa vadede talep koşulları ve finansmana erişim büyümenin yönünü belirleyen ana unsurlardır.",
+      "",
+      "Enflasyon ve Para Politikası",
+      "Fiyat istikrarı, kur hareketleri, enerji ve gıda maliyetleri ile para politikasının sıkılık derecesi yakından izlenmelidir. Enflasyon beklentileri ve merkez bankası adımları ekonomik güven açısından kritik önemdedir.",
+      "",
+      "Dış Ticaret ve Cari Denge",
+      "İhracat pazarlarının talebi, ithalat maliyetleri, enerji faturası ve turizm gelirleri dış dengeyi etkiler. Cari denge tarafında sürdürülebilirlik, finansman kalitesi ve rezerv görünümüyle birlikte okunmalıdır.",
+      "",
+      "Riskler ve Kısa Görünüm",
+      "Başlıca riskler arasında jeopolitik gelişmeler, küresel faiz koşulları, kur oynaklığı, enflasyon baskısı ve dış finansman ihtiyacı yer alır. Kısa vadede istikrar, güven artırıcı politikalar ve yapısal iyileştirmelerle desteklenebilir.",
+    ].join("\n");
+  }
+
+  return [
+    title,
+    "",
+    "Genel Bakış",
+    `${topic}, siyasi yapı, ekonomik kapasite, nüfus dinamikleri, dış ilişkiler ve kültürel özellikler açısından değerlendirilebilecek önemli bir konudur. Bu kısa rapor, temel başlıkları düzenli bir özet halinde sunar.`,
+    "",
+    "Ekonomi",
+    "Ekonomik görünüm; üretim kapasitesi, dış ticaret, hizmetler sektörü, yatırım ortamı ve iş gücü piyasası üzerinden okunur. Kısa vadeli performans hem iç talebe hem de küresel koşullara bağlıdır.",
+    "",
+    "Toplum ve Şehirler",
+    "Nüfus yapısı, şehirleşme, eğitim düzeyi ve yaşam standartları ülkenin sosyal görünümünü belirleyen ana unsurlardır. Büyük şehirler ekonomik, kültürel ve idari merkezler olarak öne çıkar.",
+    "",
+    "Dış İlişkiler ve Stratejik Konum",
+    "Bölgesel konum, ticaret bağlantıları, uluslararası kurumlarla ilişkiler ve güvenlik politikaları ülkenin stratejik önemini etkiler. Bu başlıklar ekonomik ve siyasi kararlarla birlikte değerlendirilmelidir.",
+    "",
+    "Kısa Değerlendirme",
+    `${topic} hakkında genel görünüm; ekonomik dayanıklılık, kurumsal kapasite, insan kaynağı ve dış bağlantıların birlikte analiz edilmesiyle daha sağlıklı anlaşılır. Daha kapsamlı çalışma için sektör, dönem veya veri seti ayrıca netleştirilebilir.`,
+  ].join("\n");
+}
+
+function freshPdfContentContract(userText = "", source = "", answer = "") {
+  const cleanedSource = cleanExportSourceText(source || answer || "");
+  const reason = weakFreshExportSourceReason(cleanedSource);
+  const generated = buildFreshGeneratedReportText(userText);
+  const text = reason ? generated : cleanedSource;
+  const title = contentTitleFromText(text, freshReportTitleFromUserText(userText));
+  return {
+    title,
+    text,
+    reason,
+    generatedFallback: Boolean(reason),
+  };
 }
 
 function inlineContentFromToolRequest(userText = "") {
@@ -2086,18 +2237,57 @@ function hasMarkdownTable(text = "") {
   return lines.some((line, index) => line.includes("|") && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || ""));
 }
 
+function cleanTitleCandidate(line = "") {
+  return String(line || "")
+    .replace(/^#{1,4}\s+/, "")
+    .replace(/[*_`]/g, "")
+    .replace(/^[\s\-•●▪▫✅☑️✔️🔥💖❤️🖤🌹🌷🌺✨⭐★🌟💎🚀📄📊📋🛒]+/gu, "")
+    .replace(/[\s\-•●▪▫✅☑️✔️🔥💖❤️🖤🌹🌷🌺✨⭐★🌟💎🚀📄📊📋🛒]+$/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isBadTitleCandidate(line = "") {
+  const q = normalizeIntentText(line);
+  if (!q) return true;
+  if (line.includes("|")) return true;
+  if (/^(tabii|tamam|olur|elbette|hemen|peki|harika|askim|aşkım|canim|canım)\b/.test(q)) return true;
+  if (isExportStatusLine(line) || isConversationalWrapperLine(line)) return true;
+  if (/\b(lucyfiler|storedfilename|downloadurl|generated\/)\b/.test(q)) return true;
+  if (/\b(ister misin|ne dersin|indirebilirsin|birazdan|hazirliyorum|hazırlıyorum|dönüştürüyorum|donusturuyorum)\b/.test(q)) return true;
+  return false;
+}
+
+function isShortTitleLikeLine(line = "") {
+  const cleaned = cleanTitleCandidate(line);
+  if (!cleaned || isBadTitleCandidate(cleaned)) return false;
+  const words = normalizeIntentText(cleaned).split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 7) return false;
+  if (/[.!?;:]{1,}$/.test(cleaned)) return false;
+  return true;
+}
+
 function contentTitleFromText(text = "", fallback = "LUCY Çıktısı") {
   const cleaned = cleanExportSourceText(text) || String(text || "");
   const lines = cleaned.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const firstHeading = lines.find((line) => /^#{1,4}\s+/.test(line));
-  if (firstHeading) return firstHeading.replace(/^#{1,4}\s+/, "").slice(0, 70);
-  const titledLine = lines.find((line) => /\b(rapor|analiz|ozet|özet|plan|strateji)\b/i.test(normalizeIntentText(line)) && !line.includes("|"));
-  if (titledLine) return titledLine.replace(/[*_`#]/g, "").slice(0, 70);
-  const firstLine = lines.find((line) => {
+  const firstHeading = lines.find((line) => /^#{1,4}\s+/.test(line) && !isBadTitleCandidate(line));
+  if (firstHeading) return cleanTitleCandidate(firstHeading).slice(0, 70);
+
+  const titledLine = lines.find((line) => {
     const q = normalizeIntentText(line);
-    return !line.includes("|") && !/^(tabii|tamam|olur|elbette|hemen|peki|harika)\b/.test(q) && !/\b(lucyfiler|storedfilename|downloadurl|generated\/)\b/.test(q);
+    return !isBadTitleCandidate(line) && /\b(rapor|analiz|ozet|özet|plan|strateji|tablo|tablosu|liste|siir|şiir|alisveris|alışveriş)\b/.test(q);
   });
-  if (firstLine) return firstLine.replace(/[*_`#]/g, "").slice(0, 70);
+  if (titledLine) return cleanTitleCandidate(titledLine).slice(0, 70);
+
+  const shortTitle = lines.find((line, index) => {
+    if (!isShortTitleLikeLine(line)) return false;
+    const next = lines[index + 1] || "";
+    return Boolean(next && !isBadTitleCandidate(next));
+  });
+  if (shortTitle) return cleanTitleCandidate(shortTitle).slice(0, 70);
+
+  const firstLine = lines.find((line) => !isBadTitleCandidate(line));
+  if (firstLine) return cleanTitleCandidate(firstLine).slice(0, 70);
   return fallback;
 }
 
@@ -2753,26 +2943,31 @@ function buildImplicitToolCalls(answer = "", req) {
     const selectedChartForPdf = userSpecificallyReferencesChart(userText)
       ? (chartFromHistory(memory, userText) || memory.lastChart)
       : null;
-    const pdfTextSource = cleanExportSourceText(source);
-    const pdfTitle = selectedChartForPdf?.title || contentTitleFromText(pdfTextSource || source, title || "LUCY Rapor");
+    const freshPdfContract = freshContentRequest ? freshPdfContentContract(userText, source, answer) : null;
+    const pdfTextSource = freshPdfContract?.text || cleanExportSourceText(source);
+    const pdfTitle = selectedChartForPdf?.title || freshPdfContract?.title || contentTitleFromText(pdfTextSource || source, title || "LUCY Rapor");
     const pdfInput = { title: pdfTitle, filename: `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf` };
+    if (freshPdfContract?.generatedFallback) {
+      pdfInput.sourceMode = "fresh_generated_report_fallback";
+      pdfInput.sourceReason = freshPdfContract.reason;
+    }
     if (selectedChartForPdf?.data) {
       pdfInput.chart = selectedChartForPdf;
       pdfInput.data = selectedChartForPdf.data;
       pdfInput.chartType = selectedChartForPdf.chartType || selectedChartForPdf.type || "bar";
       pdfInput.text = "";
-    } else if (activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data)) {
+    } else if (!freshContentRequest && activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data)) {
       const chart = activeContent.chart || activeContent.ui;
       pdfInput.chart = chart;
       pdfInput.data = chart.data;
       pdfInput.chartType = chart.chartType || chart.type || "bar";
       pdfInput.text = "";
-    } else if (activeContent?.type === "mermaid" && String(activeContent.code || activeContent.mermaid || "").trim()) {
+    } else if (!freshContentRequest && activeContent?.type === "mermaid" && String(activeContent.code || activeContent.mermaid || "").trim()) {
       pdfInput.mermaid = activeContent.code || activeContent.mermaid;
       pdfInput.text = "";
     } else {
       const pdfText = activeTable?.rows?.length && (isOnlyTransformCommand(userText) || rankedSubsetRequested) ? tableToMarkdown(activeTable) : pdfTextSource;
-      pdfInput.text = pdfText || cleanExportSourceText(source);
+      pdfInput.text = pdfText || freshPdfContract?.text || cleanExportSourceText(source);
     }
     calls.push({ tool: "pdf", input: pdfInput });
   }
