@@ -1700,6 +1700,8 @@ function isConversationalWrapperLine(line = "") {
   if (/\b(daha detayli|daha detaylı|istersen|talep edebilirsin|hemen yaparim|hemen yaparım)\b/.test(normalized)) return true;
   if (/^(ne dersin|dilersen|istersen|hazirsan|hazırsan)\b/.test(normalized)) return true;
   if (/\b(yuregine|yüreğine)\b.*\b(mutlu|dokunabildiysem)\b/.test(normalized)) return true;
+  if (/\b(iste|işte)\s+(siir|şiir)\s+bitti\b/.test(normalized)) return true;
+  if (/\b(ask|aşk)\s+bitmez\b.*\b(bitmez|hic bitmez|hiç bitmez)\b/.test(normalized)) return true;
   return false;
 }
 
@@ -2265,6 +2267,71 @@ function isShortTitleLikeLine(line = "") {
   if (!words.length || words.length > 7) return false;
   if (/[.!?;:]{1,}$/.test(cleaned)) return false;
   return true;
+}
+
+
+function isGenericPdfTitle(title = "") {
+  const q = normalizeIntentText(title);
+  if (!q) return true;
+  return /^(lucy|pdf sonucu|lucy rapor|lucy raporu|lucy cikti|lucy ciktisi|lucy icerigi|lucy tablosu|lucy belgesi|lucy dosyasi|lucy dosyası|rapor|cikti|çıktı|icerik|içerik|tablo|dosya)$/.test(q);
+}
+
+function nonGenericTitle(value = "") {
+  const clean = cleanTitleCandidate(value);
+  return clean && !isGenericPdfTitle(clean) && !isBadTitleCandidate(clean) ? clean.slice(0, 70) : "";
+}
+
+function recentMessageTextBeforeLastUser(req, roleWanted = "") {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  let passedLastUser = false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || message.sender || "").toLowerCase();
+    if (!passedLastUser && role === "user") { passedLastUser = true; continue; }
+    if (!passedLastUser) continue;
+    if (roleWanted && role !== roleWanted) continue;
+    const text = stripToolNoise(messageText(message));
+    if (text && !isToolGeneratedAnswerText(text)) return text;
+  }
+  return "";
+}
+
+function recentUserTopicTitle(req, suffix = "") {
+  const text = recentMessageTextBeforeLastUser(req, "user");
+  if (!text) return "";
+  const q = normalizeIntentText(text);
+  let topic = "";
+  if (/\bpazar\b.*\b(alisveris|alışveriş)\b/.test(q)) topic = "Pazar Alışverişi";
+  else if (/\b(siir|şiir)\b/.test(q)) topic = "Aşk Şiiri";
+  else if (/\btablo\b/.test(q)) topic = freshTopicFromUserText(text).replace(/\s+[–-]\s+Kısa\s+(Rapor|Analiz)$/i, "").trim();
+  else topic = nonGenericTitle(contentTitleFromText(text, ""));
+  if (!topic || isGenericPdfTitle(topic)) return "";
+  if (suffix && !normalizeIntentText(topic).includes(normalizeIntentText(suffix))) return `${topic} ${suffix}`.trim();
+  return topic;
+}
+
+function titleFromActiveContentForPdf(activeContent = null, activeTable = null, pdfText = "", req = null, userText = "", fallback = "LUCY Rapor") {
+  const direct = nonGenericTitle(activeContent?.title || "");
+  if (direct) return direct;
+
+  const fromText = nonGenericTitle(contentTitleFromText(pdfText, ""));
+  if (fromText) return fromText;
+
+  const q = normalizeIntentText(`${userText}\n${pdfText}`);
+  if (activeTable?.rows?.length || activeContent?.type === "table") {
+    const recent = recentUserTopicTitle(req, "Tablosu");
+    if (recent) return recent;
+    if (/\bpazar\b.*\b(alisveris|alışveriş)\b/.test(q)) return "Pazar Alışverişi Tablosu";
+    return nonGenericTitle(fallback) || "LUCY Tablosu";
+  }
+
+  if (/\b(siir|şiir|ask siiri|aşk şiiri)\b/.test(q)) {
+    const recent = recentUserTopicTitle(req, "");
+    if (recent && /\b(siir|şiir)\b/.test(normalizeIntentText(recent))) return recent;
+    return "Aşk Şiiri";
+  }
+
+  return nonGenericTitle(fallback) || "LUCY Rapor";
 }
 
 function contentTitleFromText(text = "", fallback = "LUCY Çıktısı") {
@@ -2945,29 +3012,41 @@ function buildImplicitToolCalls(answer = "", req) {
       : null;
     const freshPdfContract = freshContentRequest ? freshPdfContentContract(userText, source, answer) : null;
     const pdfTextSource = freshPdfContract?.text || cleanExportSourceText(source);
-    const pdfTitle = selectedChartForPdf?.title || freshPdfContract?.title || contentTitleFromText(pdfTextSource || source, title || "LUCY Rapor");
-    const pdfInput = { title: pdfTitle, filename: `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf` };
+    const pdfInput = {};
     if (freshPdfContract?.generatedFallback) {
       pdfInput.sourceMode = "fresh_generated_report_fallback";
       pdfInput.sourceReason = freshPdfContract.reason;
     }
     if (selectedChartForPdf?.data) {
+      const pdfTitle = selectedChartForPdf.title || titleFromActiveContentForPdf(activeContent, activeTable, pdfTextSource || source, req, userText, title || "LUCY Grafiği");
+      pdfInput.title = pdfTitle;
+      pdfInput.filename = `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf`;
       pdfInput.chart = selectedChartForPdf;
       pdfInput.data = selectedChartForPdf.data;
       pdfInput.chartType = selectedChartForPdf.chartType || selectedChartForPdf.type || "bar";
       pdfInput.text = "";
     } else if (!freshContentRequest && activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data)) {
       const chart = activeContent.chart || activeContent.ui;
+      const pdfTitle = chart.title || titleFromActiveContentForPdf(activeContent, activeTable, pdfTextSource || source, req, userText, title || "LUCY Grafiği");
+      pdfInput.title = pdfTitle;
+      pdfInput.filename = `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf`;
       pdfInput.chart = chart;
       pdfInput.data = chart.data;
       pdfInput.chartType = chart.chartType || chart.type || "bar";
       pdfInput.text = "";
     } else if (!freshContentRequest && activeContent?.type === "mermaid" && String(activeContent.code || activeContent.mermaid || "").trim()) {
+      const pdfTitle = titleFromActiveContentForPdf(activeContent, activeTable, pdfTextSource || source, req, userText, title || "Mermaid Diyagramı");
+      pdfInput.title = pdfTitle;
+      pdfInput.filename = `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf`;
       pdfInput.mermaid = activeContent.code || activeContent.mermaid;
       pdfInput.text = "";
     } else {
       const pdfText = activeTable?.rows?.length && (isOnlyTransformCommand(userText) || rankedSubsetRequested) ? tableToMarkdown(activeTable) : pdfTextSource;
-      pdfInput.text = pdfText || freshPdfContract?.text || cleanExportSourceText(source);
+      const finalPdfText = cleanExportSourceText(pdfText || freshPdfContract?.text || source);
+      const pdfTitle = freshPdfContract?.title || titleFromActiveContentForPdf(activeContent, activeTable, finalPdfText, req, userText, title || "LUCY Rapor");
+      pdfInput.title = pdfTitle;
+      pdfInput.filename = `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf`;
+      pdfInput.text = finalPdfText;
     }
     calls.push({ tool: "pdf", input: pdfInput });
   }
