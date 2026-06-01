@@ -3,7 +3,7 @@ const path = require("path");
 const crypto = require("crypto");
 const dotenv = require("dotenv");
 const { normalizeToolIntentText, detectChartType, detectVisualStyle, detectColorPalette, likelyToolIntent } = require("./intentNormalizer");
-const { planToolCallsWithDeepSeek, planLucyActionWithDeepSeek, aiPlannerEnabled } = require("./toolPlanner");
+const { planToolCallsWithDeepSeek, planLucyActionWithDeepSeek, debugDeepSeekIntentUnderstanding, aiPlannerEnabled } = require("./toolPlanner");
 const {
   normalizeIntentText,
   classifySemanticIntent,
@@ -59,7 +59,6 @@ const {
   mermaidUiFromMemory,
 } = require("./chartMermaidEngine");
 const { buildUnderstandingFrame, frameSuggestedToolPermission } = require("./understandingFrame");
-const { buildLucyUnderstandingCore } = require("./lucyUnderstandingCore");
 
 dotenv.config();
 
@@ -549,6 +548,66 @@ function latestUserIntentText(req) {
     if (text) return text;
   }
   return String(req?.body?.prompt || req?.body?.message || req?.body?.text || "").trim();
+}
+
+function dsIntentPreview(text = "", max = 700) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  return clean.length > max ? `${clean.slice(0, max)}...` : clean;
+}
+
+function buildDsIntentReadOnlyContext(req = null) {
+  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
+  const recentMessages = messages.slice(-8).map((message) => ({
+    role: String(message?.role || message?.sender || "").toLowerCase() || "unknown",
+    textPreview: dsIntentPreview(messageText(message), 420),
+  }));
+  const lastAssistant = [...messages].reverse().find((message) => {
+    const role = String(message?.role || message?.sender || "").toLowerCase();
+    return role === "assistant" && messageText(message);
+  });
+  const toolResults = [];
+  for (const message of messages.slice(-8)) {
+    for (const item of Array.isArray(message?.toolResults) ? message.toolResults : []) {
+      const result = item?.result || item?.ui?.raw || item?.ui || item || {};
+      toolResults.push({
+        tool: item?.tool || item?.ui?.tool || result?.tool || "",
+        filename: result?.filename || result?.storedFilename || "",
+        storedFilename: result?.storedFilename || "",
+        success: result?.success === undefined ? null : Boolean(result.success),
+      });
+    }
+  }
+  return {
+    messageCount: messages.length,
+    recentMessages,
+    lastAssistantTextPreview: dsIntentPreview(messageText(lastAssistant || {}), 700),
+    generatedFiles: collectConversationGeneratedFileRefs(req || {}).slice(-6),
+    toolResults: toolResults.slice(-8),
+  };
+}
+
+async function recordDeepSeekIntentDebug(req = null, userText = "") {
+  if (!req || typeof req !== "object") return null;
+  try {
+    const debug = await debugDeepSeekIntentUnderstanding({
+      userText,
+      context: buildDsIntentReadOnlyContext(req),
+    });
+    req.__lucyDsIntentDebug = debug;
+    if (process.env.LUCY_DEBUG_INTENT === "1") {
+      console.log("[LUCY_DS_INTENT_DEBUG]", JSON.stringify(debug));
+    }
+    return debug;
+  } catch (error) {
+    req.__lucyDsIntentDebug = {
+      userText: dsIntentPreview(userText, 900),
+      error: error?.message || "DeepSeek intent debug error",
+    };
+    if (process.env.LUCY_DEBUG_INTENT === "1") {
+      console.log("[LUCY_DS_INTENT_DEBUG]", JSON.stringify(req.__lucyDsIntentDebug));
+    }
+    return req.__lucyDsIntentDebug;
+  }
 }
 
 function requestedToolWork(req) {
@@ -1665,207 +1724,6 @@ function buildResolvedArtifactDebug(req = null, answer = "", options = {}) {
   return debug;
 }
 
-function isFreshContentGenerationRequest(userText = "", frame = null) {
-  const q = normalizeIntentText(userText);
-  if (!q) return false;
-  if (frame?.sourceRequirement === "fresh_generated_content") return true;
-
-  const hasHistoricalReference = explicitHistoricalArtifactReference(userText)
-    || /\b(bunu|sunu|şunu|onu|bunun|sunun|onun|son|en son|onceki|bir onceki|az onceki|ilk|birinci|yukaridaki|ustteki|mevcut)\b/.test(q);
-  if (hasHistoricalReference) return false;
-
-  const hasExportTarget = wantsPdfFromText(userText) || wantsExcelFromText(userText) || wantsDocumentFromText(userText);
-  const hasGenerationVerb = /\b(hazirla|hazirlayip|olustur|oluştur|uret|üret|yaz|cikar|çıkar|taslak|ver)\b/.test(q);
-  const hasContentNoun = /\b(rapor|analiz|ozet|özet|metin|yazi|yazı|belge|dokuman|doküman|strateji|plan|liste|icerik|içerik)\b/.test(q);
-  const hasTopicSignal = /\b(hakkinda|hakkında|hakkina|hakkına|ile ilgili|konusunda|uzerine|üzerine|icin|için)\b/.test(q)
-    || /\b(ekonomi|ekonomisi|ulke|ülke|sirket|şirket|pazar|satis|satış|turkiye|türkiye|almanya|fransa|ingiltere|italya|ispanya|japonya|cin|çin|rusya|abd|amerika)\b/.test(q);
-
-  return Boolean(hasExportTarget && hasGenerationVerb && hasContentNoun && hasTopicSignal);
-}
-
-function isExportStatusLine(line = "") {
-  const normalized = normalizeIntentText(line);
-  if (!normalized) return false;
-  if (/\b(lucyfiler|lucyfileref|storedfilename|downloadurl|generated\/)\b/.test(normalized)) return true;
-  if (/\b(pdf|dosya|zip|excel|word)\b.*\b(hazirlandi|hazırlandı|hazirlaniyor|hazırlanıyor|hazirliyorum|hazırlıyorum|donusturuyorum|dönüştürüyorum|ceviriyorum|çeviriyorum|iletiyorum|indir|indirebilirsin|baglanti|bağlantı|birazdan|gelecek|hazir|hazır)\b/.test(normalized)) return true;
-  if (/\b(pdf|dosya)\b.*\b(ister misin|istersen|gonderebilirim|gönderebilirim|olusturup|oluşturup|olusturayim|oluşturayım)\b/.test(normalized)) return true;
-  if (/^(pdf|dosya|zip|excel|word)\s+(hazir|hazır|hazirlandi|hazırlandı)\b/.test(normalized)) return true;
-  return false;
-}
-
-function isConversationalWrapperLine(line = "") {
-  const normalized = normalizeIntentText(line);
-  if (!normalized) return false;
-  if (/^(tabii|tamam|olur|elbette|hemen|peki|harika)\b/.test(normalized)) return true;
-  if (/^(askim|aşkım|canim|canım)\b.*\b(hazirliyorum|hazırlıyorum|yazdim|yazdım|donustureyim|dönüştüreyim|iletiyorum|iste sana|işte sana)\b/.test(normalized)) return true;
-  if (/\b(daha detayli|daha detaylı|istersen|talep edebilirsin|hemen yaparim|hemen yaparım)\b/.test(normalized)) return true;
-  if (/^(ne dersin|dilersen|istersen|hazirsan|hazırsan)\b/.test(normalized)) return true;
-  if (/\b(yuregine|yüreğine)\b.*\b(mutlu|dokunabildiysem)\b/.test(normalized)) return true;
-  if (/\b(iste|işte)\s+(siir|şiir)\s+bitti\b/.test(normalized)) return true;
-  if (/\b(ask|aşk)\s+bitmez\b.*\b(bitmez|hic bitmez|hiç bitmez)\b/.test(normalized)) return true;
-  return false;
-}
-
-function cleanExportSourceText(text = "") {
-  const raw = stripToolNoise(String(text || ""))
-    .replace(/^\s*LUCYFILER\b.*$/gim, "")
-    .replace(/^\s*(storedFilename|filename|downloadUrl|url)\s*=.*$/gim, "")
-    .replace(/^\s*https?:\/\/\S*\/generated\/\S+\s*$/gim, "")
-    .trim();
-  if (!raw) return "";
-
-  const kept = [];
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    const normalized = normalizeIntentText(trimmed);
-    if (!trimmed) {
-      if (kept.length && kept[kept.length - 1] !== "") kept.push("");
-      continue;
-    }
-    if (/^-{3,}$/.test(trimmed)) continue;
-    if (isExportStatusLine(trimmed)) continue;
-    if (isConversationalWrapperLine(trimmed)) continue;
-    if (isClarificationAnswerText(trimmed)) continue;
-    if (/\b(lucyfiler|lucyfileref|storedfilename|downloadurl|generated\/)\b/.test(normalized)) continue;
-    kept.push(trimmed);
-  }
-
-  const cleaned = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  if (!cleaned && isClarificationAnswerText(raw)) return "";
-  return cleaned || raw;
-}
-
-function titleCaseTurkish(value = "") {
-  return String(value || "")
-    .replace(/[-_]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean)
-    .map((word) => {
-      const lower = word.toLocaleLowerCase("tr-TR");
-      return lower.charAt(0).toLocaleUpperCase("tr-TR") + lower.slice(1);
-    })
-    .join(" ");
-}
-
-function stripFreshTopicCommandNoise(value = "") {
-  let text = String(value || "")
-    .replace(/[?.!,;:]+$/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  text = text.replace(/\b(bana|benim icin|benim için|lutfen|lütfen|kisa|kısa|oz|öz|bir|detayli|detaylı|profesyonel)\b/gi, " ");
-  text = text.replace(/\b(rapor|raporu|analiz|analizi|ozet|özet|metin|belge|dokuman|doküman)\b.*$/gi, " ");
-  text = text.replace(/\b(pdf|excel|word|docx|zip|olarak|seklinde|şeklinde|hazirla|hazırl\w*|olustur|oluştur|uret|üret|yaz|yap|ver|donustur|dönüştür|cevir|çevir|indir)\b/gi, " ");
-  return text.replace(/\s+/g, " ").trim();
-}
-
-function freshTopicFromUserText(userText = "") {
-  const raw = String(userText || "").trim();
-  if (!raw) return "LUCY Raporu";
-  const patterns = [
-    /(?:bana\s+)?(.+?)\s+hakk[ıi]nda\b/i,
-    /(?:bana\s+)?(.+?)\s+ile\s+ilgili\b/i,
-    /(?:bana\s+)?(.+?)\s+konusunda\b/i,
-    /(?:bana\s+)?(.+?)\s+[üu]zerine\b/i,
-  ];
-  for (const pattern of patterns) {
-    const match = raw.match(pattern);
-    const topic = stripFreshTopicCommandNoise(match?.[1] || "");
-    if (topic) return titleCaseTurkish(topic);
-  }
-  const beforeOutput = raw.split(/\b(pdf|excel|word|docx|zip|olarak|seklinde|şeklinde|hazirla|hazırl\w*|olustur|oluştur|uret|üret|yaz|yap|ver|donustur|dönüştür|cevir|çevir)\b/i)[0] || raw;
-  const topic = stripFreshTopicCommandNoise(beforeOutput);
-  return titleCaseTurkish(topic || "LUCY Raporu");
-}
-
-function freshReportTitleFromUserText(userText = "") {
-  const topic = freshTopicFromUserText(userText);
-  const q = normalizeIntentText(userText);
-  if (/\b(ekonomi|ekonomisi|ekonomik|piyasa|finans|para politikasi|para politikası)\b/.test(q)) {
-    return /\bekonomi|ekonomisi\b/i.test(topic) ? `${topic} – Kısa Rapor` : `${topic} Ekonomisi – Kısa Rapor`;
-  }
-  if (/\b(ulke|ülke|baskent|nufus|nüfus|turizm|kultur|kültür)\b/.test(q) || /\bhakk[ıi]nda\b/.test(q)) {
-    return `${topic} – Kısa Rapor`;
-  }
-  if (/\b(analiz|analizi)\b/.test(q)) return `${topic} – Kısa Analiz`;
-  return `${topic} – Kısa Rapor`;
-}
-
-function weakFreshExportSourceReason(text = "") {
-  const raw = String(text || "").trim();
-  const clean = normalizeIntentText(raw);
-  if (!raw) return "empty";
-  if (/\b(pdf|dosya|rapor)\b.*\b(hazirlandi|hazırlanıyor|hazirlaniyor|hazirliyorum|hazırlıyorum|donusturuyorum|dönüştürüyorum|iletiyorum|indir|indirebilirsin|birazdan)\b/.test(clean)) return "status_or_promise_only";
-  if (/\braporda\b.*\b(basliklar|başlıklar|yer alacak|bulunacak)\b/.test(clean)) return "outline_promise_only";
-  if (/\b(pdf dosyasini|pdf dosyasını)\b.*\b(ister misin|gonderebilirim|gönderebilirim|olusturayim|oluşturayım)\b/.test(clean)) return "asks_before_output";
-  const words = clean.split(/\s+/).filter(Boolean).length;
-  const contentSignals = (clean.match(/\b(genel bakis|genel bakış|ekonomi|enflasyon|nufus|nüfus|turizm|degerlendirme|değerlendirme|risk|gorunum|görünüm|sonuc|sonuç|dis ticaret|dış ticaret|sektor|sektör)\b/g) || []).length;
-  if (words < 80 && contentSignals < 3) return "too_short_for_report";
-  return "";
-}
-
-function buildFreshGeneratedReportText(userText = "") {
-  const title = freshReportTitleFromUserText(userText);
-  const topic = title.replace(/\s+[–-]\s+Kısa\s+(Rapor|Analiz)$/i, "").trim() || freshTopicFromUserText(userText);
-  const q = normalizeIntentText(userText);
-  const isEconomic = /\b(ekonomi|ekonomisi|ekonomik|piyasa|finans|enflasyon|faiz|dis ticaret|dış ticaret|cari acik|cari açık)\b/.test(q);
-
-  if (isEconomic) {
-    return [
-      title,
-      "",
-      "Genel Çerçeve",
-      `${topic}, büyüme, enflasyon, istihdam, dış ticaret ve finansal koşulların birlikte değerlendirilmesi gereken dinamik bir ekonomik yapıya sahiptir. Kısa raporun amacı, mevcut görünümü sade ve karar almaya yardımcı olacak şekilde özetlemektir.`,
-      "",
-      "Büyüme ve Üretim",
-      "Ekonomik aktivite; iç talep, yatırım eğilimi, sanayi üretimi, hizmetler sektörü ve ihracat performansına bağlı olarak şekillenir. Kısa vadede talep koşulları ve finansmana erişim büyümenin yönünü belirleyen ana unsurlardır.",
-      "",
-      "Enflasyon ve Para Politikası",
-      "Fiyat istikrarı, kur hareketleri, enerji ve gıda maliyetleri ile para politikasının sıkılık derecesi yakından izlenmelidir. Enflasyon beklentileri ve merkez bankası adımları ekonomik güven açısından kritik önemdedir.",
-      "",
-      "Dış Ticaret ve Cari Denge",
-      "İhracat pazarlarının talebi, ithalat maliyetleri, enerji faturası ve turizm gelirleri dış dengeyi etkiler. Cari denge tarafında sürdürülebilirlik, finansman kalitesi ve rezerv görünümüyle birlikte okunmalıdır.",
-      "",
-      "Riskler ve Kısa Görünüm",
-      "Başlıca riskler arasında jeopolitik gelişmeler, küresel faiz koşulları, kur oynaklığı, enflasyon baskısı ve dış finansman ihtiyacı yer alır. Kısa vadede istikrar, güven artırıcı politikalar ve yapısal iyileştirmelerle desteklenebilir.",
-    ].join("\n");
-  }
-
-  return [
-    title,
-    "",
-    "Genel Bakış",
-    `${topic}, siyasi yapı, ekonomik kapasite, nüfus dinamikleri, dış ilişkiler ve kültürel özellikler açısından değerlendirilebilecek önemli bir konudur. Bu kısa rapor, temel başlıkları düzenli bir özet halinde sunar.`,
-    "",
-    "Ekonomi",
-    "Ekonomik görünüm; üretim kapasitesi, dış ticaret, hizmetler sektörü, yatırım ortamı ve iş gücü piyasası üzerinden okunur. Kısa vadeli performans hem iç talebe hem de küresel koşullara bağlıdır.",
-    "",
-    "Toplum ve Şehirler",
-    "Nüfus yapısı, şehirleşme, eğitim düzeyi ve yaşam standartları ülkenin sosyal görünümünü belirleyen ana unsurlardır. Büyük şehirler ekonomik, kültürel ve idari merkezler olarak öne çıkar.",
-    "",
-    "Dış İlişkiler ve Stratejik Konum",
-    "Bölgesel konum, ticaret bağlantıları, uluslararası kurumlarla ilişkiler ve güvenlik politikaları ülkenin stratejik önemini etkiler. Bu başlıklar ekonomik ve siyasi kararlarla birlikte değerlendirilmelidir.",
-    "",
-    "Kısa Değerlendirme",
-    `${topic} hakkında genel görünüm; ekonomik dayanıklılık, kurumsal kapasite, insan kaynağı ve dış bağlantıların birlikte analiz edilmesiyle daha sağlıklı anlaşılır. Daha kapsamlı çalışma için sektör, dönem veya veri seti ayrıca netleştirilebilir.`,
-  ].join("\n");
-}
-
-function freshPdfContentContract(userText = "", source = "", answer = "") {
-  const cleanedSource = cleanExportSourceText(source || answer || "");
-  const reason = weakFreshExportSourceReason(cleanedSource);
-  const generated = buildFreshGeneratedReportText(userText);
-  const text = reason ? generated : cleanedSource;
-  const title = contentTitleFromText(text, freshReportTitleFromUserText(userText));
-  return {
-    title,
-    text,
-    reason,
-    generatedFallback: Boolean(reason),
-  };
-}
-
 function inlineContentFromToolRequest(userText = "") {
   const raw = String(userText || "").trim();
   if (!raw) return "";
@@ -1889,10 +1747,8 @@ function inlineContentFromToolRequest(userText = "") {
 function resolveActiveContent(req, answer = "", options = {}) {
   const memory = hydrateMemoryFromRequest(req);
   const userText = latestUserIntentText(req);
-  const frame = req?.__lucyUnderstandingFrame || buildUnderstandingFrame(req || {}, memory);
-  const freshContentRequest = isFreshContentGenerationRequest(userText, frame);
-  const answerText = freshContentRequest ? cleanExportSourceText(answer) : stripToolNoise(answer);
-  const blockStaleArtifactFallback = freshContentRequest || shouldBlockStaleArtifactFallback(memory, userText);
+  const answerText = stripToolNoise(answer);
+  const blockStaleArtifactFallback = shouldBlockStaleArtifactFallback(memory, userText);
 
   const inlineContent = inlineContentFromToolRequest(userText);
   if (inlineContent) {
@@ -1911,26 +1767,12 @@ function resolveActiveContent(req, answer = "", options = {}) {
   }
 
   // Model bu turda gerçek içerik ürettiyse onu kullan.
-  // Fresh content + export isteklerinde "Tabii aşkım..." ile başlayan DS cevabı
-  // eski artifact'e düşmek için sebep değildir; temizlenmiş mevcut cevap kaynak olur.
-  if (answerText && answerText.length > 30 && (freshContentRequest || !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText)))) {
+  if (answerText && answerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText))) {
     const table = parseFirstMarkdownTableObject(answerText) || parseCsvLikeTableObject(answerText) || parseNumericFactTableObject(answerText);
     return table
       ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(answerText, "LUCY Tablosu"), source: "assistant-answer" }
       : { type: "text", text: answerText, title: contentTitleFromText(answerText, "LUCY İçeriği"), source: "assistant-answer" };
   }
-
-  if (!freshContentRequest && userReferencesReportLike(userText)) {
-    const latestAssistant = latestAssistantContentObject(req);
-    if (latestAssistant && !isClarificationAnswerText(activeContentToText(latestAssistant, ""))) return latestAssistant;
-    if (memory.lastText && !isClarificationAnswerText(memory.lastText)) {
-      const clean = cleanExportSourceText(memory.lastText) || stripToolNoise(memory.lastText);
-      if (clean) return { type: "text", text: clean, title: contentTitleFromText(clean, "LUCY Rapor"), source: "report-lastText" };
-    }
-    if (memory.lastTable?.rows?.length) return { type: "table", table: memory.lastTable, text: tableToMarkdown(memory.lastTable), title: "LUCY Tablosu", source: "report-lastTable" };
-  }
-
-  if (freshContentRequest) return null;
 
   const preferred = transformPrefersTypedSource(userText);
   const typed = blockStaleArtifactFallback ? null : typedContentFromMemory(memory, preferred);
@@ -1995,37 +1837,6 @@ function extractLucyWidgetsFromText(text = "") {
   return widgets;
 }
 
-
-function isClarificationAnswerText(text = "") {
-  const raw = String(text || "").trim();
-  if (!raw) return false;
-  if (hasMarkdownTable(raw) || /```(?:lucy-widget|mermaid)/i.test(raw)) return false;
-  if (/\b(lucyfileref|lucyfiler|storedfilename|downloadurl|generated\/)\b/i.test(raw)) return false;
-  const clean = normalizeIntentText(stripToolNoise(raw));
-  if (!clean) return false;
-  const asksClarification = /\b(hangi|hangisini|hangisini kast|hangi raporu|hangi dosyayi|hangi dosyayı|hangi icerigi|hangi içeriği|tam olarak|netlestir|netleştir|belirt|kastettin|kastediyorsun|kastediyorsunuz|yoksa baska|yoksa başka|ne yapmami|ne yapmamı|ne yapmam)\b/.test(clean);
-  const isMostlyQuestion = clean.length < 320 || /\?$/.test(raw);
-  const hasRealContentSignal = /\b(rapor|analiz|tablo|liste|siir|şiir)\b/.test(clean) && (hasMarkdownTable(raw) || clean.split(/\s+/).length > 90);
-  return Boolean(asksClarification && isMostlyQuestion && !hasRealContentSignal);
-}
-
-function hasUsableMemoryContent(memory = {}) {
-  if (!memory || typeof memory !== "object") return false;
-  if (memory.lastTable?.rows?.length) return true;
-  if (memory.lastChart?.data) return true;
-  if (memory.lastMermaid?.code) return true;
-  if (memory.lastFile?.storedFilename || memory.lastFile?.filename) return true;
-  if (memory.activeContent && !isClarificationAnswerText(activeContentToText(memory.activeContent, ""))) return true;
-  if (memory.lastText && !isClarificationAnswerText(memory.lastText)) return true;
-  return false;
-}
-
-function userReferencesReportLike(text = "") {
-  const q = normalizeIntentText(text);
-  if (!q) return false;
-  return /\b(bu rapor|bu raporu|bu raporun|raporu|raporunu|son rapor|son raporu|onun raporu|onun raporunu|konustuk|konuştuk)\b/.test(q);
-}
-
 function isGeneratedStatusOnlyText(text = "") {
   const clean = normalizeIntentText(stripToolNoise(text));
   if (!clean) return false;
@@ -2039,7 +1850,6 @@ function isToolGeneratedAnswerText(text = "") {
   const raw = String(text || "");
   const clean = normalizeIntentText(stripToolNoise(raw));
   if (!clean) return false;
-  if (isClarificationAnswerText(raw)) return true;
   if (isGeneratedStatusOnlyText(raw)) return true;
 
   // Tool sonuçları aktif içerik olarak ezmesin. Örn. şiir yazıldıktan sonra
@@ -2071,10 +1881,8 @@ function latestAssistantContentObject(req) {
     const message = messages[i] || {};
     const role = String(message.role || message.sender || "").toLowerCase();
     if (role !== "assistant") continue;
-    const rawText = messageText(message);
-    if (isClarificationAnswerText(rawText)) continue;
-    const text = cleanExportSourceText(rawText) || stripToolNoise(rawText);
-    if (!text || isToolGeneratedAnswerText(text) || isClarificationAnswerText(text)) continue;
+    const text = stripToolNoise(messageText(message));
+    if (!text || isToolGeneratedAnswerText(text)) continue;
     const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text) || parseLooseInlineTableObject(text) || parseNumericFactTableObject(text);
     if (table?.rows?.length) return { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(text, "LUCY Tablosu"), source: "latest-assistant" };
     return { type: "text", text, title: contentTitleFromText(text, "LUCY İçeriği"), source: "latest-assistant" };
@@ -2101,7 +1909,6 @@ function typedContentFromMemory(memory = {}, preferred = "text") {
 function rememberText(memory, text = "") {
   const clean = stripToolNoise(text);
   if (!clean || clean.length < 2) return memory;
-  if (isClarificationAnswerText(clean)) return memory;
   if (isGeneratedStatusOnlyText(text) || isToolGeneratedAnswerText(text)) return memory;
   memory.lastText = clean;
   const table = parseFirstMarkdownTableObject(clean) || parseCsvLikeTableObject(clean) || parseLooseInlineTableObject(clean) || parseNumericFactTableObject(clean);
@@ -2232,8 +2039,8 @@ function sourceFromMemory(req, answer = "") {
   if (activeText) return activeText;
 
   const memory = hydrateMemoryFromRequest(req);
-  const answerText = cleanExportSourceText(answer) || stripToolNoise(answer);
-  if (answerText && answerText.length > 30 && !isClarificationAnswerText(answerText)) return answerText;
+  const answerText = stripToolNoise(answer);
+  if (answerText && answerText.length > 30) return answerText;
   if (memory.lastTable?.rows?.length) return tableToMarkdown(memory.lastTable);
   if (memory.lastText) return memory.lastText;
   return latestUsefulConversationContent(req, answer);
@@ -2260,11 +2067,8 @@ function latestAssistantContent(req) {
 
 function latestUsefulConversationContent(req, answer = "") {
   const userText = latestUserIntentText(req);
-  const memory = hydrateMemoryFromRequest(req);
-  const frame = req?.__lucyUnderstandingFrame || buildUnderstandingFrame(req || {}, memory);
-  const freshContentRequest = isFreshContentGenerationRequest(userText, frame);
-  const answerText = freshContentRequest ? cleanExportSourceText(answer) : stripToolNoise(answer);
-  const previousAssistant = freshContentRequest ? "" : latestAssistantContent(req);
+  const answerText = stripToolNoise(answer);
+  const previousAssistant = latestAssistantContent(req);
 
   const inlineContent = inlineContentFromToolRequest(userText);
   if (inlineContent) return inlineContent;
@@ -2274,7 +2078,7 @@ function latestUsefulConversationContent(req, answer = "") {
   if (userHasInlineContent && !isOnlyTransformCommand(userText) && !isMultiStepCommandText(userText)) return stripToolNoise(userText);
 
   // Model bir tablo/metin ürettiyse ve dosya isteniyorsa onu kullan.
-  if (answerText && answerText.length > 30 && (freshContentRequest || !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText)))) return answerText;
+  if (answerText && answerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText))) return answerText;
 
   // "bunu pdf/excel/zip yap" gibi komutlarda son gerçek assistant içeriğini kullan.
   if (previousAssistant) return previousAssistant;
@@ -2287,124 +2091,11 @@ function hasMarkdownTable(text = "") {
   return lines.some((line, index) => line.includes("|") && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || ""));
 }
 
-function cleanTitleCandidate(line = "") {
-  return String(line || "")
-    .replace(/^#{1,4}\s+/, "")
-    .replace(/[*_`]/g, "")
-    .replace(/^[\s\-•●▪▫✅☑️✔️🔥💖❤️🖤🌹🌷🌺✨⭐★🌟💎🚀📄📊📋🛒]+/gu, "")
-    .replace(/[\s\-•●▪▫✅☑️✔️🔥💖❤️🖤🌹🌷🌺✨⭐★🌟💎🚀📄📊📋🛒]+$/gu, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isBadTitleCandidate(line = "") {
-  const q = normalizeIntentText(line);
-  if (!q) return true;
-  if (line.includes("|")) return true;
-  if (/^(tabii|tamam|olur|elbette|hemen|peki|harika|askim|aşkım|canim|canım)\b/.test(q)) return true;
-  if (isExportStatusLine(line) || isConversationalWrapperLine(line)) return true;
-  if (/\b(lucyfiler|storedfilename|downloadurl|generated\/)\b/.test(q)) return true;
-  if (/\b(ister misin|ne dersin|indirebilirsin|birazdan|hazirliyorum|hazırlıyorum|dönüştürüyorum|donusturuyorum)\b/.test(q)) return true;
-  return false;
-}
-
-function isShortTitleLikeLine(line = "") {
-  const cleaned = cleanTitleCandidate(line);
-  if (!cleaned || isBadTitleCandidate(cleaned)) return false;
-  const words = normalizeIntentText(cleaned).split(/\s+/).filter(Boolean);
-  if (!words.length || words.length > 7) return false;
-  if (/[.!?;:]{1,}$/.test(cleaned)) return false;
-  return true;
-}
-
-
-function isGenericPdfTitle(title = "") {
-  const q = normalizeIntentText(title);
-  if (!q) return true;
-  return /^(lucy|pdf sonucu|lucy rapor|lucy raporu|lucy cikti|lucy ciktisi|lucy icerigi|lucy tablosu|lucy belgesi|lucy dosyasi|lucy dosyası|rapor|cikti|çıktı|icerik|içerik|tablo|dosya)$/.test(q);
-}
-
-function nonGenericTitle(value = "") {
-  const clean = cleanTitleCandidate(value);
-  return clean && !isGenericPdfTitle(clean) && !isBadTitleCandidate(clean) ? clean.slice(0, 70) : "";
-}
-
-function recentMessageTextBeforeLastUser(req, roleWanted = "") {
-  const messages = Array.isArray(req?.body?.messages) ? req.body.messages : [];
-  let passedLastUser = false;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] || {};
-    const role = String(message.role || message.sender || "").toLowerCase();
-    if (!passedLastUser && role === "user") { passedLastUser = true; continue; }
-    if (!passedLastUser) continue;
-    if (roleWanted && role !== roleWanted) continue;
-    const rawText = messageText(message);
-    if (isClarificationAnswerText(rawText)) continue;
-    const text = cleanExportSourceText(rawText) || stripToolNoise(rawText);
-    if (text && !isToolGeneratedAnswerText(text) && !isClarificationAnswerText(text)) return text;
-  }
-  return "";
-}
-
-function recentUserTopicTitle(req, suffix = "") {
-  const text = recentMessageTextBeforeLastUser(req, "user");
-  if (!text) return "";
-  const q = normalizeIntentText(text);
-  let topic = "";
-  if (/\bpazar\b.*\b(alisveris|alışveriş)\b/.test(q)) topic = "Pazar Alışverişi";
-  else if (/\b(siir|şiir)\b/.test(q)) topic = "Aşk Şiiri";
-  else if (/\btablo\b/.test(q)) topic = freshTopicFromUserText(text).replace(/\s+[–-]\s+Kısa\s+(Rapor|Analiz)$/i, "").trim();
-  else topic = nonGenericTitle(contentTitleFromText(text, ""));
-  if (!topic || isGenericPdfTitle(topic)) return "";
-  if (suffix && !normalizeIntentText(topic).includes(normalizeIntentText(suffix))) return `${topic} ${suffix}`.trim();
-  return topic;
-}
-
-function titleFromActiveContentForPdf(activeContent = null, activeTable = null, pdfText = "", req = null, userText = "", fallback = "LUCY Rapor") {
-  const direct = nonGenericTitle(activeContent?.title || "");
-  if (direct) return direct;
-
-  const fromText = nonGenericTitle(contentTitleFromText(pdfText, ""));
-  if (fromText) return fromText;
-
-  const q = normalizeIntentText(`${userText}\n${pdfText}`);
-  if (activeTable?.rows?.length || activeContent?.type === "table") {
-    const recent = recentUserTopicTitle(req, "Tablosu");
-    if (recent) return recent;
-    if (/\bpazar\b.*\b(alisveris|alışveriş)\b/.test(q)) return "Pazar Alışverişi Tablosu";
-    return nonGenericTitle(fallback) || "LUCY Tablosu";
-  }
-
-  if (/\b(siir|şiir|ask siiri|aşk şiiri)\b/.test(q)) {
-    const recent = recentUserTopicTitle(req, "");
-    if (recent && /\b(siir|şiir)\b/.test(normalizeIntentText(recent))) return recent;
-    return "Aşk Şiiri";
-  }
-
-  return nonGenericTitle(fallback) || "LUCY Rapor";
-}
-
 function contentTitleFromText(text = "", fallback = "LUCY Çıktısı") {
-  const cleaned = cleanExportSourceText(text) || String(text || "");
-  const lines = cleaned.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const firstHeading = lines.find((line) => /^#{1,4}\s+/.test(line) && !isBadTitleCandidate(line));
-  if (firstHeading) return cleanTitleCandidate(firstHeading).slice(0, 70);
-
-  const titledLine = lines.find((line) => {
-    const q = normalizeIntentText(line);
-    return !isBadTitleCandidate(line) && /\b(rapor|analiz|ozet|özet|plan|strateji|tablo|tablosu|liste|siir|şiir|alisveris|alışveriş)\b/.test(q);
-  });
-  if (titledLine) return cleanTitleCandidate(titledLine).slice(0, 70);
-
-  const shortTitle = lines.find((line, index) => {
-    if (!isShortTitleLikeLine(line)) return false;
-    const next = lines[index + 1] || "";
-    return Boolean(next && !isBadTitleCandidate(next));
-  });
-  if (shortTitle) return cleanTitleCandidate(shortTitle).slice(0, 70);
-
-  const firstLine = lines.find((line) => !isBadTitleCandidate(line));
-  if (firstLine) return cleanTitleCandidate(firstLine).slice(0, 70);
+  const firstHeading = String(text || "").split(/\r?\n/).map((line) => line.trim()).find((line) => /^#{1,4}\s+/.test(line));
+  if (firstHeading) return firstHeading.replace(/^#{1,4}\s+/, "").slice(0, 70);
+  const firstLine = String(text || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (firstLine && !firstLine.includes("|")) return firstLine.replace(/[*_`#]/g, "").slice(0, 70);
   return fallback;
 }
 
@@ -2917,11 +2608,8 @@ function userAskedMultiOutputChain(userText = "") {
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const memory = hydrateMemoryFromRequest(req);
-  const frame = req?.__lucyUnderstandingFrame || buildUnderstandingFrame(req || {}, memory);
-  const freshContentRequest = isFreshContentGenerationRequest(userText, frame);
   const activeContent = resolveActiveContent(req, answer);
-  const fallbackSource = freshContentRequest ? cleanExportSourceText(answer) : sourceFromMemory(req, answer);
-  const source = activeContentToText(activeContent, fallbackSource);
+  const source = activeContentToText(activeContent, sourceFromMemory(req, answer));
   const userInlineContent = inlineContentFromToolRequest(userText);
   const userInlineTable = parseInlineTableObject(userText);
   const inlineTable = userInlineTable || parseInlineTableObject(source);
@@ -3060,43 +2748,24 @@ function buildImplicitToolCalls(answer = "", req) {
     const selectedChartForPdf = userSpecificallyReferencesChart(userText)
       ? (chartFromHistory(memory, userText) || memory.lastChart)
       : null;
-    const freshPdfContract = freshContentRequest ? freshPdfContentContract(userText, source, answer) : null;
-    const pdfTextSource = freshPdfContract?.text || cleanExportSourceText(source);
-    const pdfInput = {};
-    if (freshPdfContract?.generatedFallback) {
-      pdfInput.sourceMode = "fresh_generated_report_fallback";
-      pdfInput.sourceReason = freshPdfContract.reason;
-    }
+    const pdfTitle = selectedChartForPdf?.title || title;
+    const pdfInput = { title: pdfTitle, filename: `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf` };
     if (selectedChartForPdf?.data) {
-      const pdfTitle = selectedChartForPdf.title || titleFromActiveContentForPdf(activeContent, activeTable, pdfTextSource || source, req, userText, title || "LUCY Grafiği");
-      pdfInput.title = pdfTitle;
-      pdfInput.filename = `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf`;
       pdfInput.chart = selectedChartForPdf;
       pdfInput.data = selectedChartForPdf.data;
       pdfInput.chartType = selectedChartForPdf.chartType || selectedChartForPdf.type || "bar";
       pdfInput.text = "";
-    } else if (!freshContentRequest && activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data)) {
+    } else if (activeContent?.type === "chart" && (activeContent.chart?.data || activeContent.ui?.data)) {
       const chart = activeContent.chart || activeContent.ui;
-      const pdfTitle = chart.title || titleFromActiveContentForPdf(activeContent, activeTable, pdfTextSource || source, req, userText, title || "LUCY Grafiği");
-      pdfInput.title = pdfTitle;
-      pdfInput.filename = `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf`;
       pdfInput.chart = chart;
       pdfInput.data = chart.data;
       pdfInput.chartType = chart.chartType || chart.type || "bar";
       pdfInput.text = "";
-    } else if (!freshContentRequest && activeContent?.type === "mermaid" && String(activeContent.code || activeContent.mermaid || "").trim()) {
-      const pdfTitle = titleFromActiveContentForPdf(activeContent, activeTable, pdfTextSource || source, req, userText, title || "Mermaid Diyagramı");
-      pdfInput.title = pdfTitle;
-      pdfInput.filename = `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf`;
+    } else if (activeContent?.type === "mermaid" && String(activeContent.code || activeContent.mermaid || "").trim()) {
       pdfInput.mermaid = activeContent.code || activeContent.mermaid;
       pdfInput.text = "";
     } else {
-      const pdfText = activeTable?.rows?.length && (isOnlyTransformCommand(userText) || rankedSubsetRequested) ? tableToMarkdown(activeTable) : pdfTextSource;
-      const finalPdfText = cleanExportSourceText(pdfText || freshPdfContract?.text || source);
-      const pdfTitle = freshPdfContract?.title || titleFromActiveContentForPdf(activeContent, activeTable, finalPdfText, req, userText, title || "LUCY Rapor");
-      pdfInput.title = pdfTitle;
-      pdfInput.filename = `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf`;
-      pdfInput.text = finalPdfText;
+      pdfInput.text = activeTable?.rows?.length && (isOnlyTransformCommand(userText) || rankedSubsetRequested) ? tableToMarkdown(activeTable) : source;
     }
     calls.push({ tool: "pdf", input: pdfInput });
   }
@@ -3183,7 +2852,6 @@ function sourcePrefixFromText(text = "") {
   const q = normalizeIntentText(text);
   if (/\b(grafik|grafiği|grafigi|chart|pasta|pie|cizgi|çizgi|bar|sutun|sütun)\b/.test(q)) return "son grafiği";
   if (/\b(tablo|tabloyu|tablom)\b/.test(q)) return "son tabloyu";
-  if (/\b(rapor|raporu|raporunu|raporun)\b/.test(q)) return "son raporu";
   if (/\b(dosya|dosyayi|dosyayı|pdf|excel|zip|word|docx)\b/.test(q)) return "son dosyayı";
   if (/\b(metin|yazi|yazı|siir|şiir)\b/.test(q)) return "son metni";
   if (/\b(son|en son|az onceki|az önceki|bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|yaptigini|yaptığını)\b/.test(q)) return "son çıktıyı";
@@ -3242,12 +2910,11 @@ function resolveClarificationFollowUpText(req) {
 function requestHasResolvableTypedReference(req) {
   const text = normalizeIntentText(latestUserIntentText(req));
   const memory = hydrateMemoryFromRequest(req);
-  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyayı|dosyayi|metin|yazi|yazı|diyagram|şema|sema|rapor|raporu|raporunu)\b/.test(text);
-  const hasVagueCurrentSource = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|son|en son|mevcut|bu|o)\b/.test(text);
+  const hasTypedSource = /\b(grafik|grafiği|grafigi|chart|tablo|tabloyu|dosya|dosyayı|dosyayi|metin|yazi|yazı|diyagram|şema|sema)\b/.test(text);
+  const hasVagueCurrentSource = /\b(bunu|bunun|buna|bundaki|bundan|onu|onun|ona|şunu|sunu|şunun|sunun|son|en son|mevcut)\b/.test(text);
   const hasAction = currentUserHasClearAction(text);
-  if (!hasAction) return false;
-  if (hasTypedSource && hasUsableMemoryContent(memory)) return true;
-  if (hasVagueCurrentSource && hasUsableMemoryContent(memory)) return true;
+  if (hasTypedSource && hasAction) return true;
+  if (hasVagueCurrentSource && hasAction && memory.activeContent?.type === "chart" && memory.lastChart?.data) return true;
   return false;
 }
 
@@ -3353,7 +3020,7 @@ function buildClarificationMessage(decision = {}, req = null) {
   if (memory.lastChart?.data) options.push("son grafiği");
   if (memory.lastMermaid?.code) options.push("son diyagramı");
   if (memory.lastFile?.storedFilename) options.push("son dosyayı");
-  if (memory.lastText && !isClarificationAnswerText(memory.lastText)) options.push("son metni");
+  if (memory.lastText) options.push("son metni");
   if (options.length) return `Aşkım tam olarak hangisini kastettin: ${options.slice(0, 4).join(", ")} mı?`;
   return "Aşkım bunu tam anlayamadım. Biraz daha detay verir misin?";
 }
@@ -3364,7 +3031,6 @@ function shouldAskClarificationWithoutAi(req) {
   const vagueRef = /\b(bunu|onu|şunu|sunu|bu|o|son|en son|az onceki|az önceki|ilk|onceki|önceki)\b/.test(text);
   const mutation = /\b(renk|renkli|pastel|neon|kalin|kalın|cizgili|çizgili|degistir|değiştir|duzenle|düzenle|pdf yap|excel yap|word yap|zip yap|grafik yap|tablo yap)\b/.test(text);
   if (!vagueRef || !mutation) return "";
-  if (requestHasResolvableTypedReference(req)) return "";
   const memory = hydrateMemoryFromRequest(req);
   if (memory.activeContent?.type === "chart" && memory.lastChart?.data && userStyleMutationOnly(text)) return "";
   if (isChartExportOnlyRequest(text) && memory.lastChart?.data) return "";
@@ -3489,12 +3155,12 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   if (clarifiedIntent) req.__lucyEffectiveUserText = clarifiedIntent;
   if (req && typeof req === "object") {
     req.__lucyUnderstandingFrame = buildUnderstandingFrame(req, memory);
-    req.__lucyUnderstandingCore = buildLucyUnderstandingCore(req, { memory, frame: req.__lucyUnderstandingFrame, answer });
   }
   const legacyArtifactForDebug = resolveActiveContent(req, answer, { allowFrameAdoption: false });
   recordReferenceFrameDebug(req, memory, legacyArtifactForDebug);
   buildResolvedArtifactDebug(req, answer, { memory, legacyContent: legacyArtifactForDebug });
   const userText = latestUserIntentText(req);
+  await recordDeepSeekIntentDebug(req, userText);
   const aiDecision = await buildAiPlannerDecision(req);
 
   if (aiDecision?.decision === "ASK_CLARIFICATION" && !shouldBypassPlannerClarification(aiDecision, req)) {

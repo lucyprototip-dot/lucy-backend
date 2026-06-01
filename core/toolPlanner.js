@@ -201,10 +201,127 @@ function normalizePlannerDecision(payload = {}, userText = "") {
   return { decision, toolCalls: calls, clarification: "", reason, confidence };
 }
 
+function pickAllowedString(value = "", allowed = [], fallback = "") {
+  const clean = String(value || "").trim();
+  return allowed.includes(clean) ? clean : fallback;
+}
+
+function clampConfidence(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
+}
+
+function normalizeDsIntentDebugPayload(payload = {}) {
+  const modes = ["chat", "task"];
+  const intents = ["chat", "create", "transform", "export", "search", "read_extract", "calculate", "unknown"];
+  const sources = ["none", "fresh_content", "last_artifact", "specific_artifact", "last_topic", "multi_artifact"];
+  const referenceTypes = ["none", "vague_this", "last_report", "last_topic", "last_table", "last_chart", "last_file", "multi_artifact"];
+  const outputTargets = new Set(["text", "table", "chart", "pdf", "zip", "excel", "word", "json", "csv"]);
+  const targetAliases = {
+    doc: "word",
+    docx: "word",
+    xls: "excel",
+    xlsx: "excel",
+    spreadsheet: "excel",
+    document: "word",
+    report: "text",
+  };
+  const reference = payload.reference && typeof payload.reference === "object" ? payload.reference : {};
+  const normalizedTargets = (Array.isArray(payload.outputTargets) ? payload.outputTargets : [])
+    .map((item) => targetAliases[String(item || "").trim()] || String(item || "").trim())
+    .filter((item) => outputTargets.has(item));
+
+  return {
+    mode: pickAllowedString(payload.mode, modes, "chat"),
+    intent: pickAllowedString(payload.intent, intents, "unknown"),
+    source: pickAllowedString(payload.source, sources, "none"),
+    topic: payload.topic === null || payload.topic === undefined ? null : String(payload.topic).trim() || null,
+    reference: {
+      raw: reference.raw === null || reference.raw === undefined ? null : String(reference.raw).trim() || null,
+      type: pickAllowedString(reference.type, referenceTypes, "none"),
+    },
+    outputTargets: [...new Set(normalizedTargets)],
+    needsDS: Boolean(payload.needsDS),
+    needsTool: Boolean(payload.needsTool),
+    toolHints: (Array.isArray(payload.toolHints) ? payload.toolHints : []).map((item) => String(item || "").trim()).filter(Boolean).slice(0, 8),
+    confidence: clampConfidence(payload.confidence, 0),
+    reasonShort: String(payload.reasonShort || payload.reason || "").trim().slice(0, 240),
+  };
+}
+
 function aiPlannerEnabled() {
   const flag = (envValue("LUCY_AI_PLANNER") || envValue("LUCY_GENERIC_AI_PLANNER") || envValue("LUCY_DS_TOOL_PLANNER") || envValue("LUCY_DS_TOOL_PLANNER_ENABLED")).toLowerCase();
   if (["0", "false", "off", "no", "kapali", "kapalı"].includes(flag)) return false;
   return Boolean(envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT"));
+}
+
+async function debugDeepSeekIntentUnderstanding({ userText = "", context = {} } = {}) {
+  const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
+  const model = envValue("LUCY_DS_INTENT_DEBUG_MODEL") || envValue("DEEPSEEK_MODEL_FAST") || "deepseek-v4-flash";
+  const normalizedUserText = normalizeToolIntentText(userText);
+  const baseDebug = { model, userText: truncate(userText, 900) };
+
+  if (!String(userText || "").trim()) return { ...baseDebug, error: "empty_user_text" };
+  if (!deepSeekKey) return { ...baseDebug, error: "DEEPSEEK_API_KEY missing" };
+
+  const systemPrompt = [
+    "Sen LUCY icin read-only Semantic Intent Controller'sin.",
+    "Gorevin cevap yazmak degil, kullanicinin niyetini JSON olarak siniflandirmak.",
+    "Tool calistirma, karar verme, kullaniciya cevap yazma. Sadece JSON dondur.",
+    "PDF, Word, Excel, grafik, tablo, zip, QR, OCR gibi kelimeler konu, kaynak, cikti formati veya tool hedefi olabilir; once niyeti ayir.",
+    "Ornekler:",
+    "\"askim bugun nasilsin\" -> chat, needsDS true, needsTool false.",
+    "\"bana ask siiri yaz\" -> create, source fresh_content, output text, needsDS true, needsTool false.",
+    "\"bunu pdf yap\" -> export, source last_artifact, output pdf, needsDS false, needsTool true.",
+    "\"almanya hakkinda kisa rapor hazirla ve pdf olarak ver\" -> create, source fresh_content, topic Almanya, output text+pdf, needsDS true, needsTool true.",
+    "\"bu raporu zip yap\" -> export, source last_artifact veya last_report, output zip, needsTool true.",
+    "\"son konustugumuz konu hakkinda tablo yap\" -> create, source last_topic, output table, needsDS true, needsTool false veya table tool varsa needsTool true.",
+    "\"pdf okuyucu program ara\" -> search, source none/fresh_content, output text, needsTool true, toolHints web/search; PDF uretme degil.",
+    "\"pdf icerigini ozetle\" -> read_extract, source last_file/specific_artifact, output text, needsTool true veya file-read; PDF uretme degil.",
+    "\"ikisini zip yap\" veya \"bunlari zip yap\" -> export, source multi_artifact, output zip, needsTool true.",
+    "JSON schema disina cikma.",
+    "{\"mode\":\"chat|task\",\"intent\":\"chat|create|transform|export|search|read_extract|calculate|unknown\",\"source\":\"none|fresh_content|last_artifact|specific_artifact|last_topic|multi_artifact\",\"topic\":null,\"reference\":{\"raw\":null,\"type\":\"none|vague_this|last_report|last_topic|last_table|last_chart|last_file|multi_artifact\"},\"outputTargets\":[\"text|table|chart|pdf|zip|excel|word|json|csv\"],\"needsDS\":true,\"needsTool\":false,\"toolHints\":[],\"confidence\":0.0,\"reasonShort\":\"kisa\"}",
+  ].join("\n");
+
+  const userPrompt = JSON.stringify({
+    userText,
+    normalizedUserText,
+    readOnlyContext: context,
+  });
+
+  const payload = {
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0,
+    max_tokens: numberEnv("LUCY_DS_INTENT_DEBUG_MAX_TOKENS", 700),
+    stream: false,
+  };
+
+  const request = fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${deepSeekKey}`,
+    },
+    body: JSON.stringify(payload),
+  }).then(async (response) => {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error?.message || data?.message || `DeepSeek intent debug API hatasÄ±: ${response.status}`);
+    return data;
+  });
+
+  try {
+    const data = await withTimeout(request, numberEnv("LUCY_DS_INTENT_DEBUG_TIMEOUT_MS", 6000));
+    const content = data?.choices?.[0]?.message?.content || "";
+    const parsed = extractJsonObject(content);
+    if (!parsed) return { ...baseDebug, parseError: "DeepSeek intent debug JSON parse edilemedi", raw: truncate(content, 1200) };
+    return { ...baseDebug, ...normalizeDsIntentDebugPayload(parsed) };
+  } catch (error) {
+    return { ...baseDebug, error: error?.message || "DeepSeek intent debug error" };
+  }
 }
 
 async function planLucyActionWithDeepSeek({ userText = "", memory = {}, availableTools = [] } = {}) {
@@ -357,6 +474,7 @@ async function planToolCallsWithDeepSeek({ userText = "", memory = {}, available
 module.exports = {
   planToolCallsWithDeepSeek,
   planLucyActionWithDeepSeek,
+  debugDeepSeekIntentUnderstanding,
   normalizePlannerResponse,
   normalizePlannerDecision,
   aiPlannerEnabled,
