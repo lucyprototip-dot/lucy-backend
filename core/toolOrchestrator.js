@@ -610,6 +610,30 @@ async function recordDeepSeekIntentDebug(req = null, userText = "") {
   }
 }
 
+function dsIntentFreshContentPdfRequest(req = null, userText = "") {
+  const debug = req?.__lucyDsIntentDebug || {};
+  if (debug.error || debug.parseError) return false;
+  if (debug.intent !== "create" || debug.source !== "fresh_content") return false;
+  if (!Array.isArray(debug.outputTargets) || !debug.outputTargets.includes("pdf")) return false;
+  if (Number(debug.confidence || 0) < 0.85) return false;
+  const q = normalizeIntentText(userText || latestUserIntentText(req));
+  const explicitFreshRequest = /\b(hakkinda|hakkında|rapor|hazirla|hazırla|olustur|oluştur|yaz|metin|icerik|içerik|makale|ozet|özet)\b/.test(q);
+  return Boolean(String(debug.topic || "").trim() || explicitFreshRequest);
+}
+
+function freshDsPdfAnswerText(answer = "") {
+  const text = stripToolNoise(answer);
+  if (!String(text || "").trim() || text.length < 30) return "";
+  if (isToolGeneratedAnswerText(text)) return "";
+  return text;
+}
+
+function dsFreshContentTitleFromIntent(req = null, userText = "", fallback = "LUCY Raporu") {
+  const topic = String(req?.__lucyDsIntentDebug?.topic || "").trim();
+  if (topic) return `${topic} Raporu`;
+  return contentTitleFromText(userText, fallback);
+}
+
 function requestedToolWork(req) {
   const userText = latestUserIntentText(req);
   if (classifySemanticIntent(userText, hydrateMemoryFromRequest(req)) === "search_research") return false;
@@ -1767,6 +1791,16 @@ function resolveActiveContent(req, answer = "", options = {}) {
   }
 
   // Model bu turda gerçek içerik ürettiyse onu kullan.
+  if (dsIntentFreshContentPdfRequest(req, userText)) {
+    const freshAnswer = freshDsPdfAnswerText(answer);
+    if (freshAnswer) {
+      const table = parseFirstMarkdownTableObject(freshAnswer) || parseCsvLikeTableObject(freshAnswer) || parseNumericFactTableObject(freshAnswer);
+      return table
+        ? { type: "table", table, text: tableToMarkdown(table), title: dsFreshContentTitleFromIntent(req, userText, "LUCY Tablosu"), source: "ds-fresh-answer" }
+        : { type: "text", text: freshAnswer, title: dsFreshContentTitleFromIntent(req, userText, "LUCY Raporu"), source: "ds-fresh-answer" };
+    }
+  }
+
   if (answerText && answerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText))) {
     const table = parseFirstMarkdownTableObject(answerText) || parseCsvLikeTableObject(answerText) || parseNumericFactTableObject(answerText);
     return table
@@ -2607,6 +2641,8 @@ function userAskedMultiOutputChain(userText = "") {
 
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
+  const requiresFreshPdfContent = dsIntentFreshContentPdfRequest(req, userText);
+  const freshPdfAnswer = requiresFreshPdfContent ? freshDsPdfAnswerText(answer) : "";
   const memory = hydrateMemoryFromRequest(req);
   const activeContent = resolveActiveContent(req, answer);
   const source = activeContentToText(activeContent, sourceFromMemory(req, answer));
@@ -2744,7 +2780,7 @@ function buildImplicitToolCalls(answer = "", req) {
     calls.push({ tool: "excel", input: excelInput });
   }
 
-  if (wantsPdfFromText(userText)) {
+  if (wantsPdfFromText(userText) && (!requiresFreshPdfContent || freshPdfAnswer)) {
     const selectedChartForPdf = userSpecificallyReferencesChart(userText)
       ? (chartFromHistory(memory, userText) || memory.lastChart)
       : null;
