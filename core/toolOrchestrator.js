@@ -1021,6 +1021,14 @@ function newToolMemory() {
     lastWeb: null,
     activeContent: null,
     contentHistory: [],
+    artifacts: [],
+    lastArtifactId: null,
+    activeArtifactId: null,
+    lastFileArtifactId: null,
+    lastPdfArtifactId: null,
+    lastExcelArtifactId: null,
+    lastZipArtifactId: null,
+    lastDocumentArtifactId: null,
     index: { tables: [], charts: [], mermaids: [], texts: [], files: [] },
     pendingClarification: null,
     lastUserIntent: "",
@@ -1405,6 +1413,93 @@ function contentFingerprint(content = {}) {
   if (type === "mermaid") return `mermaid:${String(content.code || content.mermaid || content.ui?.code || "").replace(/\s+/g, " ").slice(0, 900)}`;
   if (type === "file") return `file:${content.file?.storedFilename || content.file?.filename || content.storedFilename || content.filename || ""}`;
   return `${type}:${String(content.text || content.title || "").replace(/\s+/g, " ").slice(0, 900)}`;
+}
+
+function ensureArtifactRegistry(memory = {}) {
+  if (!Array.isArray(memory.artifacts)) memory.artifacts = [];
+  return memory.artifacts;
+}
+
+function artifactTypeFromFile(toolName = "", file = {}) {
+  const tool = String(toolName || file.tool || "").toLowerCase();
+  const name = String(file.filename || file.storedFilename || "").toLowerCase();
+  const mime = String(file.mimeType || file.contentType || "").toLowerCase();
+  if (tool === "pdf" || mime.includes("pdf") || name.endsWith(".pdf")) return "pdf";
+  if (tool === "excel" || /\.xlsx?$/.test(name)) return "excel";
+  if (tool === "zip" || name.endsWith(".zip")) return "zip";
+  if (tool === "document" || /\.(txt|md|json|csv|html?|docx?)$/i.test(name)) return "document";
+  if (tool === "qr" || /\.(png|jpe?g|webp|gif|svg)$/i.test(name)) return "image";
+  return "file";
+}
+
+function artifactIdForFile(file = {}) {
+  const key = String(file.storedFilename || file.filename || file.url || file.downloadUrl || Date.now());
+  const digest = crypto.createHash("sha1").update(key).digest("hex").slice(0, 12);
+  return `art_${digest}`;
+}
+
+function sourceTextPreview(text = "") {
+  return stripToolNoise(text).replace(/\s+/g, " ").trim().slice(0, 280);
+}
+
+function sourceTextHash(text = "") {
+  const clean = stripToolNoise(text);
+  if (!clean) return "";
+  return crypto.createHash("sha1").update(clean).digest("hex").slice(0, 16);
+}
+
+function registerFileArtifact(memory = {}, result = {}, input = {}, toolName = "", req = null) {
+  if (!memory || !result || result.success === false) return null;
+  const storedFilename = result.storedFilename || result.generatedFile || result.filename;
+  const filename = result.filename || result.downloadName || result.storedFilename || storedFilename;
+  const downloadUrl = result.downloadUrl || result.url || "";
+  if (!storedFilename && !downloadUrl) return null;
+
+  const type = artifactTypeFromFile(toolName, { ...result, filename, storedFilename });
+  const sourceText = String(input.text || input.content || input.markdown || input.html || "");
+  const artifact = {
+    artifactId: result.artifactId || artifactIdForFile({ storedFilename, filename, downloadUrl }),
+    type,
+    tool: String(toolName || result.tool || "file"),
+    title: result.title || input.title || contentTitleFromText(sourceText || filename || storedFilename, "LUCY Dosyası"),
+    filename,
+    storedFilename: storedFilename || filename,
+    downloadUrl,
+    url: downloadUrl,
+    mimeType: result.mimeType || result.contentType || "",
+    sourceTextHash: sourceTextHash(sourceText),
+    contentPreview: sourceTextPreview(sourceText),
+    createdTurnId: crypto.createHash("sha1").update(latestUserIntentText(req) || `${Date.now()}`).digest("hex").slice(0, 12),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  const artifacts = ensureArtifactRegistry(memory);
+  const existingIndex = artifacts.findIndex((item) => item?.artifactId === artifact.artifactId || (artifact.storedFilename && item?.storedFilename === artifact.storedFilename));
+  if (existingIndex >= 0) artifacts[existingIndex] = { ...artifacts[existingIndex], ...artifact, createdAt: artifacts[existingIndex].createdAt || artifact.createdAt, updatedAt: Date.now() };
+  else artifacts.push(artifact);
+  if (artifacts.length > CONTENT_HISTORY_MAX) artifacts.splice(0, artifacts.length - CONTENT_HISTORY_MAX);
+
+  memory.lastArtifactId = artifact.artifactId;
+  memory.activeArtifactId = artifact.artifactId;
+  memory.lastFileArtifactId = artifact.artifactId;
+  if (type === "pdf") memory.lastPdfArtifactId = artifact.artifactId;
+  if (type === "excel") memory.lastExcelArtifactId = artifact.artifactId;
+  if (type === "zip") memory.lastZipArtifactId = artifact.artifactId;
+  if (type === "document") memory.lastDocumentArtifactId = artifact.artifactId;
+
+  pushContentHistory(memory, {
+    type: "file",
+    title: artifact.title,
+    file: artifact,
+    filename: artifact.filename,
+    storedFilename: artifact.storedFilename,
+    downloadUrl: artifact.downloadUrl,
+    artifactId: artifact.artifactId,
+    source: "artifact-registry",
+  });
+  memory.updatedAt = Date.now();
+  return artifact;
 }
 
 function ensureConversationIndex(memory) {
@@ -1968,6 +2063,7 @@ function rememberFile(memory, result = {}, toolName = "") {
   if (!storedFilename && !result.url && !result.downloadUrl) return memory;
   const file = {
     tool: toolName,
+    artifactId: result.artifactId || "",
     filename,
     storedFilename,
     url: result.url || result.downloadUrl || "",
@@ -1995,6 +2091,11 @@ function rememberToolResult(req, call = {}, result = {}) {
       memory.lastTable = table;
       setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: input.title || result.title || "LUCY Tablosu", source: "excel" });
     }
+    const artifact = registerFileArtifact(memory, result, input, toolName, req);
+    if (artifact?.artifactId && result && typeof result === "object") {
+      result.artifactId = artifact.artifactId;
+      result.artifact = artifact;
+    }
     rememberFile(memory, result, toolName);
   } else if (toolName === "chartdata") {
     const chart = {
@@ -2012,6 +2113,11 @@ function rememberToolResult(req, call = {}, result = {}) {
     memory.lastMermaid = { code, title: result.title || input.title || "Mermaid diyagram" };
     if (String(code || "").trim()) setActiveContent(memory, { type: "mermaid", code, ui: mermaidUiFromMemory({ code, title: result.title || input.title }, result.title || input.title || "Mermaid diyagram"), title: result.title || input.title || "Mermaid diyagram", source: "mermaid" });
   } else if (["pdf", "zip", "document", "qr"].includes(toolName)) {
+    const artifact = registerFileArtifact(memory, result, input, toolName, req);
+    if (artifact?.artifactId && result && typeof result === "object") {
+      result.artifactId = artifact.artifactId;
+      result.artifact = artifact;
+    }
     rememberFile(memory, result, toolName);
     if (toolName === "qr") memory.lastQr = result;
     // Dosya üretmek aktif kaynak içeriğini ezmesin: "bunu pdf yap" sonrası "bunu excel yap" hâlâ aynı tablo/metni kullanmalı.
@@ -3328,6 +3434,19 @@ async function executeToolCallsFromAnswer(answer = "", req) {
     }
     const persistedResult = persistToolFileResult(rawResult, req);
     rememberToolResult(req, call, persistedResult);
+    const artifactMemory = getStoredToolMemory(req);
+    if (persistedResult?.artifactId) {
+      req.__lucyArtifactRegistryDebug = {
+        registered: true,
+        artifactId: persistedResult.artifactId,
+        lastArtifactId: artifactMemory.lastArtifactId || null,
+        lastPdfArtifactId: artifactMemory.lastPdfArtifactId || null,
+        artifactCount: Array.isArray(artifactMemory.artifacts) ? artifactMemory.artifacts.length : 0,
+      };
+      if (process.env.LUCY_DEBUG_ARTIFACT === "1") {
+        console.log("[LUCY_ARTIFACT_DEBUG]", JSON.stringify(req.__lucyArtifactRegistryDebug));
+      }
+    }
     const produced = producedFileCandidate(call.tool, persistedResult);
     if (produced) producedFilesThisTurn.push(produced);
     const producedContent = producedContentCandidate(call.tool, persistedResult);
