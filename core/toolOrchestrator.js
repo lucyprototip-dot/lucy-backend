@@ -621,11 +621,32 @@ function dsIntentFreshContentPdfRequest(req = null, userText = "") {
   return Boolean(String(debug.topic || "").trim() || explicitFreshRequest);
 }
 
-function freshDsPdfAnswerText(answer = "") {
+function looksLikeFreshExportAcknowledgement(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return true;
+  const q = normalizeIntentText(raw);
+  const wordCount = raw.split(/\s+/).filter(Boolean).length;
+  const lineCount = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length;
+  if (/\b(indirme hazirlandi|pdf hazirlandi|dosya hazirlandi|asagidan indirebilirsin|a[sş]agidan indirebilirsin)\b/.test(q)) return true;
+  if (/\b(hazirlayip|hazırlayıp|olusturup|oluşturup|duzenleyip|düzenleyip)\b/.test(q) && /\b(sana|size)?\s*(ilet|gonder|gönder|sun|verecegim|vereceğim)\b/.test(q)) return true;
+  if (/\b(pdf|word|dosya|rapor)\b/.test(q) && /\b(hemen|simdi|şimdi)?\s*(hazirliyorum|hazırlıyorum|hazirlayacagim|hazırlayacağım|iletecegim|ileteceğim|gonderecegim|göndereceğim)\b/.test(q)) return true;
+  if (/^\s*(askim|aşkım|tabii|tamam|elbette|olur)[,!\s]+/.test(q) && wordCount < 24 && lineCount <= 2 && /\b(pdf|rapor|hazirla|hazırla|ilet|gonder|gönder)\b/.test(q)) return true;
+  return false;
+}
+
+function freshDsPdfAnswerText(answer = "", userText = "") {
   const text = stripToolNoise(answer);
-  if (!String(text || "").trim() || text.length < 30) return "";
-  if (isToolGeneratedAnswerText(text)) return "";
-  return text;
+  const trimmed = String(text || "").trim();
+  if (!trimmed || trimmed.length < 30) return "";
+  if (isToolGeneratedAnswerText(trimmed)) return "";
+  if (looksLikeFreshExportAcknowledgement(trimmed)) return "";
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  const lineCount = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length;
+  const q = normalizeIntentText(userText);
+  const asksReportLikeContent = /\b(rapor|analiz|makale|ozet|özet|hakkinda|hakkında|icerik|içerik)\b/.test(q);
+  const hasContentShape = lineCount >= 2 || /[:•\-*|]/.test(trimmed) || wordCount >= 35;
+  if (asksReportLikeContent && !hasContentShape) return "";
+  return trimmed;
 }
 
 function dsFreshContentTitleFromIntent(req = null, userText = "", fallback = "LUCY Raporu") {
@@ -1887,13 +1908,14 @@ function resolveActiveContent(req, answer = "", options = {}) {
 
   // Model bu turda gerçek içerik ürettiyse onu kullan.
   if (dsIntentFreshContentPdfRequest(req, userText)) {
-    const freshAnswer = freshDsPdfAnswerText(answer);
+    const freshAnswer = freshDsPdfAnswerText(answer, userText);
     if (freshAnswer) {
       const table = parseFirstMarkdownTableObject(freshAnswer) || parseCsvLikeTableObject(freshAnswer) || parseNumericFactTableObject(freshAnswer);
       return table
         ? { type: "table", table, text: tableToMarkdown(table), title: dsFreshContentTitleFromIntent(req, userText, "LUCY Tablosu"), source: "ds-fresh-answer" }
         : { type: "text", text: freshAnswer, title: dsFreshContentTitleFromIntent(req, userText, "LUCY Raporu"), source: "ds-fresh-answer" };
     }
+    return { type: "text", text: "", title: dsFreshContentTitleFromIntent(req, userText, "LUCY Raporu"), source: "ds-fresh-answer-missing" };
   }
 
   if (answerText && answerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(answerText))) {
@@ -2748,7 +2770,7 @@ function userAskedMultiOutputChain(userText = "") {
 function buildImplicitToolCalls(answer = "", req) {
   const userText = latestUserIntentText(req);
   const requiresFreshPdfContent = dsIntentFreshContentPdfRequest(req, userText);
-  const freshPdfAnswer = requiresFreshPdfContent ? freshDsPdfAnswerText(answer) : "";
+  const freshPdfAnswer = requiresFreshPdfContent ? freshDsPdfAnswerText(answer, userText) : "";
   const memory = hydrateMemoryFromRequest(req);
   const activeContent = resolveActiveContent(req, answer);
   const source = activeContentToText(activeContent, sourceFromMemory(req, answer));
@@ -3342,6 +3364,25 @@ async function executeToolCallsFromAnswer(answer = "", req) {
   }
 
   const implicitCallsForCurrentIntent = (allowAnyTool || shouldForceChartRenderer(req)) ? buildImplicitToolCalls(answer, req) : [];
+
+  if (dsIntentFreshContentPdfRequest(req, userText)) {
+    const freshPdfCall = implicitCallsForCurrentIntent.find((call) => String(call.tool || "").toLowerCase() === "pdf");
+    const hadPlannerPdf = toolCalls.some((call) => String(call.tool || "").toLowerCase() === "pdf");
+    if (freshPdfCall) {
+      toolCalls = [freshPdfCall];
+    } else if (hadPlannerPdf) {
+      toolCalls = toolCalls.filter((call) => String(call.tool || "").toLowerCase() !== "pdf");
+    }
+    req.__lucyFreshPdfAdoptionDebug = {
+      freshPdfRequired: true,
+      usedFreshPdfCall: Boolean(freshPdfCall),
+      blockedPlannerPdf: Boolean(hadPlannerPdf && !freshPdfCall),
+      reason: freshPdfCall ? "ds_fresh_content_pdf_call_selected" : "fresh_pdf_answer_missing_or_non_substantive",
+    };
+    if (process.env.LUCY_DEBUG_INTENT === "1") {
+      console.log("[LUCY_FRESH_PDF_ADOPTION_DEBUG]", JSON.stringify(req.__lucyFreshPdfAdoptionDebug));
+    }
+  }
 
   const forceStyleChart = isStyleOnlyChartModify(userText, hydrateMemoryFromRequest(req));
   const implicitChartCall = implicitCallsForCurrentIntent.find((call) => String(call.tool || "").toLowerCase() === "chartdata");
