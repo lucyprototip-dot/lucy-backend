@@ -3350,8 +3350,44 @@ function shouldBypassPdfTextClarification(decision = {}, req = null) {
   return true;
 }
 
+
+function shouldBypassPlannerClarificationByDsIntent(decision = {}, req = null) {
+  if (decision?.decision !== "ASK_CLARIFICATION" || !req || typeof req !== "object") return false;
+  const ds = req.__lucyDsIntentDebug || {};
+  if (ds.error || ds.parseError) return false;
+  const confidence = Number(ds.confidence || 0);
+  if (confidence < 0.8) return false;
+  const mode = String(ds.mode || "").toLowerCase();
+  const intent = String(ds.intent || "").toLowerCase();
+  const source = String(ds.source || "").toLowerCase();
+  const outputs = new Set((Array.isArray(ds.outputTargets) ? ds.outputTargets : []).map((item) => String(item || "").toLowerCase()));
+  const hints = new Set((Array.isArray(ds.toolHints) ? ds.toolHints : []).map((item) => String(item || "").toLowerCase()));
+  const needsTool = ds.needsTool === true || outputs.size > 0 || hints.size > 0;
+  const createsFreshPdf = mode === "task" && intent === "create" && source === "fresh_content" && outputs.has("pdf");
+  const transformsKnownArtifact = mode === "task" && ["export", "transform"].includes(intent) && ["last_artifact", "specific_artifact", "last_topic"].includes(source) && needsTool;
+  if (!createsFreshPdf && !transformsKnownArtifact) return false;
+
+  recordPlannerClarificationDebug(req, decision, {
+    bypassed: true,
+    bypassReason: createsFreshPdf ? "ds_intent_authority_create_fresh_pdf" : "ds_intent_authority_transform_artifact",
+  });
+  req.__lucyDsIntentAuthorityDebug = {
+    bypassedPlannerClarification: true,
+    reason: createsFreshPdf ? "ds_intent_create_fresh_pdf" : "ds_intent_transform_artifact",
+    intent,
+    source,
+    outputTargets: Array.from(outputs),
+    confidence,
+  };
+  if (process.env.LUCY_DEBUG_INTENT === "1") {
+    console.log("[LUCY_DS_INTENT_AUTHORITY_DEBUG]", JSON.stringify(req.__lucyDsIntentAuthorityDebug));
+  }
+  return true;
+}
+
 function shouldBypassPlannerClarification(decision = {}, req = null) {
   if (decision?.decision !== "ASK_CLARIFICATION") return false;
+  if (shouldBypassPlannerClarificationByDsIntent(decision, req)) return true;
   if (requestHasResolvableTypedReference(req)) {
     recordPlannerClarificationDebug(req, decision, { bypassed: true, bypassReason: "legacy_resolvable_typed_reference" });
     return true;
