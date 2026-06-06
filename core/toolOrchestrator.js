@@ -391,8 +391,17 @@ function enrichToolCallInput(call, req) {
     const active = resolveActiveContent(req);
     const activeText = substantiveTextForPdfSource(activeContentToText(active, ""));
     if (input.text || input.content || input.value) {
-      const explicitPdfText = substantiveTextForPdfSource(input.text || input.content || input.value);
-      if (explicitPdfText) input.text = explicitPdfText;
+      const rawExplicitPdfText = input.text || input.content || input.value;
+      const explicitPdfText = substantiveTextForPdfSource(rawExplicitPdfText);
+      if (explicitPdfText) {
+        input.text = explicitPdfText;
+        delete input.content;
+        delete input.value;
+      } else if (isActionAnnouncementText(rawExplicitPdfText) || looksLikeFreshExportAcknowledgement(rawExplicitPdfText) || isToolGeneratedAnswerText(rawExplicitPdfText)) {
+        delete input.text;
+        delete input.content;
+        delete input.value;
+      }
     }
     const hasCurrentPdfContent = Boolean(String(input.text || input.content || input.value || "").trim() || input.chart || input.mermaid || input.data);
     if (!hasCurrentPdfContent) {
@@ -655,7 +664,33 @@ function isConversationalPrefaceLine(line = "") {
     && /\b(senin icin|senin için|sana|dokturuyorum|döktürüyorum|hazirliyorum|hazırlıyorum|hazirladim|hazırladım|iletecegim|ileteceğim|gonderiyorum|gönderiyorum|buyur|iste|işte)\b/.test(q)) return true;
   if (/\b(hemen\s+)?(hazirlayip|hazırlayıp|hazirliyorum|hazırlıyorum|iletecegim|ileteceğim|gonderecegim|göndereceğim|pdf\s+olarak\s+hemen\s+iletecegim|pdf\s+olarak\s+hemen\s+ileteceğim)\b/.test(q)) return true;
   if (/\b(umarim|umarım)\b/.test(q) && /\b(isine\s+yarar|işine\s+yarar|yardimci\s+olur|yardımcı\s+olur|pdf|iletecegim|ileteceğim)\b/.test(q)) return true;
+  if (/\b(begendin\s+mi|beğendin\s+mi|baska\s+bir\s+(sey|şey|surpriz|sürpriz)\s+ister\s+misin|ister\s+misin\s+askim|ister\s+misin\s+aşkım)\b/.test(q)) return true;
+  if (/\b(backend\s+bunu\s+otomatik|otomatik\s+olarak\s+pdf|pdf[’'`]?e\s+donusturecek|pdf[’'`]?e\s+dönüştürecek)\b/.test(q)) return true;
+  if (/\b(raporu|siiri|şiiri|pdf[’'`]?i|dosyayi|dosyayı)\b.*\b(pdf|zip)\b.*\b(donusturuyorum|dönüştürüyorum|arsivliyorum|arşivliyorum|hazirliyorum|hazırlıyorum)\b/.test(q)) return true;
   return false;
+}
+
+function isActionAnnouncementText(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+  const q = normalizeIntentText(raw);
+  if (isConversationalPrefaceLine(raw)) return true;
+  if (/\b(indirme\s+hazirlandi|indirme\s+hazırlandı|a[sş]agidan\s+indirebilirsin|dosya\s+hazirlandi|dosya\s+hazırlandı)\b/.test(q)) return true;
+  if (/\b(pdf|zip|excel|dosya|rapor|siir|şiir)\b.*\b(hazir|hazır|hazirliyorum|hazırlıyorum|donusturuyorum|dönüştürüyorum|arsivliyorum|arşivliyorum|iletiyorum|gonderiyorum|gönderiyorum)\b/.test(q)) return true;
+  return false;
+}
+
+function assistantTextShouldRemainWhole(text = "") {
+  const clean = cleanExportSourceText(text) || stripToolNoise(text);
+  if (!clean) return false;
+  const table = parseFirstMarkdownTableObject(clean) || parseCsvLikeTableObject(clean) || parseLooseInlineTableObject(clean) || parseNumericFactTableObject(clean);
+  if (!table?.rows?.length) return true;
+  const tableText = tableToMarkdown(table);
+  const cleanLines = clean.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const nonTableLikeLines = cleanLines.filter((line) => !line.includes("|") && !/^[-: ]{3,}$/.test(line));
+  const longProse = clean.length > String(tableText || "").length + 160;
+  const manySections = /^#{1,6}\s+/m.test(clean) || /\b(genel\s+bakis|genel\s+bakış|tarihce|tarihçe|ekonomi|kultur|kültür|turizm|teknoloji|sonuc|sonuç)\b/.test(normalizeIntentText(clean));
+  return longProse || manySections || nonTableLikeLines.length >= Math.max(4, (table.rows?.length || 0));
 }
 
 function cleanExportSourceText(text = "") {
@@ -666,7 +701,7 @@ function cleanExportSourceText(text = "") {
     if (!raw) { cleaned.push(""); continue; }
     const q = normalizeIntentText(raw);
     if (/\b(lucyfileref|storedfilename|downloadurl|\/generated\/|indirme hazirlandi|a[sş]agidan indirebilirsin)\b/.test(q)) continue;
-    if (isConversationalPrefaceLine(raw)) continue;
+    if (isConversationalPrefaceLine(raw) || isActionAnnouncementText(raw)) continue;
     cleaned.push(line);
   }
   return cleaned.join("\n")
@@ -1969,8 +2004,8 @@ function resolveActiveContent(req, answer = "", options = {}) {
     return { type: "text", text: "", title: dsFreshContentTitleFromIntent(req, userText, "LUCY Raporu"), source: "ds-fresh-answer-missing" };
   }
 
-  const cleanAnswerText = substantiveTextForPdfSource(answerText) || answerText;
-  if (cleanAnswerText && cleanAnswerText.length > 30 && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(cleanAnswerText))) {
+  const cleanAnswerText = substantiveTextForPdfSource(answerText);
+  if (cleanAnswerText && cleanAnswerText.length > 30 && !isActionAnnouncementText(cleanAnswerText) && !/^tamam|tabii|olur|hazir/i.test(normalizeIntentText(cleanAnswerText))) {
     const table = parseFirstMarkdownTableObject(cleanAnswerText) || parseCsvLikeTableObject(cleanAnswerText) || parseNumericFactTableObject(cleanAnswerText);
     return table
       ? { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(cleanAnswerText, "LUCY Tablosu"), source: "assistant-answer" }
@@ -2045,7 +2080,8 @@ function isGeneratedStatusOnlyText(text = "") {
   if (!clean) return false;
   if (hasMarkdownTable(text)) return false;
   if (/```(?:lucy-widget|mermaid)/i.test(String(text || ""))) return false;
-  return clean.length < 180 && /(indirme hazirlandi|asagidan indirebilirsin|dosya hazirlandi|pdf hazirlandi|excel.*hazir|xlsx.*hazir|zip.*hazir|grafik hazirlandi|diyagram hazirlandi)/.test(clean);
+  if (isActionAnnouncementText(text)) return true;
+  return clean.length < 220 && /(indirme hazirlandi|asagidan indirebilirsin|dosya hazirlandi|pdf hazirlandi|excel.*hazir|xlsx.*hazir|zip.*hazir|grafik hazirlandi|diyagram hazirlandi)/.test(clean);
 }
 
 
@@ -2084,10 +2120,11 @@ function latestAssistantContentObject(req) {
     const message = messages[i] || {};
     const role = String(message.role || message.sender || "").toLowerCase();
     if (role !== "assistant") continue;
-    const text = stripToolNoise(messageText(message));
+    const rawText = stripToolNoise(messageText(message));
+    const text = cleanExportSourceText(rawText) || rawText;
     if (!text || isToolGeneratedAnswerText(text)) continue;
     const table = parseFirstMarkdownTableObject(text) || parseCsvLikeTableObject(text) || parseLooseInlineTableObject(text) || parseNumericFactTableObject(text);
-    if (table?.rows?.length) return { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(text, "LUCY Tablosu"), source: "latest-assistant" };
+    if (table?.rows?.length && !assistantTextShouldRemainWhole(text)) return { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(text, "LUCY Tablosu"), source: "latest-assistant" };
     return { type: "text", text, title: contentTitleFromText(text, "LUCY İçeriği"), source: "latest-assistant" };
   }
   return null;
@@ -2110,15 +2147,16 @@ function typedContentFromMemory(memory = {}, preferred = "text") {
 }
 
 function rememberText(memory, text = "") {
-  const clean = stripToolNoise(text);
+  const clean = cleanExportSourceText(text) || stripToolNoise(text);
   if (!clean || clean.length < 2) return memory;
   if (isGeneratedStatusOnlyText(text) || isToolGeneratedAnswerText(text)) return memory;
   memory.lastText = clean;
   const table = parseFirstMarkdownTableObject(clean) || parseCsvLikeTableObject(clean) || parseLooseInlineTableObject(clean) || parseNumericFactTableObject(clean);
-  if (table) {
+  if (table && !assistantTextShouldRemainWhole(clean)) {
     memory.lastTable = table;
     setActiveContent(memory, { type: "table", table, text: tableToMarkdown(table), title: contentTitleFromText(clean, "LUCY Tablosu"), source: "text" });
   } else {
+    if (table?.rows?.length) memory.lastTable = table;
     setActiveContent(memory, { type: "text", text: clean, title: contentTitleFromText(clean, "LUCY İçeriği"), source: "text" });
   }
   const mermaid = [...String(clean).matchAll(/```mermaid\s*([\s\S]*?)```/gi)].map((m) => String(m[1] || "").trim()).find(Boolean);
@@ -2358,7 +2396,7 @@ function contentTitleFromText(text = "", fallback = "LUCY Çıktısı") {
 }
 function semanticTitleForFileInput(input = {}, contentText = "", userText = "", fallback = "LUCY Çıktısı") {
   const inputTitle = String(input.title || input.name || "").trim();
-  if (inputTitle && !isGenericArtifactTitle(inputTitle)) return cleanSemanticTitleLine(inputTitle).slice(0, 86);
+  if (inputTitle && !isGenericArtifactTitle(inputTitle) && !isActionAnnouncementText(inputTitle) && !isConversationalPrefaceLine(inputTitle)) return cleanSemanticTitleLine(inputTitle).slice(0, 86);
   const contentTitle = contentTitleFromText(cleanExportSourceText(contentText) || contentText, "");
   if (contentTitle && !isGenericArtifactTitle(contentTitle) && !isConversationalPrefaceLine(contentTitle)) return contentTitle.slice(0, 86);
   const userTitle = contentTitleFromText(userText, "");
@@ -2370,7 +2408,12 @@ function isGenericOutputFilename(value = "") {
   const base = String(value || "")
     .replace(/^\d{8,}-[a-f0-9]{6,}-/i, "")
     .replace(/\.(pdf|zip|xlsx?|docx?|txt|md|csv|json|html?)$/i, "");
-  return isGenericArtifactTitle(base) || /^(lucy-rapor|lucy-raporu|lucy-cikti|lucy-dosyasi|pdf-sonucu|zip-sonucu)$/i.test(safeOutputStem(base));
+  const normalizedBase = normalizeIntentText(base.replace(/[-_]+/g, " "));
+  return isGenericArtifactTitle(base)
+    || isActionAnnouncementText(base)
+    || /^(lucy-rapor|lucy-raporu|lucy-cikti|lucy-dosyasi|pdf-sonucu|zip-sonucu)$/i.test(safeOutputStem(base))
+    || /(raporu|siiri|şiiri|pdf|zip).*(donusturuyorum|dönüştürüyorum|arsivliyorum|arşivliyorum|hazirliyorum|hazırlıyorum)/.test(normalizedBase)
+    || /(elbette|tabii|tamam|askim|aşkım).*(senin\s+icin|senin\s+için|dokturuyorum|döktürüyorum|hazirliyorum|hazırlıyorum)/.test(normalizedBase);
 }
 
 function applySemanticFileName(input = {}, title = "", ext = "pdf") {
@@ -3052,7 +3095,8 @@ function buildImplicitToolCalls(answer = "", req) {
       pdfInput.mermaid = activeContent.code || activeContent.mermaid;
       pdfInput.text = "";
     } else {
-      pdfInput.text = activeTable?.rows?.length && (isOnlyTransformCommand(userText) || rankedSubsetRequested) ? tableToMarkdown(activeTable) : (substantiveTextForPdfSource(source) || source);
+      const explicitTablePdf = /\b(son\s+tablo|ilk\s+tablo|bu\s+tablo|tabloyu|tablo)\b/.test(normalizeIntentText(userText));
+      pdfInput.text = activeTable?.rows?.length && (explicitTablePdf || rankedSubsetRequested) ? tableToMarkdown(activeTable) : (substantiveTextForPdfSource(source) || source);
     }
     calls.push({ tool: "pdf", input: pdfInput });
   }
@@ -3082,7 +3126,10 @@ function buildImplicitToolCalls(answer = "", req) {
     const isMulti = userAskedMultiOutputChain(userText);
     const chosen = isMulti ? null : selectGeneratedFileFromMemory(userText, memory, req, { allowZip: false });
     const files = chosen?.storedFilename ? [{ storedFilename: chosen.storedFilename, filename: chosen.filename || chosen.storedFilename }] : undefined;
-    calls.push({ tool: "zip", input: { filename: `${stem || "lucy-dosyalari"}.zip`, ...(files ? { files } : {}) } });
+    const chosenBase = String(chosen?.filename || chosen?.storedFilename || "").replace(/^\d{8,}-[a-f0-9]{6,}-/i, "").replace(/\.(pdf|xlsx?|docx?|txt|md|csv|json|html?)$/i, "");
+    const zipTitle = semanticTitleForFileInput({ title: chosen?.title, filename: chosenBase }, chosen?.contentPreview || "", userText, title || chosenBase || "lucy-dosyalari");
+    const zipStem = safeOutputStem(zipTitle || chosenBase || stem || "lucy-dosyalari");
+    calls.push({ tool: "zip", input: { filename: `${zipStem || "lucy-dosyalari"}.zip`, ...(files ? { files } : {}) } });
   }
 
   const maxCalls = userAskedMultiOutputChain(userText) ? 8 : 5;
