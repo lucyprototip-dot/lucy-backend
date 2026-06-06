@@ -387,15 +387,22 @@ function enrichToolCallInput(call, req) {
     }
   }
 
-  if (toolName === "pdf" && !String(input.text || input.content || input.value || "").trim()) {
+  if (toolName === "pdf") {
     const active = resolveActiveContent(req);
     const activeText = activeContentToText(active, "");
-    if (active?.type === "chart" && active.chart) input.chart = active.chart;
-    else if (active?.type === "mermaid" && active.code) input.mermaid = active.code;
-    else if (activeText) input.text = activeText;
-    else if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(rankedSubsetTableForIntent(memory.lastTable, userText));
-    else if (memory.lastText) input.text = memory.lastText;
-    else if (memory.lastChart?.data) input.text = JSON.stringify(memory.lastChart.data, null, 2);
+    const hasCurrentPdfContent = Boolean(String(input.text || input.content || input.value || "").trim() || input.chart || input.mermaid || input.data);
+    if (!hasCurrentPdfContent) {
+      if (active?.type === "chart" && active.chart) input.chart = active.chart;
+      else if (active?.type === "mermaid" && active.code) input.mermaid = active.code;
+      else if (activeText) input.text = activeText;
+      else if (memory.lastTable?.rows?.length) input.text = tableToMarkdown(rankedSubsetTableForIntent(memory.lastTable, userText));
+      else if (memory.lastText) input.text = memory.lastText;
+      else if (memory.lastChart?.data) input.text = JSON.stringify(memory.lastChart.data, null, 2);
+    }
+    const titleSource = String(input.text || input.content || input.value || activeText || "");
+    const semanticTitle = semanticTitleForFileInput(input, titleSource, userText, active?.title || "LUCY Raporu");
+    if (semanticTitle && (isGenericArtifactTitle(input.title) || !input.title)) input.title = semanticTitle;
+    applySemanticFileName(input, input.title || semanticTitle, "pdf");
   }
 
   if (toolName === "chartdata") {
@@ -1478,11 +1485,12 @@ function registerFileArtifact(memory = {}, result = {}, input = {}, toolName = "
 
   const type = artifactTypeFromFile(toolName, { ...result, filename, storedFilename });
   const sourceText = String(input.text || input.content || input.markdown || input.html || "");
+  const artifactTitle = semanticTitleForFileInput({ title: result.title || input.title, filename }, sourceText, latestUserIntentText(req), "LUCY Dosyası");
   const artifact = {
     artifactId: result.artifactId || artifactIdForFile({ storedFilename, filename, downloadUrl }),
     type,
     tool: String(toolName || result.tool || "file"),
-    title: result.title || input.title || contentTitleFromText(sourceText || filename || storedFilename, "LUCY Dosyası"),
+    title: artifactTitle,
     filename,
     storedFilename: storedFilename || filename,
     downloadUrl,
@@ -2253,12 +2261,79 @@ function hasMarkdownTable(text = "") {
   return lines.some((line, index) => line.includes("|") && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || ""));
 }
 
+function isGenericArtifactTitle(value = "") {
+  const q = normalizeIntentText(value)
+    .replace(/\.(pdf|zip|xlsx?|docx?|txt|md|csv|json|html?)$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!q) return true;
+  return /^(lucy|lucy rapor|lucy raporu|lucy cikti|lucy ciktisi|lucy icerigi|lucy dosyasi|pdf sonucu|zip sonucu|excel sonucu|document sonucu|dosya sonucu|rapor|raporu|cikti|ciktisi)$/i.test(q);
+}
+
+function cleanSemanticTitleLine(line = "") {
+  return String(line || "")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/[*_`#]/g, "")
+    .replace(/^[^\p{L}\p{N}]+/u, "")
+    .replace(/[\s\-–—:|]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function meaningfulTitleLineFromText(text = "") {
+  const lines = String(stripToolNoise(text) || "")
+    .split(/\r?\n/)
+    .map(cleanSemanticTitleLine)
+    .filter(Boolean);
+  for (const line of lines) {
+    const normalized = normalizeIntentText(line);
+    if (!normalized || line.includes("|")) continue;
+    if (/^[-_=]{3,}$/.test(line)) continue;
+    if (/\b(lucy tarafindan hazirlandi|indirme hazirlandi|asagidan indirebilirsin|storedfilename|downloadurl|lucyfileref)\b/.test(normalized)) continue;
+    if (isGenericArtifactTitle(line)) continue;
+    if (line.length < 3) continue;
+    return line.slice(0, 86);
+  }
+  return "";
+}
+
 function contentTitleFromText(text = "", fallback = "LUCY Çıktısı") {
-  const firstHeading = String(text || "").split(/\r?\n/).map((line) => line.trim()).find((line) => /^#{1,4}\s+/.test(line));
-  if (firstHeading) return firstHeading.replace(/^#{1,4}\s+/, "").slice(0, 70);
-  const firstLine = String(text || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-  if (firstLine && !firstLine.includes("|")) return firstLine.replace(/[*_`#]/g, "").slice(0, 70);
+  const heading = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => /^#{1,4}\s+/.test(line));
+  const headingTitle = heading ? cleanSemanticTitleLine(heading) : "";
+  if (headingTitle && !isGenericArtifactTitle(headingTitle)) return headingTitle.slice(0, 86);
+  const semantic = meaningfulTitleLineFromText(text);
+  if (semantic) return semantic;
   return fallback;
+}
+
+function semanticTitleForFileInput(input = {}, contentText = "", userText = "", fallback = "LUCY Çıktısı") {
+  const inputTitle = String(input.title || input.name || "").trim();
+  if (inputTitle && !isGenericArtifactTitle(inputTitle)) return cleanSemanticTitleLine(inputTitle).slice(0, 86);
+  const contentTitle = contentTitleFromText(contentText, "");
+  if (contentTitle && !isGenericArtifactTitle(contentTitle)) return contentTitle.slice(0, 86);
+  const userTitle = contentTitleFromText(userText, "");
+  if (userTitle && !isGenericArtifactTitle(userTitle) && !isOnlyTransformCommand(userText)) return userTitle.slice(0, 86);
+  return fallback;
+}
+
+function isGenericOutputFilename(value = "") {
+  const base = String(value || "")
+    .replace(/^\d{8,}-[a-f0-9]{6,}-/i, "")
+    .replace(/\.(pdf|zip|xlsx?|docx?|txt|md|csv|json|html?)$/i, "");
+  return isGenericArtifactTitle(base) || /^(lucy-rapor|lucy-raporu|lucy-cikti|lucy-dosyasi|pdf-sonucu|zip-sonucu)$/i.test(safeOutputStem(base));
+}
+
+function applySemanticFileName(input = {}, title = "", ext = "pdf") {
+  const cleanExt = String(ext || "pdf").replace(/^\.+/, "").toLowerCase() || "pdf";
+  const semanticStem = safeOutputStem(title || "");
+  if (!semanticStem) return input;
+  if (!input.filename || isGenericOutputFilename(input.filename)) {
+    input.filename = `${semanticStem}.${cleanExt}`;
+  }
+  return input;
 }
 
 function safeOutputStem(value = "lucy-cikti") {
@@ -2787,7 +2862,7 @@ function buildImplicitToolCalls(answer = "", req) {
   if (hasFreshUserContent && activeContent && typeof activeContent === "object") {
     activeContent.title = contentTitleFromText(userInlineContent || userText, activeTable ? "LUCY Tablosu" : "LUCY Ciktisi");
   }
-  const title = activeContent?.title || contentTitleFromText(source, activeTable ? "LUCY Tablosu" : "LUCY Çıktısı");
+  const title = semanticTitleForFileInput({ title: activeContent?.title }, source, userText, activeTable ? "LUCY Tablosu" : "LUCY Çıktısı");
   syncRankedSubsetActiveTable(memory, baseTableForIntent, activeTable, title);
   const stem = safeOutputStem(title);
   const calls = [];
@@ -2912,8 +2987,8 @@ function buildImplicitToolCalls(answer = "", req) {
     const selectedChartForPdf = userSpecificallyReferencesChart(userText)
       ? (chartFromHistory(memory, userText) || memory.lastChart)
       : null;
-    const pdfTitle = selectedChartForPdf?.title || title;
-    const pdfInput = { title: pdfTitle, filename: `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf` };
+    const pdfTitle = semanticTitleForFileInput({ title: selectedChartForPdf?.title || title }, source, userText, title || "LUCY Raporu");
+    const pdfInput = applySemanticFileName({ title: pdfTitle, filename: `${safeOutputStem(pdfTitle) || stem || "lucy-rapor"}.pdf` }, pdfTitle, "pdf");
     if (selectedChartForPdf?.data) {
       pdfInput.chart = selectedChartForPdf;
       pdfInput.data = selectedChartForPdf.data;

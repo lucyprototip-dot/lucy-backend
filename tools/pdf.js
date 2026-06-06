@@ -86,6 +86,7 @@ module.exports = {
       type: "file",
       tool: "pdf",
       mimeType: "application/pdf",
+      title,
       filename,
       base64: buffer.toString("base64"),
       engine,
