@@ -49,6 +49,40 @@ function normalizeMessages(messages) {
     .filter(Boolean);
 }
 
+function sanitizeLucyAnswer(text = "") {
+  return String(text || "")
+    .replace(/\([^()]*\)/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function createLucyStreamSanitizer() {
+  let parenDepth = 0;
+
+  return function sanitizeDelta(delta = "") {
+    let out = "";
+
+    for (const char of String(delta || "")) {
+      if (char === "(") {
+        parenDepth += 1;
+        continue;
+      }
+
+      if (char === ")" && parenDepth > 0) {
+        parenDepth -= 1;
+        continue;
+      }
+
+      if (parenDepth === 0) out += char;
+    }
+
+    return out;
+  };
+}
+
 // DeepSeek 4 mod:
 // Hızlı = DS v4 flash
 // Düşün = DS v4 flash + thinking
@@ -568,7 +602,7 @@ async function askDeepSeek(body = {}) {
   }
 
   const choiceMessage = data?.choices?.[0]?.message || {};
-  return choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.";
+  return sanitizeLucyAnswer(choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.");
 }
 
 function extractDeepSeekStreamDelta(data = {}) {
@@ -651,6 +685,7 @@ async function askDeepSeekStream(body = {}, res) {
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let fullAnswer = "";
+  const sanitizeDelta = createLucyStreamSanitizer();
 
   while (true) {
     const { value, done } = await reader.read();
@@ -674,9 +709,10 @@ async function askDeepSeekStream(body = {}, res) {
       try {
         const json = JSON.parse(payloadText);
         const delta = extractDeepSeekStreamDelta(json);
-        if (delta) {
-          fullAnswer += delta;
-          writeSse(res, { delta });
+        const cleanDelta = sanitizeDelta(delta);
+        if (cleanDelta) {
+          fullAnswer += cleanDelta;
+          writeSse(res, { delta: cleanDelta });
         }
       } catch {
         // keep-alive veya parse edilemeyen satır
