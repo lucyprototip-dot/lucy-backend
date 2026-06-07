@@ -198,7 +198,9 @@ function buildSystemPrompt(body = {}) {
   }
 
   return parts.join("\n\n");
-}// Web search
+}
+
+// Web search
 
 const LUCY_WEB_RESULT_LIMIT = Math.min(numberEnv("LUCY_WEB_RESULT_LIMIT", 8), 10);
 const LUCY_WEB_PAGE_READ_LIMIT = Math.min(numberEnv("LUCY_WEB_PAGE_READ_LIMIT", 2), 5);
@@ -219,54 +221,10 @@ function getRecentUserTexts(messages = [], limit = 8) {
     .map((message) => message.content);
 }
 
-function isVagueFollowUp(text = "") {
-  const q = String(text || "").toLowerCase().trim();
-  if (!q) return false;
-  if (q.length > 140) return false;
-
-  return [
-    "kontrol et",
-    "doğru kontrol",
-    "dogru kontrol",
-    "doğrula",
-    "dogrula",
-    "sen bul",
-    "bul söyle",
-    "bul soyle",
-    "araştır",
-    "arastir",
-    "dedim",
-    "onu",
-    "bunu",
-    "bak",
-    "devam",
-    "emin misin",
-    "eminsen",
-    "doğru mu",
-    "dogru mu"
-  ].some((key) => q.includes(key));
-}
-
-function fallbackContextualUserQuery(messages = []) {
-  const recent = getRecentUserTexts(messages, 8);
-  const last = recent[recent.length - 1] || "";
-
-  if (isVagueFollowUp(last) && recent.length >= 2) {
-    const previousUseful = [...recent]
-      .slice(0, -1)
-      .reverse()
-      .find((text) => text.length > 3 && !isVagueFollowUp(text));
-
-    if (previousUseful) return `${previousUseful}\nTakip isteği: ${last}`;
-  }
-
-  return last;
-}
-
 async function planWebSearchQueryWithDeepSeek(body = {}) {
   const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
   const recentMessages = normalizeMessages(body.messages).slice(-8);
-  const fallbackQuery = fallbackContextualUserQuery(body.messages);
+  const fallbackQuery = getLastUserText(body.messages);
 
   if (!deepSeekKey || !recentMessages.length) return fallbackQuery;
 
@@ -279,21 +237,17 @@ async function planWebSearchQueryWithDeepSeek(body = {}) {
       {
         role: "system",
         content: [
-          "Sen yalnızca web arama sorgusu hazırlayan iç router'sın.",
-          "Kullanıcının son mesajını önceki konuşma bağlamıyla yorumla.",
-          "Kullanıcı 'kontrol et', 'sen bul söyle', 'dedim', 'onu' gibi takip mesajı yazarsa önceki somut konuyu bul.",
-          "Cevap sadece JSON olsun.",
-          "Şema: {\"query\":\"...\",\"needs_web\":true}",
-          "query kısa, net, arama motoruna uygun Türkçe olmalı.",
-          "Asla açıklama yazma."
+          "Konuşma bağlamını oku ve kullanıcının şu an webde araştırmak istediği şeyi tek kısa arama sorgusuna çevir.",
+          "Kullanıcının niyetini doğal dil modeli gibi yorumla; kelime/komut kuralı kullanma.",
+          "Son mesaj bir önceki konuya bağlıysa bağlamı koru.",
+          "Son mesaj yeni açık bir konu söylüyorsa yeni konuyu esas al.",
+          "Cevap sadece JSON olsun: {\"query\":\"...\"}",
+          "Açıklama yazma."
         ].join(" ")
       },
       {
         role: "user",
-        content: JSON.stringify({
-          conversation: recentMessages,
-          fallback_query: fallbackQuery
-        })
+        content: JSON.stringify({ conversation: recentMessages })
       }
     ]
   };
@@ -589,7 +543,8 @@ async function collectWebContext(query = "") {
     pages.push(page);
   }
 
-  const searchResults = urls.length ? [] : await searchWeb(searchQuery).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
+  // URL/domain verilse bile ayrıca arama yap. Sadece ana sayfayı okumak ürün/fiyat sayfalarını kaçırıyordu.
+  const searchResults = await searchWeb(searchQuery).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
 
   for (const item of searchResults.slice(0, LUCY_WEB_PAGE_READ_LIMIT)) {
     if (item.url && /^https?:\/\//i.test(item.url)) {
@@ -918,9 +873,6 @@ app.get("/", (req, res) => {
     modes: ["fast", "think", "pro_fast", "pro_think"],
     webSearch: true,
     elevenLabs: true,
-    tools: false,
-    export: false,
-    files: false,
     port: PORT,
   });
 });
@@ -1016,36 +968,7 @@ app.post("/api/speak", async (req, res) => {
   }
 });
 
-const DISABLED_ENDPOINTS = [
-  "/api/tools",
-  "/api/export-chat",
-  "/api/upload-file",
-  "/api/file",
-  "/api/read-file",
-  "/api/analyze-image",
-  "/api/analyze-video",
-  "/api/generate-image",
-  "/api/generate-video",
-  "/api/archive",
-  "/api/store",
-];
-
-app.use((req, res, next) => {
-  const isDisabled = DISABLED_ENDPOINTS.some((endpoint) =>
-    req.path === endpoint || req.path.startsWith(`${endpoint}/`)
-  );
-
-  if (!isDisabled) return next();
-
-  return res.json({
-    success: false,
-    disabled: true,
-    answer: "Aşkım şu an bu özellik kapalı. Lucy Core sadece sohbet, web search ve ses modunda çalışıyor.",
-  });
-});
-
 app.listen(PORT, () => {
   console.log(`LUCY Core backend aktif: http://localhost:${PORT}`);
   console.log("Aktif: DeepSeek chat/stream + 4 mod + web search + ElevenLabs");
-  console.log("Kapalı: tools + PDF/Excel/export + file upload + artifact");
 });
