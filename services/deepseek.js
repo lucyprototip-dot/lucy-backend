@@ -27,7 +27,10 @@ function looksLikeInternalAnswer(text = "") {
     value.includes("yanıt verirken") ||
     value.includes("cevap verirken") ||
     value.includes("web arama kapalı ama açık") ||
-    value.includes("hadi bakalım") && value.includes("doğru ve güncel")
+    value.includes("hadi bakalım") && value.includes("doğru ve güncel") ||
+    value.startsWith("merhaba, kullanıcı") ||
+    value.includes("kullanıcıya") && value.includes("söylemeliyim") ||
+    value.includes("yanıtımda") && value.includes("kaynak")
   );
 }
 

@@ -263,6 +263,15 @@ async function searchDuckDuckGoHtml(query = "") {
   return results.slice(0, 8);
 }
 
+function isJunkSearchResult(item = {}, query = "") {
+  const url = String(item.url || "").toLowerCase();
+  const title = String(item.title || "").toLowerCase();
+  if (!url && !title) return true;
+  if (url.includes("translate.google") || url.includes("instagram.com")) return true;
+  if (url === "https://www.google.com" || title === "google") return true;
+  return false;
+}
+
 async function searchWeb(query = "") {
   const safeQuery = buildWebSearchQuery(query);
   if (!safeQuery) return [];
@@ -273,6 +282,7 @@ async function searchWeb(query = "") {
   const duckHtmlResults = duckApiResults.length ? [] : await searchDuckDuckGoHtml(safeQuery).catch(() => []);
   const seen = new Set();
   return [...googleResults, ...duckApiResults, ...duckHtmlResults].filter((item) => {
+    if (isJunkSearchResult(item, safeQuery)) return false;
     const key = item.url || item.title;
     if (!key || seen.has(key)) return false;
     seen.add(key);

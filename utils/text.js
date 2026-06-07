@@ -36,15 +36,8 @@ function sanitizeLucyAnswer(text = "") {
 }
 
 function createLucyStreamSanitizer() {
-  let parenDepth = 0;
   return function sanitizeDelta(delta = "") {
-    let out = "";
-    for (const char of String(delta || "")) {
-      if (char === "(") { parenDepth += 1; continue; }
-      if (char === ")" && parenDepth > 0) { parenDepth -= 1; continue; }
-      if (parenDepth === 0) out += char;
-    }
-    return out;
+    return String(delta || "");
   };
 }
 

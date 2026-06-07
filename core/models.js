@@ -1,6 +1,6 @@
-const DEEPSEEK_MODEL_FAST = process.env.DEEPSEEK_MODEL_FAST || "deepseek-v4-flash";
-const DEEPSEEK_MODEL_THINKING = process.env.DEEPSEEK_MODEL_THINKING || "deepseek-v4-flash";
-const DEEPSEEK_MODEL_PRO = process.env.DEEPSEEK_MODEL_PRO || "deepseek-v4-pro";
+const DEEPSEEK_MODEL_FAST = process.env.DEEPSEEK_MODEL_FAST || "deepseek-chat";
+const DEEPSEEK_MODEL_THINKING = process.env.DEEPSEEK_MODEL_THINKING || "deepseek-reasoner";
+const DEEPSEEK_MODEL_PRO = process.env.DEEPSEEK_MODEL_PRO || "deepseek-chat";
 
 const MODE_TO_DEEPSEEK_MODEL = {
   fast: DEEPSEEK_MODEL_FAST,
@@ -37,10 +37,10 @@ const THINKING_MODE_IDS = new Set([
 function pickDeepSeekModel({ mode, modeId, apiMode, model, routerModel } = {}) {
   const explicitModel = String(model || routerModel || "").trim();
   const explicitLower = explicitModel.toLowerCase();
-  if (explicitLower.includes("deepseek-v4-pro")) return DEEPSEEK_MODEL_PRO;
-  if (explicitLower.includes("deepseek-v4-flash")) return DEEPSEEK_MODEL_FAST;
   if (explicitLower.includes("deepseek-reasoner")) return DEEPSEEK_MODEL_THINKING;
   if (explicitLower.includes("deepseek-chat")) return DEEPSEEK_MODEL_FAST;
+  if (explicitLower.includes("deepseek-v4-pro")) return DEEPSEEK_MODEL_PRO;
+  if (explicitLower.includes("deepseek-v4-flash")) return DEEPSEEK_MODEL_FAST;
   const raw = String(apiMode || mode || modeId || "").toLowerCase();
   return MODE_TO_DEEPSEEK_MODEL[raw] || DEEPSEEK_MODEL_FAST;
 }
@@ -55,7 +55,7 @@ function modelList() {
     { id: "fast", label: "Hızlı", model: DEEPSEEK_MODEL_FAST, thinking: false },
     { id: "think", label: "Düşün", model: DEEPSEEK_MODEL_THINKING, thinking: true },
     { id: "pro_fast", label: "Pro Hızlı", model: DEEPSEEK_MODEL_PRO, thinking: false },
-    { id: "pro_think", label: "Pro Düşün", model: DEEPSEEK_MODEL_PRO, thinking: true },
+    { id: "pro_think", label: "Pro Düşün", model: DEEPSEEK_MODEL_THINKING, thinking: true },
   ];
 }
 
