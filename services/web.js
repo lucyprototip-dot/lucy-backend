@@ -70,26 +70,27 @@ async function planWebSearchQueryWithDeepSeek(body = {}) {
   const conversation = compactConversation(body.messages, 10);
   const fallbackQuery = fallbackQueryFromConversation(body.messages);
 
-  if (!deepSeekKey || !conversation) return fallbackQuery;
+  if (!deepSeekKey || !conversation) return { needs_web: false, query: fallbackQuery, reason: "no_context" };
 
   const plannerPayload = {
     model: DEEPSEEK_MODEL_FAST,
     temperature: 0,
-    max_tokens: 220,
+    max_tokens: 260,
     stream: false,
     messages: [
       {
         role: "system",
         content: [
-          "Sen sadece web arama sorgusu üreten iç planlayıcısın.",
-          "Kullanıcıya cevap yazma.",
-          "Konuşmanın tamamını yorumla; son mesaj tek başına anlamsızsa önceki somut isteğe bağla.",
-          "Önceki konuşmada site/domain/firma/para birimi geçiyorsa takip isteğini ona bağla.",
-          "Yazım hatalarını bağlama göre düzelt.",
-          "Kullanıcıya cevap yazma, yalnızca arama motoru sorgusu üret.",
-          "Cevap sadece JSON olsun.",
-          "Şema: {\"query\":\"arama sorgusu\",\"reason\":\"kısa iç neden\"}",
-          "query arama motoruna uygun, kısa ve net Türkçe olsun."
+          "Sen kullanıcıya cevap yazmayan iç yönlendiricisin.",
+          "Görevin konuşmayı anlamak ve web araması gerekip gerekmediğini belirlemek.",
+          "Sadece JSON döndür.",
+          "Şema: {\"needs_web\":true|false,\"query\":\"arama sorgusu\",\"reason\":\"kısa neden\"}",
+          "Kullanıcı sohbet ediyorsa, flört ediyorsa, selam veriyorsa, duygusal konuşuyorsa needs_web=false yap.",
+          "Kullanıcı güncel kur, fiyat, stok, site inceleme, ürün listesi, haber veya canlı veri istiyorsa needs_web=true yap.",
+          "Son mesaj 'açtım', 'bak', 'tekrar bak', 'şimdi bak', 'listele', 'daha detaylı' gibi takip mesajıysa önceki somut kullanıcı isteğine bağla.",
+          "Önceki konuşmadaki web cevaplarını değil, kullanıcının gerçek isteğini esas al.",
+          "query kısa, net ve arama motoruna uygun olsun.",
+          "Emin değilsen needs_web=false yap."
         ].join(" ")
       },
       { role: "user", content: JSON.stringify({ conversation, fallback_query: fallbackQuery }) }
@@ -106,13 +107,13 @@ async function planWebSearchQueryWithDeepSeek(body = {}) {
     const raw = data?.choices?.[0]?.message?.content || "";
     const jsonText = raw.match(/\{[\s\S]*\}/)?.[0] || "";
     const parsed = JSON.parse(jsonText);
-    const query = strengthenQueryWithContext(parsed?.query || "", body);
-    trace("web.plan", { query, rawQuery: parsed?.query || "", reason: parsed?.reason || "", fallbackQuery });
-    return query || fallbackQuery;
+    const needsWeb = parsed?.needs_web === true || parsed?.needs_web === "true";
+    const query = needsWeb ? strengthenQueryWithContext(parsed?.query || "", body) : "";
+    trace("web.plan", { needsWeb, query, rawQuery: parsed?.query || "", reason: parsed?.reason || "", fallbackQuery });
+    return { needs_web: needsWeb, query, reason: parsed?.reason || "" };
   } catch (error) {
-    const query = strengthenQueryWithContext(fallbackQuery, body);
-    trace("web.plan.error", { error: error.message, fallbackQuery: query });
-    return query;
+    trace("web.plan.error", { error: error.message, fallbackQuery });
+    return { needs_web: false, query: "", reason: "planner_failed" };
   }
 }
 
@@ -313,7 +314,8 @@ function hasNumericOrSubstantialContext(contextItems = []) {
 async function buildLiveWebBody(body = {}, plan = {}) {
   const conversation = compactConversation(body.messages, 10);
   const lastUserText = getLastUserText(body.messages);
-  const searchText = strengthenQueryWithContext(plan.query || await planWebSearchQueryWithDeepSeek(body), body);
+  const planned = plan.query ? plan : await planWebSearchQueryWithDeepSeek(body);
+  const searchText = strengthenQueryWithContext(planned.query || "", body);
   const web = await collectWebContext(searchText);
   const contextItems = [];
 
@@ -363,25 +365,41 @@ async function buildLiveWebBody(body = {}, plan = {}) {
 
 function needsWebForFreshData(body = {}) {
   const messages = normalizeMessages(body.messages);
-  const lastUser = [...messages].reverse().find((message) => message.role === "user")?.content || "";
-  const recent = messages.slice(-6).map((m) => m.content).join("\n");
-  const value = `${recent}\n${lastUser}`.toLowerCase();
-  if (!value.trim()) return false;
+  const users = messages.filter((message) => message.role === "user").map((message) => message.content);
+  const lastUser = normalizeText(users[users.length - 1] || "");
+  if (!lastUser) return false;
 
+  const lower = lastUser.toLowerCase();
+  const isCasual = /^(aşkım|askim|nasılsın|nasilsin|merhaba|selam|tamam|ok|boşver|bosver|sohbet edelim|seni özledim|seni ozledim|sikişken|arsız)/i.test(lower);
+  if (isCasual) return false;
+
+  const directFreshAsk = (
+    /https?:\/\//i.test(lastUser) ||
+    /\b[a-z0-9-]+\.[a-z]{2,}(?:\/|\b)/i.test(lastUser) ||
+    /\b(dolar|doalr|usd|euro|eur|sterlin|gbp|altın|altin|gram altın|döviz|doviz|kur|kuru|borsa|hisse|kripto|bitcoin|btc)\b/i.test(lastUser) ||
+    /\b(canlı|canli|güncel|guncel|anlık|anlik|fiyat|fiyatı|fiyatları|stok|ürün|urun|ürünleri|urunleri|araştır|arastir|incele)\b/i.test(lastUser)
+  );
+  if (directFreshAsk) return true;
+
+  const followUp = /\b(şimdi bak|simdi bak|tekrar bak|bak bakalım|bajalım|listele|daha detaylı|detaylı araştır|devam et)\b/i.test(lastUser);
+  if (!followUp) return false;
+
+  const previousUsers = users.slice(0, -1).slice(-4).join("\n");
   return (
-    /https?:\/\//i.test(value) ||
-    /\b[a-z0-9-]+\.[a-z]{2,}(?:\/|\b)/i.test(value) ||
-    /\b(dolar|doalr|usd|euro|eur|sterlin|gbp|altın|altin|gram altın|döviz|doviz|kur|kuru|borsa|hisse|kripto|bitcoin|btc)\b/i.test(value) ||
-    /\b(canlı|canli|güncel|guncel|anlık|anlik|şimdi bak|simdi bak|tekrar bak|fiyat|fiyatı|fiyatları|stok|ürün|urun|ürünleri|urunleri|araştır|arastir|incele)\b/i.test(value)
+    /https?:\/\//i.test(previousUsers) ||
+    /\b[a-z0-9-]+\.[a-z]{2,}(?:\/|\b)/i.test(previousUsers) ||
+    /\b(dolar|doalr|usd|euro|eur|sterlin|gbp|altın|altin|gram altın|döviz|doviz|kur|kuru|borsa|hisse|kripto|bitcoin|btc|fiyat|stok|ürün|urun|araştır|arastir|incele)\b/i.test(previousUsers)
   );
 }
 
 async function answerLiveWebIfNeeded(body = {}, plan = null) {
-  if (!isWebMode(body) && !plan?.needs_web) return null;
-  const finalPlan = plan || { needs_web: true, query: await planWebSearchQueryWithDeepSeek(body), max_tokens: 8000 };
+  const finalPlan = plan || await planWebSearchQueryWithDeepSeek(body);
+  if (!isWebMode(body) && !finalPlan?.needs_web) return null;
+  if (isWebMode(body) && !finalPlan?.needs_web) return null;
   const liveWeb = await buildLiveWebBody(body, finalPlan);
   if (liveWeb.instantAnswer) return liveWeb.instantAnswer;
   return askDeepSeek(liveWeb.requestBody);
 }
+
 
 module.exports = { isWebMode, needsWebForFreshData, planWebSearchQueryWithDeepSeek, buildLiveWebBody, answerLiveWebIfNeeded };
