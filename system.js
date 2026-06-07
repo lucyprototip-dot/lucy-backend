@@ -198,9 +198,7 @@ function buildSystemPrompt(body = {}) {
   }
 
   return parts.join("\n\n");
-}
-
-// Web search
+}// Web search
 
 const LUCY_WEB_RESULT_LIMIT = Math.min(numberEnv("LUCY_WEB_RESULT_LIMIT", 8), 10);
 const LUCY_WEB_PAGE_READ_LIMIT = Math.min(numberEnv("LUCY_WEB_PAGE_READ_LIMIT", 2), 5);
@@ -221,27 +219,84 @@ function getRecentUserTexts(messages = [], limit = 8) {
     .map((message) => message.content);
 }
 
-async function planWebSearchQueryWithDeepSeek(body = {}) {
-  const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
-  const recentMessages = normalizeMessages(body.messages).slice(-8);
-  const fallbackQuery = getLastUserText(body.messages);
+function isVagueFollowUp(text = "") {
+  const q = String(text || "").toLowerCase().trim();
+  if (!q) return false;
+  if (q.length > 140) return false;
 
-  if (!deepSeekKey || !recentMessages.length) return fallbackQuery;
+  return [
+    "kontrol et",
+    "doğru kontrol",
+    "dogru kontrol",
+    "doğrula",
+    "dogrula",
+    "sen bul",
+    "bul söyle",
+    "bul soyle",
+    "araştır",
+    "arastir",
+    "dedim",
+    "onu",
+    "bunu",
+    "bak",
+    "devam",
+    "emin misin",
+    "eminsen",
+    "doğru mu",
+    "dogru mu"
+  ].some((key) => q.includes(key));
+}
+
+function fallbackContextualUserQuery(messages = []) {
+  const recent = getRecentUserTexts(messages, 8);
+  const last = recent[recent.length - 1] || "";
+
+  if (isVagueFollowUp(last) && recent.length >= 2) {
+    const previousUseful = [...recent]
+      .slice(0, -1)
+      .reverse()
+      .find((text) => text.length > 3 && !isVagueFollowUp(text));
+
+    if (previousUseful) return `${previousUseful}\nTakip isteği: ${last}`;
+  }
+
+  return last;
+}
+
+function clampMaxTokens(value, fallback = 4000) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(400, Math.min(16000, Math.round(n)));
+}
+
+async function planLucyRequestWithDeepSeek(body = {}) {
+  const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
+  const recentMessages = normalizeMessages(body.messages).slice(-10);
+
+  const fallback = {
+    needs_web: false,
+    query: "",
+    max_tokens: clampMaxTokens(body.options?.max_tokens || body.max_tokens, 4000),
+  };
+
+  if (!deepSeekKey || !recentMessages.length) return fallback;
 
   const plannerPayload = {
     model: DEEPSEEK_MODEL_FAST,
-    temperature: 0.1,
-    max_tokens: 180,
+    temperature: 0,
+    max_tokens: 220,
     stream: false,
     messages: [
       {
         role: "system",
         content: [
-          "Konuşma bağlamını oku ve kullanıcının şu an webde araştırmak istediği şeyi tek kısa arama sorgusuna çevir.",
-          "Kullanıcının niyetini doğal dil modeli gibi yorumla; kelime/komut kuralı kullanma.",
-          "Son mesaj bir önceki konuya bağlıysa bağlamı koru.",
-          "Son mesaj yeni açık bir konu söylüyorsa yeni konuyu esas al.",
-          "Cevap sadece JSON olsun: {\"query\":\"...\"}",
+          "Sen Lucy backend için hızlı karar veren iç planlayıcısın.",
+          "Kural veya anahtar kelime eşleştirme yapma; kullanıcının gerçek niyetini konuşma bağlamından anla.",
+          "Web yalnızca güncel, değişebilir, siteye/ürüne/fiyata/habere/kur bilgisine veya doğrulama gerektiren bilgi gerekiyorsa gerekir.",
+          "Sohbet, fikir, genel bilgi, hikaye, açıklama veya duygusal konuşma için web gerekmez.",
+          "max_tokens cevabın ihtiyacına göre seç: kısa sohbet 600, normal cevap 2000, detaylı cevap 5000, uzun rapor/hikaye 12000, çok uzun istek 16000.",
+          "Cevap sadece JSON olsun.",
+          "Şema: {\"needs_web\":false,\"query\":\"\",\"max_tokens\":2000}",
           "Açıklama yazma."
         ].join(" ")
       },
@@ -266,17 +321,15 @@ async function planWebSearchQueryWithDeepSeek(body = {}) {
     const raw = data?.choices?.[0]?.message?.content || "";
     const jsonText = raw.match(/\{[\s\S]*\}/)?.[0] || "";
     const parsed = JSON.parse(jsonText);
-    const query = normalizeText(parsed?.query || "");
 
-    return query || fallbackQuery;
+    return {
+      needs_web: parsed?.needs_web === true,
+      query: normalizeText(parsed?.query || ""),
+      max_tokens: clampMaxTokens(parsed?.max_tokens, fallback.max_tokens),
+    };
   } catch {
-    return fallbackQuery;
+    return fallback;
   }
-}
-
-function isWebMode(body = {}) {
-  const mode = String(body.mode || body.modeId || "").toLowerCase();
-  return Boolean(body.webSearch) || mode === "web" || mode.includes("web");
 }
 
 function decodeHtml(value = "") {
@@ -543,8 +596,7 @@ async function collectWebContext(query = "") {
     pages.push(page);
   }
 
-  // URL/domain verilse bile ayrıca arama yap. Sadece ana sayfayı okumak ürün/fiyat sayfalarını kaçırıyordu.
-  const searchResults = await searchWeb(searchQuery).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
+  const searchResults = urls.length ? [] : await searchWeb(searchQuery).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
 
   for (const item of searchResults.slice(0, LUCY_WEB_PAGE_READ_LIMIT)) {
     if (item.url && /^https?:\/\//i.test(item.url)) {
@@ -558,9 +610,9 @@ async function collectWebContext(query = "") {
   return { urls, pages, usefulPages, searchResults: usefulSearch, searchQuery };
 }
 
-async function buildLiveWebBody(body = {}) {
+async function buildLiveWebBody(body = {}, plan = {}) {
   const lastUserText = getLastUserText(body.messages);
-  const searchText = await planWebSearchQueryWithDeepSeek(body);
+  const searchText = normalizeText(plan.query || lastUserText);
   const web = await collectWebContext(searchText);
   const contextItems = [];
 
@@ -584,7 +636,7 @@ async function buildLiveWebBody(body = {}) {
     requestBody: {
       ...body,
       webSearch: false,
-      max_tokens: Number(body.max_tokens || body.options?.max_tokens || 8000),
+      max_tokens: clampMaxTokens(plan.max_tokens || body.max_tokens || body.options?.max_tokens, 8000),
       messages: [
         {
           role: "user",
@@ -596,10 +648,11 @@ async function buildLiveWebBody(body = {}) {
   };
 }
 
-async function answerLiveWebIfNeeded(body = {}) {
-  if (!isWebMode(body)) return null;
+async function answerLiveWebIfNeeded(body = {}, plan = null) {
+  const finalPlan = plan || await planLucyRequestWithDeepSeek(body);
+  if (!finalPlan.needs_web) return null;
 
-  const liveWeb = await buildLiveWebBody(body);
+  const liveWeb = await buildLiveWebBody(body, finalPlan);
   if (liveWeb.instantAnswer) return liveWeb.instantAnswer;
   return askDeepSeek(liveWeb.requestBody);
 }
@@ -619,7 +672,7 @@ async function askDeepSeek(body = {}) {
   const model = pickDeepSeekModel(body);
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.45));
-  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 16000);
+  const maxTokens = clampMaxTokens(body.options?.max_tokens || body.max_tokens || body._lucyPlan?.max_tokens, 4000);
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
@@ -700,7 +753,7 @@ async function askDeepSeekStream(body = {}, res) {
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const model = pickDeepSeekModel(body);
   const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.42));
-  const maxTokens = Number(body.options?.max_tokens || body.max_tokens || 8000);
+  const maxTokens = clampMaxTokens(body.options?.max_tokens || body.max_tokens || body._lucyPlan?.max_tokens, 4000);
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
@@ -871,8 +924,11 @@ app.get("/", (req, res) => {
     message: "LUCY Core backend çalışıyor",
     brain: "DeepSeek",
     modes: ["fast", "think", "pro_fast", "pro_think"],
-    webSearch: true,
+    autoWeb: true,
     elevenLabs: true,
+    tools: false,
+    export: false,
+    files: false,
     port: PORT,
   });
 });
@@ -892,13 +948,17 @@ app.get("/api/models", (req, res) => {
 app.post("/api/chat", async (req, res) => {
   try {
 
-    const liveAnswer = await answerLiveWebIfNeeded(req.body || {});
+    const body = req.body || {};
+    const plan = await planLucyRequestWithDeepSeek(body);
+    const plannedBody = { ...body, _lucyPlan: plan, max_tokens: body.max_tokens || body.options?.max_tokens || plan.max_tokens };
+
+    const liveAnswer = await answerLiveWebIfNeeded(plannedBody, plan);
     if (liveAnswer) {
       return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
     }
 
-    const answer = await askDeepSeek(req.body || {});
-    res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(req.body || {}), answer });
+    const answer = await askDeepSeek(plannedBody);
+    res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(plannedBody), answer });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -913,9 +973,11 @@ app.post("/api/chat-stream", async (req, res) => {
 
   try {
     const body = req.body || {};
+    const plan = await planLucyRequestWithDeepSeek(body);
+    const plannedBody = { ...body, _lucyPlan: plan, max_tokens: body.max_tokens || body.options?.max_tokens || plan.max_tokens };
 
-    if (isWebMode(body)) {
-      const liveWeb = await buildLiveWebBody(body);
+    if (plan.needs_web) {
+      const liveWeb = await buildLiveWebBody(plannedBody, plan);
       if (liveWeb.instantAnswer) {
         writeSse(res, { delta: liveWeb.instantAnswer });
         writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
@@ -926,7 +988,7 @@ app.post("/api/chat-stream", async (req, res) => {
       return res.end();
     }
 
-    await askDeepSeekStream(body, res);
+    await askDeepSeekStream(plannedBody, res);
     return res.end();
   } catch (error) {
     writeSse(res, { error: error.message || "Stream hatası" });
@@ -968,7 +1030,36 @@ app.post("/api/speak", async (req, res) => {
   }
 });
 
+const DISABLED_ENDPOINTS = [
+  "/api/tools",
+  "/api/export-chat",
+  "/api/upload-file",
+  "/api/file",
+  "/api/read-file",
+  "/api/analyze-image",
+  "/api/analyze-video",
+  "/api/generate-image",
+  "/api/generate-video",
+  "/api/archive",
+  "/api/store",
+];
+
+app.use((req, res, next) => {
+  const isDisabled = DISABLED_ENDPOINTS.some((endpoint) =>
+    req.path === endpoint || req.path.startsWith(`${endpoint}/`)
+  );
+
+  if (!isDisabled) return next();
+
+  return res.json({
+    success: false,
+    disabled: true,
+    answer: "Aşkım şu an bu özellik kapalı. Lucy Core sadece sohbet, web search ve ses modunda çalışıyor.",
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`LUCY Core backend aktif: http://localhost:${PORT}`);
-  console.log("Aktif: DeepSeek chat/stream + 4 mod + web search + ElevenLabs");
+  console.log("Aktif: DeepSeek chat/stream + 4 mod + otomatik web + ElevenLabs");
+  console.log("Kapalı: tools + PDF/Excel/export + file upload + artifact");
 });
