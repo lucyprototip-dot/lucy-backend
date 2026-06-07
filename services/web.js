@@ -361,21 +361,6 @@ async function buildLiveWebBody(body = {}, plan = {}) {
   };
 }
 
-function needsWebForFreshData(body = {}) {
-  const messages = normalizeMessages(body.messages);
-  const lastUser = [...messages].reverse().find((message) => message.role === "user")?.content || "";
-  const recent = messages.slice(-6).map((m) => m.content).join("\n");
-  const value = `${recent}\n${lastUser}`.toLowerCase();
-  if (!value.trim()) return false;
-
-  return (
-    /https?:\/\//i.test(value) ||
-    /\b[a-z0-9-]+\.[a-z]{2,}(?:\/|\b)/i.test(value) ||
-    /\b(dolar|doalr|usd|euro|eur|sterlin|gbp|altın|altin|gram altın|döviz|doviz|kur|kuru|borsa|hisse|kripto|bitcoin|btc)\b/i.test(value) ||
-    /\b(canlı|canli|güncel|guncel|anlık|anlik|şimdi bak|simdi bak|tekrar bak|fiyat|fiyatı|fiyatları|stok|ürün|urun|ürünleri|urunleri|araştır|arastir|incele)\b/i.test(value)
-  );
-}
-
 async function answerLiveWebIfNeeded(body = {}, plan = null) {
   if (!isWebMode(body) && !plan?.needs_web) return null;
   const finalPlan = plan || { needs_web: true, query: await planWebSearchQueryWithDeepSeek(body), max_tokens: 8000 };
@@ -384,4 +369,4 @@ async function answerLiveWebIfNeeded(body = {}, plan = null) {
   return askDeepSeek(liveWeb.requestBody);
 }
 
-module.exports = { isWebMode, needsWebForFreshData, planWebSearchQueryWithDeepSeek, buildLiveWebBody, answerLiveWebIfNeeded };
+module.exports = { isWebMode, planWebSearchQueryWithDeepSeek, buildLiveWebBody, answerLiveWebIfNeeded };
