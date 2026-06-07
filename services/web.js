@@ -1,14 +1,75 @@
 const { envValue, numberEnv } = require("../core/env");
 const { DEEPSEEK_MODEL_FAST } = require("../core/models");
 const { askDeepSeek } = require("./deepseek");
-const { normalizeText, limitText, getLastUserText, clampMaxTokens } = require("../utils/text");
+const { normalizeText, normalizeMessages, limitText, getLastUserText, getRecentUserTexts, clampMaxTokens } = require("../utils/text");
 
 const LUCY_WEB_RESULT_LIMIT = Math.min(numberEnv("LUCY_WEB_RESULT_LIMIT", 8), 10);
 const LUCY_WEB_PAGE_READ_LIMIT = Math.min(numberEnv("LUCY_WEB_PAGE_READ_LIMIT", 2), 5);
 
 function isWebMode(body = {}) {
-  const mode = String(body.mode || body.modeId || body.apiMode || "").toLowerCase();
-  return body.webSearch === true || body.webSearch === "true" || mode === "web" || mode.includes("web");
+  return body.webSearch === true || body.webSearch === "true";
+}
+
+function isVagueFollowUp(text = "") {
+  const q = String(text || "").toLowerCase().trim();
+  if (!q || q.length > 140) return false;
+  return ["kontrol et", "doğrula", "dogrula", "sen bul", "bul söyle", "bul soyle", "dedim", "onu", "bunu", "bak", "devam", "emin misin", "doğru mu", "dogru mu"].some((key) => q.includes(key));
+}
+
+function fallbackContextualUserQuery(messages = []) {
+  const recent = getRecentUserTexts(messages, 8);
+  const last = recent[recent.length - 1] || "";
+  if (isVagueFollowUp(last) && recent.length >= 2) {
+    const previousUseful = [...recent].slice(0, -1).reverse().find((text) => text.length > 3 && !isVagueFollowUp(text));
+    if (previousUseful) return `${previousUseful}\nTakip isteği: ${last}`;
+  }
+  return last;
+}
+
+async function planWebSearchQueryWithDeepSeek(body = {}) {
+  const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
+  const recentMessages = normalizeMessages(body.messages).slice(-8);
+  const fallbackQuery = fallbackContextualUserQuery(body.messages);
+  if (!deepSeekKey || !recentMessages.length) return fallbackQuery;
+
+  const plannerPayload = {
+    model: DEEPSEEK_MODEL_FAST,
+    temperature: 0.1,
+    max_tokens: 180,
+    stream: false,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "Sen yalnızca web arama sorgusu hazırlayan iç planlayıcısın.",
+          "Kullanıcının son mesajını tek başına değil, konuşma bağlamıyla yorumla.",
+          "Son mesaj eksik, düzeltme, devam veya işaret etme ise önceki somut kullanıcı isteğini bul ve onunla birleştir.",
+          "Son mesajı aynen arama sorgusu yapma; kullanıcının gerçek arama niyetini çıkar.",
+          "Yazım hatalarını bağlama göre düzelt.",
+          "Cevap sadece JSON olsun.",
+          "Şema: {\"query\":\"...\",\"needs_web\":true}",
+          "query kısa, net ve arama motoruna uygun Türkçe olmalı.",
+          "Asla açıklama yazma."
+        ].join(" ")
+      },
+      { role: "user", content: JSON.stringify({ conversation: recentMessages, fallback_query: fallbackQuery }) }
+    ]
+  };
+
+  try {
+    const response = await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${deepSeekKey}` },
+      body: JSON.stringify(plannerPayload),
+    });
+    const data = await response.json().catch(() => ({}));
+    const raw = data?.choices?.[0]?.message?.content || "";
+    const jsonText = raw.match(/\{[\s\S]*\}/)?.[0] || "";
+    const parsed = JSON.parse(jsonText);
+    return normalizeText(parsed?.query || "") || fallbackQuery;
+  } catch {
+    return fallbackQuery;
+  }
 }
 
 function decodeHtml(value = "") {
@@ -209,8 +270,7 @@ async function collectWebContext(query = "") {
 
 async function buildLiveWebBody(body = {}, plan = {}) {
   const lastUserText = getLastUserText(body.messages);
-  const searchText = normalizeText(plan.query || plan.resolved_request || lastUserText);
-  const resolvedRequest = normalizeText(plan.resolved_request || searchText || lastUserText);
+  const searchText = plan.query || await planWebSearchQueryWithDeepSeek(body);
   const web = await collectWebContext(searchText);
   const contextItems = [];
   web.usefulPages.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 2400)}`));
@@ -235,13 +295,15 @@ async function buildLiveWebBody(body = {}, plan = {}) {
 
 async function answerLiveWebIfNeeded(body = {}, plan = null) {
   if (!isWebMode(body) && !plan?.needs_web) return null;
-  const liveWeb = await buildLiveWebBody(body, plan || {});
+  const finalPlan = plan || { needs_web: true, query: await planWebSearchQueryWithDeepSeek(body), max_tokens: 8000 };
+  const liveWeb = await buildLiveWebBody(body, finalPlan);
   if (liveWeb.instantAnswer) return liveWeb.instantAnswer;
   return askDeepSeek(liveWeb.requestBody);
 }
 
 module.exports = {
   isWebMode,
+  planWebSearchQueryWithDeepSeek,
   buildLiveWebBody,
   answerLiveWebIfNeeded,
 };

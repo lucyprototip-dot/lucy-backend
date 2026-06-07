@@ -14,6 +14,7 @@ const MODE_TO_DEEPSEEK_MODEL = {
   dusun: DEEPSEEK_MODEL_THINKING,
   düşünme: DEEPSEEK_MODEL_THINKING,
   pro_fast: DEEPSEEK_MODEL_PRO,
+  "pro-fast": DEEPSEEK_MODEL_PRO,
   pro_hizli: DEEPSEEK_MODEL_PRO,
   pro_hızlı: DEEPSEEK_MODEL_PRO,
   "pro-hizli": DEEPSEEK_MODEL_PRO,
@@ -21,6 +22,7 @@ const MODE_TO_DEEPSEEK_MODEL = {
   "pro hızlı": DEEPSEEK_MODEL_PRO,
   "pro hizli": DEEPSEEK_MODEL_PRO,
   pro_think: DEEPSEEK_MODEL_PRO,
+  "pro-think": DEEPSEEK_MODEL_PRO,
   pro_dusun: DEEPSEEK_MODEL_PRO,
   pro_düşün: DEEPSEEK_MODEL_PRO,
   "pro-dusun": DEEPSEEK_MODEL_PRO,
@@ -31,7 +33,7 @@ const MODE_TO_DEEPSEEK_MODEL = {
 
 const THINKING_MODE_IDS = new Set([
   "think", "reasoning", "düşün", "dusun", "düşünme",
-  "pro_think", "pro_dusun", "pro_düşün", "pro-dusun", "pro-düşün", "pro düşün", "pro dusun",
+  "pro_think", "pro-think", "pro_dusun", "pro_düşün", "pro-dusun", "pro-düşün", "pro düşün", "pro dusun",
 ]);
 
 function pickDeepSeekModel({ mode, modeId, apiMode, model, routerModel } = {}) {
