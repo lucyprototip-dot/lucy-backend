@@ -44,8 +44,7 @@ function fallbackQueryFromConversation(messages = []) {
   const users = normalized.filter((m) => m.role === "user").map((m) => m.content);
   if (!users.length) return "";
   const last = users[users.length - 1] || "";
-  const previous = [...users].slice(0, -1).reverse().find((t) => normalizeText(t).length > 3) || "";
-  return normalizeText(previous ? `${previous}\nTakip: ${last}` : last);
+  return normalizeText(last);
 }
 
 function extractRecentDomain(messages = []) {
@@ -71,7 +70,7 @@ function strengthenQueryWithContext(query = "", body = {}) {
 
 async function planWebSearchQueryWithDeepSeek(body = {}) {
   const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
-  const conversation = compactConversation(body.messages, 10);
+  const conversation = compactUserIntentContext(body.messages, 1);
   const fallbackQuery = fallbackQueryFromConversation(body.messages);
 
   if (!deepSeekKey || !conversation) return fallbackQuery;
@@ -157,6 +156,50 @@ function extractUrlsFromText(text = "") {
     if (!/^https?:\/\//i.test(clean)) urls.add(`https://${clean}`);
   }
   return Array.from(urls).slice(0, 4);
+}
+
+const SITE_NAME_STOPWORDS = new Set([
+  "bana",
+  "bak",
+  "bakalım",
+  "bakalim",
+  "doviz",
+  "döviz",
+  "kur",
+  "kuru",
+  "kurlarina",
+  "kurlarına",
+  "site",
+  "sitesi",
+  "sitesine",
+  "web",
+]);
+
+function asciiDomainSlug(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ı/g, "i")
+    .replace(/ğ/g, "g")
+    .replace(/ü/g, "u")
+    .replace(/ş/g, "s")
+    .replace(/ö/g, "o")
+    .replace(/ç/g, "c")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9-]/g, "");
+}
+
+function inferSiteUrlFromCurrentRequest(text = "") {
+  const value = normalizeText(text);
+  if (!value || extractUrlsFromText(value).length) return "";
+  if (!/\b(?:site|sitesi|sitesine|siteye|web\s*sitesi|websitesi)\b/i.test(value)) return "";
+
+  const match =
+    value.match(/(?:^|\s)([a-z0-9çğıöşü-]{3,})\s+(?:web\s*)?(?:site|sitesi|sitesine|siteye|websitesi)(?:\s|$)/i) ||
+    value.match(/(?:^|\s)([a-z0-9çğıöşü-]{3,})(?=[\s\S]{0,80}(?:^|\s)(?:site|sitesi|sitesine|siteye|websitesi)(?:\s|$))/i);
+  const slug = asciiDomainSlug(match?.[1] || "");
+  if (!slug || slug.length < 3 || SITE_NAME_STOPWORDS.has(slug) || SITE_NAME_STOPWORDS.has(match?.[1] || "")) return "";
+  return `https://www.${slug}.com`;
 }
 
 function buildWebSearchQuery(text = "") {
@@ -334,6 +377,7 @@ function isTrustedMarketSource(item = {}) {
   return [
     "tcmb.gov.tr",
     "kapalicarsi",
+    "altinkaynak",
     "doviz.com",
     "foreks",
     "bloomberght",
@@ -365,10 +409,13 @@ function shouldUseWebPlannerForQuery(query = "", body = {}) {
 }
 
 async function resolveWebSearchText(body = {}, plan = {}) {
+  const lastUserQuery = normalizeText(getLastUserText(body.messages));
+  const inferredSiteUrl = inferSiteUrlFromCurrentRequest(lastUserQuery);
+  if (inferredSiteUrl) return inferredSiteUrl;
+
   const plannedQuery = normalizeText(plan.query || "");
   if (plannedQuery) return strengthenQueryWithContext(plannedQuery, body);
 
-  const lastUserQuery = normalizeText(getLastUserText(body.messages));
   if (!shouldUseWebPlannerForQuery(lastUserQuery, body)) {
     return strengthenQueryWithContext(lastUserQuery, body);
   }

@@ -19,11 +19,44 @@ app.use(express.json({ limit: "20mb" }));
 const PORT = process.env.PORT || 5050;
 const TRACE = String(process.env.LUCY_TRACE || "").toLowerCase() === "true";
 const WEB_OFF_LIVE_DATA_MESSAGE = "WEB arama kapalı aşkım. Açarsan canlı veriye bakabilirim.";
+const WEB_OFF_LIVE_DATA_FOLLOWUPS = new Set([
+  "açtım",
+  "actim",
+  "açtım aşkım",
+  "actim askim",
+  "şimdi açtım",
+  "simdi actim",
+  "şimdi açtım aşkım",
+  "simdi actim askim",
+  "evet",
+  "evet aşkım",
+  "evet askim",
+  "söyle",
+  "soyle",
+  "söyle aşkım",
+  "soyle askim",
+  "tamam söyle",
+  "tamam soyle",
+  "şimdi söyle",
+  "simdi soyle",
+  "bak",
+  "bak aşkım",
+  "bak askim",
+  "hadi bak",
+  "bakabilir misin",
+  "devam",
+  "tamam",
+]);
 function trace(label, data = {}) { if (TRACE) { try { console.log(`[LUCY_TRACE] ${label}`, JSON.stringify(data).slice(0, 4000)); } catch {} } }
 
 function isLiveDataIntentText(text = "") {
   const value = String(text || "").toLowerCase();
   return isLiveMarketQuery(value) || /\b(haber|son dakika|güncel haber|guncel haber)\b/i.test(value);
+}
+
+function isWebOffLiveDataGuardAnswer(text = "") {
+  const value = String(text || "").toLowerCase();
+  return value.includes("web arama kapalı") || value.includes("web arama kapali");
 }
 
 function isWebOffLiveDataFollowup(text = "") {
@@ -32,16 +65,18 @@ function isWebOffLiveDataFollowup(text = "") {
     .replace(/[.!?…]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return /^(açtım|actim|açtım aşkım|actim askim|şimdi açtım|simdi actim|şimdi açtım aşkım|simdi actim askim|bak|bak aşkım|bak askim|hadi bak|bakabilir misin|devam|tamam)$/.test(value);
+  return WEB_OFF_LIVE_DATA_FOLLOWUPS.has(value);
 }
 
 function shouldBlockWebOffLiveDataRequest(messages = []) {
-  const users = normalizeMessages(messages).filter((message) => message.role === "user");
+  const normalized = normalizeMessages(messages);
+  const users = normalized.filter((message) => message.role === "user");
   const last = users[users.length - 1]?.content || "";
   if (!last) return false;
   if (isLiveDataIntentText(last)) return true;
   if (!isWebOffLiveDataFollowup(last)) return false;
-  return users.slice(0, -1).reverse().slice(0, 4).some((message) => isLiveDataIntentText(message.content));
+  if (normalized.slice(0, -1).reverse().slice(0, 12).some((message) => message.role === "assistant" && isWebOffLiveDataGuardAnswer(message.content))) return true;
+  return users.slice(0, -1).reverse().slice(0, 8).some((message) => isLiveDataIntentText(message.content));
 }
 
 app.get("/", (req, res) => {
