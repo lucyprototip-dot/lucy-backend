@@ -10,6 +10,7 @@ const { fastMaxTokens } = require("./utils/text");
 const { askDeepSeek, askDeepSeekStream, writeSse } = require("./services/deepseek");
 const { isWebMode, answerLiveWebIfNeeded, buildLiveWebBody } = require("./services/web");
 const { speak } = require("./services/voice");
+const { withServerContext, rememberExchange } = require("./core/sessionMemory");
 
 const app = express();
 app.use(cors());
@@ -27,16 +28,19 @@ app.get("/api/models", (req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const body = req.body || {};
+    const originalBody = req.body || {};
+    const body = withServerContext(req, originalBody);
 
     if (isWebMode(body)) {
       const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
       const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
+      rememberExchange(req, originalBody, liveAnswer);
       return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
     }
 
     const fastBody = withWebOffHint(body);
     const answer = await askDeepSeek(fastBody);
+    rememberExchange(req, originalBody, answer);
     return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(fastBody), answer });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -51,7 +55,8 @@ app.post("/api/chat-stream", async (req, res) => {
   res.flushHeaders?.();
 
   try {
-    const body = req.body || {};
+    const originalBody = req.body || {};
+    const body = withServerContext(req, originalBody);
 
     if (isWebMode(body)) {
       const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
@@ -59,13 +64,16 @@ app.post("/api/chat-stream", async (req, res) => {
       if (liveWeb.instantAnswer) {
         writeSse(res, { delta: liveWeb.instantAnswer });
         writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
+        rememberExchange(req, originalBody, liveWeb.instantAnswer);
         return res.end();
       }
-      await askDeepSeekStream(liveWeb.requestBody, res);
+      const answer = await askDeepSeekStream(liveWeb.requestBody, res);
+      rememberExchange(req, originalBody, answer);
       return res.end();
     }
 
-    await askDeepSeekStream(withWebOffHint(body), res);
+    const answer = await askDeepSeekStream(withWebOffHint(body), res);
+    rememberExchange(req, originalBody, answer);
     return res.end();
   } catch (error) {
     writeSse(res, { error: error.message || "Stream hatası" });
