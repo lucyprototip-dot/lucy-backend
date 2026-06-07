@@ -29,7 +29,7 @@ function withWebOffHint(body = {}) {
     ...body,
     max_tokens: fastMaxTokens(body),
     systemHint: `${body.systemHint || ""}
-WEB arama kapalı. Güncel/canlı veri veya site araştırması istenirse kısa ve net şunu söyle: "WEB arama kapalı aşkım. Açarsan canlı veriye bakabilirim."`.trim(),
+WEB arama kapalı. Güncel/canlı veri, kur, fiyat, borsa, haber veya site araştırması istenirse sayı/veri tahmin etme. Kısa ve net şunu söyle: "WEB arama kapalı aşkım. Açarsan canlı veriye bakabilirim."`.trim(),
   };
 }
 

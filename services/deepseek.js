@@ -44,14 +44,14 @@ async function askDeepSeek(body = {}) {
 
   if (!response.ok) throw new Error(data?.error?.message || data?.message || `DeepSeek API hatası: ${response.status}`);
   const choiceMessage = data?.choices?.[0]?.message || {};
-  return sanitizeLucyAnswer(choiceMessage.content || choiceMessage.reasoning_content || "Cevap üretemedim.");
+  return sanitizeLucyAnswer(choiceMessage.content || "Cevap üretemedim.");
 }
 
 function extractDeepSeekStreamDelta(data = {}) {
   const choice = data?.choices?.[0] || {};
   const delta = choice.delta || {};
   const message = choice.message || {};
-  return delta.content || delta.reasoning_content || message.content || message.reasoning_content || "";
+  return delta.content || message.content || "";
 }
 
 function writeSse(res, payload) {

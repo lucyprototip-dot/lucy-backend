@@ -1,58 +1,70 @@
 const { envValue, numberEnv } = require("../core/env");
 const { DEEPSEEK_MODEL_FAST } = require("../core/models");
 const { askDeepSeek } = require("./deepseek");
-const { normalizeText, normalizeMessages, limitText, getLastUserText, getRecentUserTexts, clampMaxTokens } = require("../utils/text");
+const {
+  normalizeText,
+  normalizeMessages,
+  limitText,
+  getLastUserText,
+  clampMaxTokens,
+} = require("../utils/text");
 
 const LUCY_WEB_RESULT_LIMIT = Math.min(numberEnv("LUCY_WEB_RESULT_LIMIT", 8), 10);
 const LUCY_WEB_PAGE_READ_LIMIT = Math.min(numberEnv("LUCY_WEB_PAGE_READ_LIMIT", 2), 5);
+const TRACE = String(process.env.LUCY_TRACE || "").toLowerCase() === "true";
+
+function trace(label, data = {}) {
+  if (!TRACE) return;
+  try { console.log(`[LUCY_TRACE] ${label}`, JSON.stringify(data).slice(0, 4000)); } catch {}
+}
 
 function isWebMode(body = {}) {
-  return body.webSearch === true || body.webSearch === "true";
+  // Tek kaynak: frontend webSearch boolean. mode/modeId/web geçmişi web açamaz.
+  return body.webSearch === true || body.webSearch === "true" || body.webSearch === 1 || body.webSearch === "1";
 }
 
-function isVagueFollowUp(text = "") {
-  const q = String(text || "").toLowerCase().trim();
-  if (!q || q.length > 140) return false;
-  return ["kontrol et", "doğrula", "dogrula", "sen bul", "bul söyle", "bul soyle", "dedim", "onu", "bunu", "bak", "devam", "emin misin", "doğru mu", "dogru mu"].some((key) => q.includes(key));
+function compactConversation(messages = [], limit = 10) {
+  return normalizeMessages(messages)
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .slice(-limit)
+    .map((m) => `${m.role === "user" ? "Kullanıcı" : "Lucy"}: ${m.content}`)
+    .join("\n");
 }
 
-function fallbackContextualUserQuery(messages = []) {
-  const recent = getRecentUserTexts(messages, 8);
-  const last = recent[recent.length - 1] || "";
-  if (isVagueFollowUp(last) && recent.length >= 2) {
-    const previousUseful = [...recent].slice(0, -1).reverse().find((text) => text.length > 3 && !isVagueFollowUp(text));
-    if (previousUseful) return `${previousUseful}\nTakip isteği: ${last}`;
-  }
-  return last;
+function fallbackQueryFromConversation(messages = []) {
+  const users = normalizeMessages(messages).filter((m) => m.role === "user").map((m) => m.content);
+  if (!users.length) return "";
+  const last = users[users.length - 1] || "";
+  const previous = [...users].slice(0, -1).reverse().find((t) => normalizeText(t).length > 3) || "";
+  return normalizeText(previous ? `${previous}\nTakip: ${last}` : last);
 }
 
 async function planWebSearchQueryWithDeepSeek(body = {}) {
   const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
-  const recentMessages = normalizeMessages(body.messages).slice(-8);
-  const fallbackQuery = fallbackContextualUserQuery(body.messages);
-  if (!deepSeekKey || !recentMessages.length) return fallbackQuery;
+  const conversation = compactConversation(body.messages, 10);
+  const fallbackQuery = fallbackQueryFromConversation(body.messages);
+
+  if (!deepSeekKey || !conversation) return fallbackQuery;
 
   const plannerPayload = {
     model: DEEPSEEK_MODEL_FAST,
-    temperature: 0.1,
-    max_tokens: 180,
+    temperature: 0,
+    max_tokens: 220,
     stream: false,
     messages: [
       {
         role: "system",
         content: [
-          "Sen yalnızca web arama sorgusu hazırlayan iç planlayıcısın.",
-          "Kullanıcının son mesajını tek başına değil, konuşma bağlamıyla yorumla.",
-          "Son mesaj eksik, düzeltme, devam veya işaret etme ise önceki somut kullanıcı isteğini bul ve onunla birleştir.",
-          "Son mesajı aynen arama sorgusu yapma; kullanıcının gerçek arama niyetini çıkar.",
+          "Sen sadece web arama sorgusu üreten iç planlayıcısın.",
+          "Kullanıcıya cevap yazma.",
+          "Konuşmanın tamamını yorumla; son mesaj 'açtım', 'bak', 'tekrar bak', 'dedim ya', 'daha detaylı' gibi takip ise önceki somut isteğe bağla.",
           "Yazım hatalarını bağlama göre düzelt.",
           "Cevap sadece JSON olsun.",
-          "Şema: {\"query\":\"...\",\"needs_web\":true}",
-          "query kısa, net ve arama motoruna uygun Türkçe olmalı.",
-          "Asla açıklama yazma."
+          "Şema: {\"query\":\"arama sorgusu\",\"reason\":\"kısa iç neden\"}",
+          "query arama motoruna uygun, kısa ve net Türkçe olsun."
         ].join(" ")
       },
-      { role: "user", content: JSON.stringify({ conversation: recentMessages, fallback_query: fallbackQuery }) }
+      { role: "user", content: JSON.stringify({ conversation, fallback_query: fallbackQuery }) }
     ]
   };
 
@@ -66,8 +78,11 @@ async function planWebSearchQueryWithDeepSeek(body = {}) {
     const raw = data?.choices?.[0]?.message?.content || "";
     const jsonText = raw.match(/\{[\s\S]*\}/)?.[0] || "";
     const parsed = JSON.parse(jsonText);
-    return normalizeText(parsed?.query || "") || fallbackQuery;
-  } catch {
+    const query = normalizeText(parsed?.query || "");
+    trace("web.plan", { query, reason: parsed?.reason || "", fallbackQuery });
+    return query || fallbackQuery;
+  } catch (error) {
+    trace("web.plan.error", { error: error.message, fallbackQuery });
     return fallbackQuery;
   }
 }
@@ -123,7 +138,7 @@ function buildWebSearchQuery(text = "") {
 }
 
 async function fetchText(url, options = {}) {
-  const timeoutMs = options.timeoutMs || 12000;
+  const timeoutMs = options.timeoutMs || 9000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -173,7 +188,7 @@ async function searchGoogleApi(query = "") {
   const url = `https://www.googleapis.com/customsearch/v1?${new URLSearchParams({ key, cx, q: query, num: String(Math.min(LUCY_WEB_RESULT_LIMIT, 10)), safe: "off" }).toString()}`;
   const response = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "LUCY-GoogleSearch/1.0" } });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || `Google arama API hatası: ${response.status}`);
+  if (!response.ok) return [];
   return (data.items || []).map((item) => ({ provider: "google", title: item.title || item.htmlTitle || item.link || "Google sonucu", text: item.snippet || item.htmlSnippet || "", url: item.link || "" })).filter((item) => item.text || item.url).slice(0, LUCY_WEB_RESULT_LIMIT);
 }
 
@@ -189,11 +204,11 @@ async function searchDuckDuckGoApi(query = "") {
   const url = `https://api.duckduckgo.com/?${new URLSearchParams({ q: query, format: "json", no_html: "1", no_redirect: "1", skip_disambig: "1" }).toString()}`;
   const response = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "LUCY-WebSearch/1.0" } });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`DuckDuckGo API hatası: ${response.status}`);
+  if (!response.ok) return [];
   const results = [];
-  if (data.AbstractText) results.push({ title: data.Heading || "DuckDuckGo özet", text: data.AbstractText, url: data.AbstractURL || data.AbstractSource || "" });
-  if (data.Answer) results.push({ title: "Anlık cevap", text: data.Answer, url: data.AnswerType || "" });
-  flattenDuckDuckGoTopics(data.RelatedTopics).slice(0, 8).forEach((item) => results.push({ title: item.title, text: item.text || item.title, url: item.url }));
+  if (data.AbstractText) results.push({ provider: "duckduckgo", title: data.Heading || "DuckDuckGo özet", text: data.AbstractText, url: data.AbstractURL || data.AbstractSource || "" });
+  if (data.Answer) results.push({ provider: "duckduckgo", title: "Anlık cevap", text: data.Answer, url: data.AnswerType || "" });
+  flattenDuckDuckGoTopics(data.RelatedTopics).slice(0, 8).forEach((item) => results.push({ provider: "duckduckgo", title: item.title, text: item.text || item.title, url: item.url }));
   return results.filter((item) => item.text || item.url).slice(0, 8);
 }
 
@@ -201,20 +216,12 @@ async function searchDuckDuckGoHtml(query = "") {
   const url = `https://html.duckduckgo.com/html/?${new URLSearchParams({ q: query }).toString()}`;
   const response = await fetchText(url, { headers: { Accept: "text/html" }, timeoutMs: 9000 });
   if (!response.ok || !response.text) return [];
-
-  const html = response.text;
-  const chunks = html.split(/<div class="result[\s\S]*?">/i).slice(1, 10);
+  const chunks = response.text.split(/<div class="result[\s\S]*?">/i).slice(1, 10);
   const results = [];
-
   for (const chunk of chunks) {
-    const hrefRaw = chunk.match(/class="result__a"[^>]+href="([^"]+)"/i)?.[1]
-      || chunk.match(/<a[^>]+href="([^"]+)"[^>]*>/i)?.[1]
-      || "";
+    const hrefRaw = chunk.match(/class="result__a"[^>]+href="([^"]+)"/i)?.[1] || chunk.match(/<a[^>]+href="([^"]+)"[^>]*>/i)?.[1] || "";
     const title = stripHtml(chunk.match(/class="result__a"[^>]*>([\s\S]*?)<\/a>/i)?.[1] || "");
-    const snippet = stripHtml(chunk.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i)?.[1]
-      || chunk.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/div>/i)?.[1]
-      || "");
-
+    const snippet = stripHtml(chunk.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i)?.[1] || chunk.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/div>/i)?.[1] || "");
     let href = decodeHtml(hrefRaw);
     try {
       if (href.includes("duckduckgo.com/l/?")) {
@@ -222,13 +229,10 @@ async function searchDuckDuckGoHtml(query = "") {
         href = parsed.searchParams.get("uddg") || href;
       }
     } catch {}
-
     if (title || snippet || href) results.push({ provider: "duckduckgo", title: title || href || "Sonuç", text: snippet || title, url: href });
   }
-
   return results.slice(0, 8);
 }
-
 
 async function searchWeb(query = "") {
   const safeQuery = buildWebSearchQuery(query);
@@ -259,36 +263,60 @@ async function collectWebContext(query = "") {
       if (page.text) pages.push(page);
     }
   }
-  return {
-    urls,
-    pages,
-    usefulPages: pages.filter((item) => normalizeText(item.text).length >= 120),
-    searchResults: searchResults.filter((item) => normalizeText(item.text).length >= 30 || item.url),
-    searchQuery,
-  };
+  return { urls, pages, usefulPages: pages.filter((item) => normalizeText(item.text).length >= 120), searchResults: searchResults.filter((item) => normalizeText(item.text).length >= 30 || item.url), searchQuery };
+}
+
+function hasNumericOrSubstantialContext(contextItems = []) {
+  const joined = contextItems.join("\n");
+  return /\d/.test(joined) || joined.length > 900;
 }
 
 async function buildLiveWebBody(body = {}, plan = {}) {
+  const conversation = compactConversation(body.messages, 10);
   const lastUserText = getLastUserText(body.messages);
   const searchText = plan.query || await planWebSearchQueryWithDeepSeek(body);
   const web = await collectWebContext(searchText);
   const contextItems = [];
+
   web.usefulPages.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 2400)}`));
   web.searchResults.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title}\nURL: ${item.url || "yok"}\nÖzet:\n${item.text || ""}`));
 
-  if (!contextItems.length) {
-    const tried = web.urls.length ? `\nDenenen URL: ${web.urls.join(", ")}` : "";
-    return { instantAnswer: `Web açık ama bu sorgu için okunabilir kaynak metni bulamadım.${tried}\n\nYanlış bilgi üretmemek için cevap vermiyorum. Daha net bir arama cümlesi veya farklı bir URL gönder.` };
+  trace("web.context", { searchText, sourceCount: contextItems.length, urls: web.urls, searchResults: web.searchResults.slice(0, 3).map((r) => ({ title: r.title, url: r.url })) });
+
+  if (!contextItems.length || !hasNumericOrSubstantialContext(contextItems)) {
+    return { instantAnswer: "Web açık ama güvenilir/okunabilir kaynak bulamadım aşkım. Kaynak yoksa sayı veya canlı veri söyleyemem." };
   }
 
   const webContext = contextItems.slice(0, 5).map((item) => limitText(item, 2600)).join("\n\n---\n\n");
+  const finalUserContent = [
+    "Konuşma bağlamı:",
+    conversation,
+    "",
+    `Kullanıcının son isteği: ${lastUserText}`,
+    `Web arama sorgusu: ${searchText}`,
+    "",
+    "WEB_CONTEXT aşağıda.",
+    "Sadece WEB_CONTEXT içindeki kaynaklara dayanarak cevap ver.",
+    "Kaynakta olmayan kur, fiyat, oran, tarih veya sayı yazma.",
+    "Eski sohbet hafızasındaki kur/fiyat/sayıları yok say; canlı/güncel veri sadece WEB_CONTEXT'ten alınır.",
+    "İç analiz, plan, akıl yürütme, 'kullanıcı şöyle demiş' açıklaması yazma.",
+    "Sadece kullanıcıya verilecek nihai cevabı Türkçe yaz.",
+    "Sonunda kaynak URL'lerini kısa listele.",
+    "",
+    `WEB_CONTEXT:\n${webContext}`
+  ].join("\n");
+
   return {
     requestBody: {
       ...body,
       webSearch: false,
+      mode: "fast",
+      modeId: "fast",
+      apiMode: "fast",
+      thinking: false,
       max_tokens: clampMaxTokens(plan.max_tokens || body.max_tokens || body.options?.max_tokens, 8000),
-      messages: [{ role: "user", content: `Kullanıcı sorusu: ${lastUserText}\nArama bağlamı: ${searchText}\n\nWEB_CONTEXT aşağıda. Sadece bu kaynaklara dayanarak cevap ver. Kaynaklarda olmayan şeyi uydurma. Eğer kaynaklar yetersizse açıkça "Kaynaklar bunu göstermiyor" de. Türkçe cevap ver ve sonunda kaynak URL'lerini kısa listele.\n\nWEB_CONTEXT:\n${webContext}` }],
-      systemHint: `${body.systemHint || ""}\nWeb modu aktif. Google araması varsa öncelikli kullan. Sadece WEB_CONTEXT kullan. Kaynak dışı tahmin yapma.`,
+      messages: [{ role: "user", content: finalUserContent }],
+      systemHint: `${body.systemHint || ""}\nWeb modu aktif. Cevap final kanalındadır. İç analiz/planner/reasoning yazma. Kaynak dışı sayı veya canlı veri verme.`.trim(),
     },
   };
 }
@@ -301,9 +329,4 @@ async function answerLiveWebIfNeeded(body = {}, plan = null) {
   return askDeepSeek(liveWeb.requestBody);
 }
 
-module.exports = {
-  isWebMode,
-  planWebSearchQueryWithDeepSeek,
-  buildLiveWebBody,
-  answerLiveWebIfNeeded,
-};
+module.exports = { isWebMode, planWebSearchQueryWithDeepSeek, buildLiveWebBody, answerLiveWebIfNeeded };
