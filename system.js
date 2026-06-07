@@ -8,7 +8,8 @@ const { pickDeepSeekModel, modelList } = require("./core/models");
 const { withWebOffHint } = require("./core/prompt");
 const { fastMaxTokens } = require("./utils/text");
 const { askDeepSeek, askDeepSeekStream, writeSse } = require("./services/deepseek");
-const { isWebMode, answerLiveWebIfNeeded, buildLiveWebBody } = require("./services/web");
+const { isWebMode, buildLiveWebBody } = require("./services/web");
+const { planWithDeepSeek } = require("./core/brain");
 const { speak } = require("./services/voice");
 const { withServerContext, rememberExchange } = require("./core/sessionMemory");
 
@@ -32,10 +33,20 @@ app.post("/api/chat", async (req, res) => {
     const body = withServerContext(req, originalBody);
 
     if (isWebMode(body)) {
-      const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
-      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
-      rememberExchange(req, originalBody, liveAnswer);
-      return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
+      const plan = await planWithDeepSeek(body);
+      if (plan.needs_web) {
+        const liveWeb = await buildLiveWebBody({ ...body, max_tokens: plan.max_tokens }, plan);
+        if (liveWeb.instantAnswer) {
+          rememberExchange(req, originalBody, liveWeb.instantAnswer);
+          return res.json({ success: true, provider: "live-web", answer: liveWeb.instantAnswer });
+        }
+        const liveAnswer = await askDeepSeek(liveWeb.requestBody);
+        rememberExchange(req, originalBody, liveAnswer);
+        return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
+      }
+      const chatAnswer = await askDeepSeek({ ...body, max_tokens: plan.max_tokens });
+      rememberExchange(req, originalBody, chatAnswer);
+      return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(body), answer: chatAnswer });
     }
 
     const fastBody = withWebOffHint(body);
@@ -59,16 +70,21 @@ app.post("/api/chat-stream", async (req, res) => {
     const body = withServerContext(req, originalBody);
 
     if (isWebMode(body)) {
-      const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
-      const liveWeb = await buildLiveWebBody({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
-      if (liveWeb.instantAnswer) {
-        writeSse(res, { delta: liveWeb.instantAnswer });
-        writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
-        rememberExchange(req, originalBody, liveWeb.instantAnswer);
+      const plan = await planWithDeepSeek(body);
+      if (plan.needs_web) {
+        const liveWeb = await buildLiveWebBody({ ...body, max_tokens: plan.max_tokens }, plan);
+        if (liveWeb.instantAnswer) {
+          writeSse(res, { delta: liveWeb.instantAnswer });
+          writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
+          rememberExchange(req, originalBody, liveWeb.instantAnswer);
+          return res.end();
+        }
+        const answer = await askDeepSeekStream(liveWeb.requestBody, res);
+        rememberExchange(req, originalBody, answer);
         return res.end();
       }
-      const answer = await askDeepSeekStream(liveWeb.requestBody, res);
-      rememberExchange(req, originalBody, answer);
+      const chatAnswer = await askDeepSeekStream({ ...body, max_tokens: plan.max_tokens }, res);
+      rememberExchange(req, originalBody, chatAnswer);
       return res.end();
     }
 
