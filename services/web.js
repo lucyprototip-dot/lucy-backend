@@ -42,12 +42,14 @@ async function planWebSearchQueryWithDeepSeek(body = {}) {
       {
         role: "system",
         content: [
-          "Sen yalnızca web arama sorgusu hazırlayan iç router'sın.",
-          "Kullanıcının son mesajını önceki konuşma bağlamıyla yorumla.",
-          "Kullanıcı 'kontrol et', 'sen bul söyle', 'dedim', 'onu' gibi takip mesajı yazarsa önceki somut konuyu bul.",
+          "Sen yalnızca web arama sorgusu hazırlayan iç planlayıcısın.",
+          "Kullanıcının son mesajını tek başına değil, konuşma bağlamıyla yorumla.",
+          "Son mesaj eksik, düzeltme, devam veya işaret etme ise önceki somut kullanıcı isteğini bul ve onunla birleştir.",
+          "Son mesajı aynen arama sorgusu yapma; kullanıcının gerçek arama niyetini çıkar.",
+          "Yazım hatalarını bağlama göre düzelt.",
           "Cevap sadece JSON olsun.",
           "Şema: {\"query\":\"...\",\"needs_web\":true}",
-          "query kısa, net, arama motoruna uygun Türkçe olmalı.",
+          "query kısa, net ve arama motoruna uygun Türkçe olmalı.",
           "Asla açıklama yazma."
         ].join(" ")
       },
@@ -196,15 +198,49 @@ async function searchDuckDuckGoApi(query = "") {
   return results.filter((item) => item.text || item.url).slice(0, 8);
 }
 
+async function searchDuckDuckGoHtml(query = "") {
+  const url = `https://html.duckduckgo.com/html/?${new URLSearchParams({ q: query }).toString()}`;
+  const response = await fetchText(url, { headers: { Accept: "text/html" }, timeoutMs: 9000 });
+  if (!response.ok || !response.text) return [];
+
+  const html = response.text;
+  const chunks = html.split(/<div class="result[\s\S]*?">/i).slice(1, 10);
+  const results = [];
+
+  for (const chunk of chunks) {
+    const hrefRaw = chunk.match(/class="result__a"[^>]+href="([^"]+)"/i)?.[1]
+      || chunk.match(/<a[^>]+href="([^"]+)"[^>]*>/i)?.[1]
+      || "";
+    const title = stripHtml(chunk.match(/class="result__a"[^>]*>([\s\S]*?)<\/a>/i)?.[1] || "");
+    const snippet = stripHtml(chunk.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i)?.[1]
+      || chunk.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/div>/i)?.[1]
+      || "");
+
+    let href = decodeHtml(hrefRaw);
+    try {
+      if (href.includes("duckduckgo.com/l/?")) {
+        const parsed = new URL(href.startsWith("http") ? href : `https:${href}`);
+        href = parsed.searchParams.get("uddg") || href;
+      }
+    } catch {}
+
+    if (title || snippet || href) results.push({ provider: "duckduckgo", title: title || href || "Sonuç", text: snippet || title, url: href });
+  }
+
+  return results.slice(0, 8);
+}
+
+
 async function searchWeb(query = "") {
   const safeQuery = buildWebSearchQuery(query);
   if (!safeQuery) return [];
-  const [googleResults, duckResults] = await Promise.all([
+  const [googleResults, duckApiResults] = await Promise.all([
     searchGoogleApi(safeQuery).catch(() => []),
     searchDuckDuckGoApi(safeQuery).catch(() => []),
   ]);
+  const duckHtmlResults = duckApiResults.length ? [] : await searchDuckDuckGoHtml(safeQuery).catch(() => []);
   const seen = new Set();
-  return [...googleResults, ...duckResults].filter((item) => {
+  return [...googleResults, ...duckApiResults, ...duckHtmlResults].filter((item) => {
     const key = item.url || item.title;
     if (!key || seen.has(key)) return false;
     seen.add(key);
@@ -217,7 +253,7 @@ async function collectWebContext(query = "") {
   const searchQuery = buildWebSearchQuery(query);
   const pages = [];
   for (const url of urls) pages.push(await fetchPageSummary(url));
-  const searchResults = urls.length ? [] : await searchWeb(searchQuery).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
+  const searchResults = await searchWeb(searchQuery).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
   for (const item of searchResults.slice(0, LUCY_WEB_PAGE_READ_LIMIT)) {
     if (item.url && /^https?:\/\//i.test(item.url)) {
       const page = await fetchPageSummary(item.url);
