@@ -27,7 +27,6 @@ function normalizeMessages(messages) {
 
 function sanitizeLucyAnswer(text = "") {
   return String(text || "")
-    .replace(/\([^()]*\)/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
@@ -65,15 +64,21 @@ function clampMaxTokens(value, fallback = 1024) {
 function fastMaxTokens(body = {}, fallback = 1024) {
   const explicit = body.options?.max_tokens || body.max_tokens;
   if (explicit) return clampMaxTokens(explicit, fallback);
+
   const last = getLastUserText(body.messages);
   const len = last.length;
   const lower = last.toLowerCase();
-  if (lower.includes("20 sayfa") || lower.includes("roman") || lower.includes("uzun hikaye") || lower.includes("çok uzun")) return 16000;
-  if (lower.includes("uzun yaz") || lower.includes("detaylı") || lower.includes("detayli") || lower.includes("rapor")) return 8000;
-  if (len <= 25) return 384;
-  if (len <= 120) return 768;
-  if (len <= 500) return 2000;
-  return 4000;
+  const webOn = body.webSearch === true;
+
+  if (!webOn && len <= 35) return 512;
+  if (!webOn && len <= 160) return 1200;
+
+  if (/20\s*sayfa|roman|kitap|senaryo|uzun\s+hikaye|çok\s+uzun|cok\s+uzun/i.test(lower)) return 16000;
+  if (/detaylı|detayli|uzun\s+yaz|ayrıntılı|ayrintili|tablo|rapor|listele|analiz/i.test(lower)) return webOn ? 12000 : 8000;
+
+  if (webOn) return 9000;
+  if (len <= 500) return 2500;
+  return 5000;
 }
 
 module.exports = {
