@@ -36,11 +36,10 @@ app.post("/api/chat", async (req, res) => {
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
 
     if (isWebMode(body)) {
-      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: fastMaxTokens(body, 8000) });
-      if (liveAnswer) {
-        rememberExchange(req, originalBody, liveAnswer, { web: true });
-        return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
-      }
+      const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
+      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
+      rememberExchange(req, originalBody, liveAnswer);
+      return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
     }
 
     if (needsWebForFreshData(body)) {
@@ -70,13 +69,17 @@ app.post("/api/chat-stream", async (req, res) => {
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
 
     if (isWebMode(body)) {
-      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: fastMaxTokens(body, 8000) });
-      if (liveAnswer) {
-        writeSse(res, { delta: liveAnswer });
-        writeSse(res, { done: true, answer: liveAnswer, provider: "live-web" });
-        rememberExchange(req, originalBody, liveAnswer, { web: true });
+      const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
+      const liveWeb = await buildLiveWebBody({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
+      if (liveWeb.instantAnswer) {
+        writeSse(res, { delta: liveWeb.instantAnswer });
+        writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
+        rememberExchange(req, originalBody, liveWeb.instantAnswer);
         return res.end();
       }
+      const answer = await askDeepSeekStream(liveWeb.requestBody, res);
+      rememberExchange(req, originalBody, answer);
+      return res.end();
     }
 
     if (needsWebForFreshData(body)) {

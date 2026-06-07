@@ -43,45 +43,20 @@ function save(req, body = {}, messages = []) {
   sessions.set(key, { updatedAt: Date.now(), messages: compact(messages) });
 }
 
-function shouldIgnoreStoredForThisMessage(messages = []) {
-  const incoming = normalizeMessages(messages);
-  const lastUser = [...incoming].reverse().find((message) => message.role === "user")?.content || "";
-  const value = String(lastUser || "").toLowerCase().trim();
-  if (!value) return false;
-  return /^(aşkım|askim|nasılsın|nasilsin|merhaba|selam|tamam|ok|boşver|bosver|sohbet edelim|seni özledim|seni ozledim|sikişken|arsız)/i.test(value);
-}
-
 function withServerContext(req, body = {}) {
   const incoming = normalizeMessages(body.messages);
-  if (shouldIgnoreStoredForThisMessage(incoming)) {
-    return { ...body, messages: incoming };
-  }
   const stored = getStored(req, body);
   const merged = compact([...stored, ...incoming]);
   return { ...body, messages: merged };
 }
 
-function cleanAssistantMemory(text = "") {
-  let value = String(text || "").trim();
-  value = value.replace(/\n\s*Kaynaklar\s*:[\s\S]*$/i, "").trim();
-  value = value.replace(/\n\s*Kaynak URL'?leri\s*:[\s\S]*$/i, "").trim();
-  value = value.replace(/https?:\/\/\S+/gi, "").trim();
-  return value.slice(0, 1200);
-}
-
-function rememberExchange(req, originalBody = {}, assistantText = "", options = {}) {
+function rememberExchange(req, originalBody = {}, assistantText = "") {
   const stored = getStored(req, originalBody);
   const incoming = normalizeMessages(originalBody.messages);
   const lastUser = [...incoming].reverse().find((message) => message.role === "user");
   const add = [];
   if (lastUser) add.push(lastUser);
-
-  // Web cevapları kaynak/context taşır. Normal sohbet hafızasına web kaynaklarını sokma.
-  if (!options.web && assistantText) {
-    const clean = cleanAssistantMemory(assistantText);
-    if (clean) add.push({ role: "assistant", content: clean });
-  }
-
+  if (assistantText) add.push({ role: "assistant", content: String(assistantText).slice(0, 4000) });
   save(req, originalBody, [...stored, ...add]);
 }
 
