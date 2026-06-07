@@ -673,6 +673,12 @@ async function buildLiveWebBody(body = {}, plan = {}) {
   };
 }
 
+
+function isWebMode(body = {}) {
+  const mode = String(body.mode || body.modeId || body.apiMode || "").toLowerCase();
+  return body.webSearch === true || body.webSearch === "true" || mode === "web" || mode.includes("web");
+}
+
 async function answerLiveWebIfNeeded(body = {}, plan = null) {
   const finalPlan = plan || await planLucyRequestWithDeepSeek(body);
   if (!finalPlan.needs_web) return null;
