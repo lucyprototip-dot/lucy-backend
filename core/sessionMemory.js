@@ -1,7 +1,7 @@
-const { normalizeMessages, cleanAssistantContext } = require("../utils/text");
+const { normalizeMessages } = require("../utils/text");
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 6;
-const MAX_MESSAGES = 10;
+const MAX_MESSAGES = 8;
 const sessions = new Map();
 
 function sessionKey(req, body = {}) {
@@ -27,97 +27,37 @@ function compact(messages = []) {
   return out.slice(-MAX_MESSAGES);
 }
 
-function emptyItem() {
-  return { updatedAt: Date.now(), chatMessages: [], webMessages: [] };
-}
-
-function getItem(req, body = {}) {
+function getStored(req, body = {}) {
   const key = sessionKey(req, body);
   const item = sessions.get(key);
-  if (!item) return emptyItem();
+  if (!item) return [];
   if (Date.now() - item.updatedAt > SESSION_TTL_MS) {
     sessions.delete(key);
-    return emptyItem();
+    return [];
   }
-  return {
-    updatedAt: item.updatedAt,
-    chatMessages: item.chatMessages || item.messages || [],
-    webMessages: item.webMessages || [],
-  };
+  return item.messages || [];
 }
 
-function saveItem(req, body = {}, item = emptyItem()) {
+function save(req, body = {}, messages = []) {
   const key = sessionKey(req, body);
-  sessions.set(key, {
-    updatedAt: Date.now(),
-    chatMessages: compact(item.chatMessages || []),
-    webMessages: compact(item.webMessages || []),
-  });
-}
-
-function lastUserText(messages = []) {
-  return [...normalizeMessages(messages)].reverse().find((m) => m.role === "user")?.content || "";
-}
-
-function isCasualReset(text = "") {
-  const value = String(text || "").toLowerCase().trim();
-  if (!value) return false;
-  return /^(aşkım|askim|nasılsın|nasilsin|merhaba|selam|boşver|bosver|siktiret|sohbet edelim|sohbete devam|seni özledim|seni ozledim|sikişken|arsız)/i.test(value);
+  sessions.set(key, { updatedAt: Date.now(), messages: compact(messages) });
 }
 
 function withServerContext(req, body = {}) {
   const incoming = normalizeMessages(body.messages);
-  const item = getItem(req, body);
-  const webOn = body.webSearch === true || body.webSearch === "true" || body.webSearch === 1 || body.webSearch === "1";
-  const lastUser = lastUserText(incoming);
-
-  if (webOn) {
-    // Web açıkken sadece web takip bağlamı + gelen mesajlar. Normal sohbet kaynakları karışmaz.
-    return { ...body, messages: compact([...item.webMessages, ...incoming]) };
-  }
-
-  if (isCasualReset(lastUser)) {
-    // Normal sohbet anında web bağlamını tamamen dışarıda bırak.
-    return { ...body, messages: incoming };
-  }
-
-  return { ...body, messages: compact([...item.chatMessages, ...incoming]) };
+  const stored = getStored(req, body);
+  const merged = compact([...stored, ...incoming]);
+  return { ...body, messages: merged };
 }
 
-function cleanAssistantMemory(text = "") {
-  return cleanAssistantContext(text).slice(0, 1200);
-}
-
-function rememberExchange(req, originalBody = {}, assistantText = "", options = {}) {
-  const item = getItem(req, originalBody);
+function rememberExchange(req, originalBody = {}, assistantText = "") {
+  const stored = getStored(req, originalBody);
   const incoming = normalizeMessages(originalBody.messages);
   const lastUser = [...incoming].reverse().find((message) => message.role === "user");
-  const lastText = lastUser?.content || "";
-
-  if (options.web || options.webPending) {
-    const add = [];
-    if (lastUser) add.push(lastUser);
-    // Web assistant cevabını normal sohbete sokma; sadece kısa, kaynak temizli web takip bağlamında tut.
-    if (options.web && assistantText) {
-      const clean = cleanAssistantMemory(assistantText);
-      if (clean) add.push({ role: "assistant", content: clean });
-    }
-    saveItem(req, originalBody, { ...item, webMessages: compact([...item.webMessages, ...add]) });
-    return;
-  }
-
-  // Sohbete dönüşte web bağlamını sıfırla.
-  const clearWeb = isCasualReset(lastText);
   const add = [];
   if (lastUser) add.push(lastUser);
-  if (assistantText) {
-    const clean = cleanAssistantMemory(assistantText);
-    if (clean) add.push({ role: "assistant", content: clean });
-  }
-  saveItem(req, originalBody, {
-    chatMessages: compact([...item.chatMessages, ...add]),
-    webMessages: clearWeb ? [] : item.webMessages,
-  });
+  if (assistantText) add.push({ role: "assistant", content: String(assistantText).slice(0, 4000) });
+  save(req, originalBody, [...stored, ...add]);
 }
 
 module.exports = { withServerContext, rememberExchange };

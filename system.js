@@ -35,28 +35,22 @@ app.post("/api/chat", async (req, res) => {
     const body = withServerContext(req, originalBody);
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
 
-    const webOn = isWebMode(originalBody);
-
-    if (webOn) {
-      const liveAnswer = await answerLiveWebIfNeeded({ ...body, webSearch: true, max_tokens: fastMaxTokens({ ...body, webSearch: true }, 8000) });
-      if (liveAnswer) {
-        rememberExchange(req, originalBody, liveAnswer, { web: true });
-        return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
-      }
+    if (isWebMode(body)) {
+      const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
+      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
+      rememberExchange(req, originalBody, liveAnswer);
+      return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
     }
 
-    if (!webOn && needsWebForFreshData(body)) {
-      rememberExchange(req, originalBody, WEB_OFF_MESSAGE, { webPending: true });
+    if (needsWebForFreshData(body)) {
+      rememberExchange(req, originalBody, WEB_OFF_MESSAGE);
       return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(body), answer: WEB_OFF_MESSAGE });
     }
 
-    const finalBody = webOn
-      ? { ...body, systemHint: `${body.systemHint || ""}
-Normal sohbet modu. WEB_CONTEXT yoksa kaynak listesi yazma. Kaynak uydurma.`.trim(), max_tokens: fastMaxTokens({ ...body, webSearch: false }) }
-      : withWebOffHint(body);
-    const answer = await askDeepSeek(finalBody);
+    const fastBody = withWebOffHint(body);
+    const answer = await askDeepSeek(fastBody);
     rememberExchange(req, originalBody, answer);
-    return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(finalBody), answer });
+    return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(fastBody), answer });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -74,30 +68,28 @@ app.post("/api/chat-stream", async (req, res) => {
     const body = withServerContext(req, originalBody);
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
 
-    const webOn = isWebMode(originalBody);
-
-    if (webOn) {
-      const liveAnswer = await answerLiveWebIfNeeded({ ...body, webSearch: true, max_tokens: fastMaxTokens({ ...body, webSearch: true }, 8000) });
-      if (liveAnswer) {
-        writeSse(res, { delta: liveAnswer });
-        writeSse(res, { done: true, answer: liveAnswer, provider: "live-web" });
-        rememberExchange(req, originalBody, liveAnswer, { web: true });
+    if (isWebMode(body)) {
+      const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
+      const liveWeb = await buildLiveWebBody({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
+      if (liveWeb.instantAnswer) {
+        writeSse(res, { delta: liveWeb.instantAnswer });
+        writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
+        rememberExchange(req, originalBody, liveWeb.instantAnswer);
         return res.end();
       }
-    }
-
-    if (!webOn && needsWebForFreshData(body)) {
-      writeSse(res, { delta: WEB_OFF_MESSAGE });
-      writeSse(res, { done: true, answer: WEB_OFF_MESSAGE });
-      rememberExchange(req, originalBody, WEB_OFF_MESSAGE, { webPending: true });
+      const answer = await askDeepSeekStream(liveWeb.requestBody, res);
+      rememberExchange(req, originalBody, answer);
       return res.end();
     }
 
-    const finalBody = webOn
-      ? { ...body, systemHint: `${body.systemHint || ""}
-Normal sohbet modu. WEB_CONTEXT yoksa kaynak listesi yazma. Kaynak uydurma.`.trim(), max_tokens: fastMaxTokens({ ...body, webSearch: false }) }
-      : withWebOffHint(body);
-    const answer = await askDeepSeekStream(finalBody, res);
+    if (needsWebForFreshData(body)) {
+      writeSse(res, { delta: WEB_OFF_MESSAGE });
+      writeSse(res, { done: true, answer: WEB_OFF_MESSAGE });
+      rememberExchange(req, originalBody, WEB_OFF_MESSAGE);
+      return res.end();
+    }
+
+    const answer = await askDeepSeekStream(withWebOffHint(body), res);
     rememberExchange(req, originalBody, answer);
     return res.end();
   } catch (error) {

@@ -18,22 +18,11 @@ function normalizeMessages(messages) {
         : typeof message?.text === "string"
           ? message.text
           : "";
-      let content = normalizeText(rawContent);
-      if (role === "assistant") content = cleanAssistantContext(content);
+      const content = normalizeText(rawContent);
       if (!content) return null;
       return { role, content };
     })
     .filter(Boolean);
-}
-
-function cleanAssistantContext(text = "") {
-  return String(text || "")
-    .replace(/\n\s*Kaynaklar\s*:[\s\S]*$/i, "")
-    .replace(/\n\s*Kaynak\s*:[\s\S]*$/i, "")
-    .replace(/\n\s*Kaynak URL'?leri\s*:[\s\S]*$/i, "")
-    .replace(/https?:\/\/\S+/gi, "")
-    .replace(/\b(Web arama sonuçları|WEB_CONTEXT|KAYNAK \d+)\b[\s\S]*$/i, "")
-    .trim();
 }
 
 function sanitizeLucyAnswer(text = "") {
@@ -96,7 +85,6 @@ module.exports = {
   normalizeText,
   limitText,
   normalizeMessages,
-  cleanAssistantContext,
   sanitizeLucyAnswer,
   createLucyStreamSanitizer,
   getLastUserText,
