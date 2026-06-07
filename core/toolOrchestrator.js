@@ -167,6 +167,94 @@ function asBoolean(value, fallback = false) {
   return fallback;
 }
 
+
+function latestUserTextFromReq(req = null) {
+  const body = req?.body || {};
+  const direct = body.message || body.prompt || body.text || body.input || body.query || "";
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] || {};
+    const role = String(message.role || "user").toLowerCase();
+    const content = typeof message.content === "string"
+      ? message.content
+      : typeof message.text === "string"
+        ? message.text
+        : "";
+    if (role === "user" && content.trim()) return content.trim();
+  }
+
+  return "";
+}
+
+function normalizeForIntentSearch(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ı/g, "i")
+    .replace(/İ/g, "i")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9ğüşöç\s._-]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function regexAny(text, patterns = []) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function requestHasExplicitToolCommand(req = null, toolName = "") {
+  const raw = latestUserTextFromReq(req);
+  const text = normalizeForIntentSearch(raw);
+  if (!text) return false;
+
+  const tool = canonicalToolName(toolName).toLowerCase();
+
+  // En kritik kural: içerik hazırlama isteği dosya isteği değildir.
+  // "rapor hazırla", "tablo hazırla", "plan yaz" gibi mesajlarda tool çalışmaz.
+  // Dosya/export tool'u için kullanıcı son mesajında açıkça format veya export istemelidir.
+  const explicit = {
+    pdf: [/\bpdf\b/i, /\bpdf\s*(yap|hazirla|olustur|olusturur|kaydet|indir|cikar|donustur|cevir)\b/i, /\bpdf olarak\b/i],
+    excel: [/\bexcel\b/i, /\bxlsx\b/i, /\bxls\b/i, /\bcsv\b/i, /\bspreadsheet\b/i],
+    document: [/\bdocx\b/i, /\bword\b/i, /\bdokuman\b/i, /\bbelge olarak\b/i],
+    zip: [/\bzip\b/i, /\bziple\b/i, /\bsikistir\b/i, /\bsıkıştır\b/i],
+    chartdata: [/\bgrafik\b/i, /\bchart\b/i, /\bcizelge\b/i, /\bçizelge\b/i],
+    mermaid: [/\bmermaid\b/i, /\bdiyagram\b/i, /\bdiagram\b/i, /\bakis semasi\b/i, /\bakış şeması\b/i],
+    calculator: [/\bhesapla\b/i, /\bkac eder\b/i, /\bkaç eder\b/i],
+    time: [/\bsaat\b/i, /\btarih\b/i],
+    webfetch: [/\bweb\b/i, /\binternette\b/i, /\bara\b/i, /\bguncel\b/i, /\bgüncel\b/i],
+    qr: [/\bqr\b/i, /\bkarekod\b/i],
+    ocr: [/\bocr\b/i, /\byaziyi oku\b/i, /\byazıyı oku\b/i],
+    textstats: [/\bkelime say\b/i, /\bistatistik\b/i],
+    filemanager: [/\bdosya\b/i, /\bdosyayi\b/i, /\bdosyayı\b/i],
+    mail: [/\bmail\b/i, /\be-posta\b/i, /\bemail\b/i],
+    whatsapp: [/\bwhatsapp\b/i],
+    telegram: [/\btelegram\b/i],
+  };
+
+  return regexAny(text, explicit[tool] || []);
+}
+
+function implicitToolBlockedAnswer(contract = {}, req = null, originalAnswer = "") {
+  const input = contract.tool_input || {};
+  const title = String(input.title || input.name || "").trim();
+  const body = input.text || input.content || input.markdown || input.body || input.report || "";
+  const cleanBody = typeof body === "string" ? body.trim() : "";
+
+  if (cleanBody.length > 20) {
+    return [
+      contract.reply || "Tamam aşkım, dosya oluşturmadan burada hazırladım.",
+      title ? `## ${title}` : "",
+      cleanBody,
+      "PDF istersen sonrasında açıkça `bunu pdf yap` yaz."
+    ].filter(Boolean).join("\n\n");
+  }
+
+  const reply = contract.reply || fallbackCleanAnswer(originalAnswer) || "Tamam aşkım, bunu chat içinde hazırlayayım.";
+  return `${reply}\n\nNot: Dosya oluşturmadım. PDF istersen açıkça \`bunu pdf yap\` yaz.`;
+}
+
 function normalizeIntentContract(answer = "") {
   const parsed = extractJsonObject(answer);
   if (!parsed) return null;
@@ -235,6 +323,17 @@ async function executeToolCallsFromAnswer(answer = "", req = null) {
     source: "deepseek_intent_contract",
   };
 
+  if (!requestHasExplicitToolCommand(req, contract.tool)) {
+    return {
+      finalAnswer: implicitToolBlockedAnswer(contract, req, text),
+      toolCalls: [],
+      toolResults: [],
+      intent: contract.intent,
+      confidence: contract.confidence,
+      toolBlocked: "implicit_user_command",
+    };
+  }
+
   if (!isChatToolExecutionEnabled(contract.tool)) {
     return {
       finalAnswer: disabledToolMessage(contract),
@@ -271,4 +370,5 @@ module.exports = {
   executeToolCallsFromAnswer,
   normalizeIntentContract,
   isChatToolExecutionEnabled,
+  requestHasExplicitToolCommand,
 };

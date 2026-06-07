@@ -346,9 +346,12 @@ function buildSystemPrompt(body = {}) {
     "Kontrat:",
     '{"reply":"kullanıcıya gösterilecek doğal cevap","intent":"chat|create_pdf|create_excel|create_document|create_zip|create_chart|calculate|read_web|time|other","needs_tool":false,"tool":null,"confidence":0.0,"tool_input":{}}',
     "Sohbet, açıklama, fikir, kod, tabloyu chat içinde yazma gibi işlerde needs_tool=false yap.",
+    "ÇOK ÖNEMLİ: 'rapor hazırla', 'kısa rapor hazırla', 'metin yaz', 'plan hazırla', 'tablo hazırla' tek başına dosya/export isteği DEĞİLDİR. Bu durumlarda needs_tool=false yap ve içeriği reply içinde yaz.",
+    "PDF tool sadece kullanıcı son mesajında açıkça PDF isterse çalışır: 'bunu pdf yap', 'pdf olarak kaydet', 'pdf oluştur', 'pdf indir' gibi.",
+    "Excel tool sadece kullanıcı son mesajında açıkça excel/xlsx/csv isterse çalışır. DOCX/ZIP/grafik/web/calculator için de aynı şekilde açık komut gerekir.",
     "PDF/Excel/ZIP/DOCX/grafik/saat/web/calculator gibi gerçek backend işi açıkça gerekiyorsa needs_tool=true yap ve tool alanına sadece şu adlardan birini yaz: pdf, excel, document, zip, chartData, calculator, time, webFetch, mermaid, qr, ocr, textStats, fileManager, mail, whatsapp, telegram.",
     'Tool için gerekli içeriği tool_input içine koy. Örnek PDF: {"title":"Rapor","text":"...rapor metni...","filename":"rapor.pdf"}.',
-    "Emin değilsen needs_tool=false yap ve reply içinde kısa net soru sor.",
+    "Emin değilsen veya kullanıcı sadece içerik istediyse needs_tool=false yap.",
     "Hazırladım/yaptım deme; backend tool çalıştırırsa son durumu backend ekler."
   ].join("\n"));
 
