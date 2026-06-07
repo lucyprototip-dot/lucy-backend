@@ -292,9 +292,19 @@ async function searchWeb(query = "") {
 
 async function collectWebContext(query = "") {
   const urls = extractUrlsFromText(query);
-  const searchQuery = buildWebSearchQuery(query);
+  const searchQuery = urls.length ? "" : buildWebSearchQuery(query);
   const pages = [];
   for (const url of urls) pages.push(await fetchPageSummary(url));
+  if (urls.length) {
+    return {
+      urls,
+      pages,
+      usefulPages: pages.filter((item) => normalizeText(item.text).length >= 120),
+      searchResults: [],
+      searchQuery,
+      directUrlMode: true,
+    };
+  }
   const searchResults = await searchWeb(searchQuery).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
   for (const item of searchResults.slice(0, LUCY_WEB_PAGE_READ_LIMIT)) {
     if (item.url && /^https?:\/\//i.test(item.url)) {
@@ -310,38 +320,95 @@ function hasNumericOrSubstantialContext(contextItems = []) {
   return /\d/.test(joined) || joined.length > 900;
 }
 
+function isLiveMarketQuery(text = "") {
+  const value = String(text || "").toLowerCase();
+  return /\b(usd|eur|try|btc|eth|xau|gram altın|altın|dolar|euro|sterlin|kur|döviz|doviz|coin|kripto|bitcoin|ethereum|borsa|hisse|nasdaq|bist)\b/i.test(value);
+}
+
+function isTrustedMarketSource(item = {}) {
+  const url = String(item.url || "").toLowerCase();
+  return [
+    "tcmb.gov.tr",
+    "kapalicarsi",
+    "doviz.com",
+    "foreks",
+    "bloomberght",
+    "investing.com",
+    "tradingview.com",
+    "finance.yahoo.com",
+    "google.com/finance",
+    "binance.com",
+    "coingecko.com",
+    "coinmarketcap.com",
+    "xe.com",
+    "wise.com",
+    "exchangerate",
+  ].some((domain) => url.includes(domain));
+}
+
+function hasTrustedMarketContext(web = {}) {
+  const candidates = [...(web.usefulPages || []), ...(web.searchResults || [])];
+  const trusted = candidates.filter(isTrustedMarketSource);
+  const joined = trusted.map((item) => `${item.title || ""}\n${item.text || ""}\n${item.url || ""}`).join("\n");
+  return trusted.length > 0 && /\d/.test(joined);
+}
+
+function shouldUseWebPlannerForQuery(query = "", body = {}) {
+  const fallback = strengthenQueryWithContext(query || fallbackQueryFromConversation(body.messages), body);
+  if (!fallback) return false;
+  if (extractUrlsFromText(fallback).length) return false;
+  return isLowInformationQuery(fallback);
+}
+
+async function resolveWebSearchText(body = {}, plan = {}) {
+  const plannedQuery = normalizeText(plan.query || "");
+  if (plannedQuery) return strengthenQueryWithContext(plannedQuery, body);
+
+  const fallbackQuery = fallbackQueryFromConversation(body.messages);
+  if (!shouldUseWebPlannerForQuery(fallbackQuery, body)) {
+    return strengthenQueryWithContext(fallbackQuery, body);
+  }
+
+  return strengthenQueryWithContext(await planWebSearchQueryWithDeepSeek(body), body);
+}
+
 async function buildLiveWebBody(body = {}, plan = {}) {
   const conversation = compactConversation(body.messages, 10);
   const lastUserText = getLastUserText(body.messages);
-  const searchText = strengthenQueryWithContext(plan.query || await planWebSearchQueryWithDeepSeek(body), body);
+  const searchText = await resolveWebSearchText(body, plan);
   const web = await collectWebContext(searchText);
   const contextItems = [];
 
   web.usefulPages.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 2400)}`));
   web.searchResults.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title}\nURL: ${item.url || "yok"}\nÖzet:\n${item.text || ""}`));
 
-  trace("web.context", { searchText, sourceCount: contextItems.length, urls: web.urls, searchResults: web.searchResults.slice(0, 3).map((r) => ({ title: r.title, url: r.url })) });
+  trace("web.context", { searchText, sourceCount: contextItems.length, urls: web.urls, directUrlMode: web.directUrlMode === true, searchResults: web.searchResults.slice(0, 3).map((r) => ({ title: r.title, url: r.url })) });
 
   if (!contextItems.length || !hasNumericOrSubstantialContext(contextItems)) {
     return { instantAnswer: "Web açık aşkım ama güvenilir kaynak bulamadım. Kaynak yoksa kur, fiyat veya canlı veri söyleyemem." };
   }
 
+  if (isLiveMarketQuery(`${lastUserText}\n${searchText}`) && !hasTrustedMarketContext(web)) {
+    return { instantAnswer: "Web açık aşkım ama güvenilir canlı finans kaynağı bulamadım. Güvenilir kaynak olmadan döviz, coin, fiyat veya kur sayısı söylemem doğru olmaz." };
+  }
+
   const webContext = contextItems.slice(0, 5).map((item) => limitText(item, 2600)).join("\n\n---\n\n");
   const finalUserContent = [
-    "Konuşma bağlamı:",
+    "Konuşma bağlamı (yalnızca niyeti ve takip sorusunu anlamak için; bilgi kaynağı değildir):",
     conversation,
     "",
     `Kullanıcının son isteği: ${lastUserText}`,
     `Web arama sorgusu: ${searchText}`,
     "",
-    "WEB_CONTEXT aşağıda.",
+    "WEB_CONTEXT aşağıda. Gerçek bilgi kaynağın yalnızca WEB_CONTEXT içeriğidir.",
     "Sadece WEB_CONTEXT içindeki kaynaklara dayanarak cevap ver.",
     "Kaynakta olmayan kur, fiyat, oran, tarih veya sayı yazma.",
     "Eski sohbet hafızasındaki kur/fiyat/sayıları yok say; canlı/güncel veri sadece WEB_CONTEXT'ten alınır.",
+    "Döviz, coin, fiyat veya canlı piyasa verisi istenirse kaynakta açık sayı ve güvenilir kaynak yoksa sayı verme; bunu net söyle.",
     "İç analiz, plan, akıl yürütme, 'kullanıcı şöyle demiş' açıklaması yazma.",
     "Asla kendi düşünme sürecini, planını veya görev yorumunu yazma.",
     "Sadece kullanıcıya verilecek nihai cevabı Türkçe yaz.",
-    "Sonunda kaynak URL'lerini kısa listele.",
+    "Kaynak URL'lerini yalnızca kullanıcı link/kaynak isterse veya güncel sayı, kur, fiyat, haber ya da iddia aktarıyorsan en sonda kısa listele.",
     "",
     `WEB_CONTEXT:\n${webContext}`
   ].join("\n");
@@ -349,11 +416,6 @@ async function buildLiveWebBody(body = {}, plan = {}) {
   return {
     requestBody: {
       ...body,
-      webSearch: false,
-      mode: "fast",
-      modeId: "fast",
-      apiMode: "fast",
-      thinking: false,
       max_tokens: clampMaxTokens(plan.max_tokens || body.max_tokens || body.options?.max_tokens, 8000),
       messages: [{ role: "user", content: finalUserContent }],
       systemHint: `${body.systemHint || ""}\nWeb modu aktif. Cevap final kanalındadır. İç analiz/planner/reasoning yazma. Kaynak dışı sayı veya canlı veri verme.`.trim(),
@@ -363,10 +425,10 @@ async function buildLiveWebBody(body = {}, plan = {}) {
 
 async function answerLiveWebIfNeeded(body = {}, plan = null) {
   if (!isWebMode(body) && !plan?.needs_web) return null;
-  const finalPlan = plan || { needs_web: true, query: await planWebSearchQueryWithDeepSeek(body), max_tokens: 8000 };
+  const finalPlan = plan || { needs_web: true, max_tokens: 8000 };
   const liveWeb = await buildLiveWebBody(body, finalPlan);
   if (liveWeb.instantAnswer) return liveWeb.instantAnswer;
   return askDeepSeek(liveWeb.requestBody);
 }
 
-module.exports = { isWebMode, planWebSearchQueryWithDeepSeek, buildLiveWebBody, answerLiveWebIfNeeded };
+module.exports = { isWebMode, isLiveMarketQuery, planWebSearchQueryWithDeepSeek, buildLiveWebBody, answerLiveWebIfNeeded };

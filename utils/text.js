@@ -27,7 +27,6 @@ function normalizeMessages(messages) {
 
 function sanitizeLucyAnswer(text = "") {
   return String(text || "")
-    .replace(/\([^()]*\)/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/[ \t]+\n/g, "\n")

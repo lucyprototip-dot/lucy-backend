@@ -49,6 +49,47 @@ async function retryFinalAnswer(basePayload, apiKey) {
   return sanitizeLucyAnswer(data?.choices?.[0]?.message?.content || "");
 }
 
+const LENGTH_CONTINUE_LIMIT = Math.max(0, Math.min(Number(process.env.LUCY_LENGTH_CONTINUE_LIMIT || 2), 4));
+
+function buildDeepSeekPayload({ model, messages, temperature, maxTokens, stream }) {
+  const payload = { model, messages, max_tokens: maxTokens, stream };
+  if (!String(model || "").toLowerCase().includes("reasoner")) payload.temperature = temperature;
+  return payload;
+}
+
+function getFinishReason(data = {}) {
+  return data?.choices?.[0]?.finish_reason || data?.choices?.[0]?.finishReason || "";
+}
+
+function buildLengthContinuationMessages(messages = [], answer = "") {
+  return [
+    ...messages,
+    { role: "assistant", content: String(answer || "").slice(-12000) },
+    { role: "user", content: "Cevabın token sınırında kesildi. Kaldığın yerden devam et; tekrar başa dönme." },
+  ];
+}
+
+async function continueAnswerIfLength(basePayload, apiKey, firstAnswer = "", firstFinishReason = "") {
+  let answer = firstAnswer;
+  let finishReason = firstFinishReason;
+
+  for (let i = 0; i < LENGTH_CONTINUE_LIMIT && finishReason === "length"; i += 1) {
+    const continuationPayload = {
+      ...basePayload,
+      stream: false,
+      messages: buildLengthContinuationMessages(basePayload.messages, answer),
+    };
+    const { response, data } = await callDeepSeek(continuationPayload, apiKey);
+    if (!response.ok) break;
+    const next = sanitizeLucyAnswer(data?.choices?.[0]?.message?.content || "");
+    if (!next) break;
+    answer = `${answer}\n\n${next}`.trim();
+    finishReason = getFinishReason(data);
+  }
+
+  return answer;
+}
+
 async function askDeepSeek(body = {}) {
   const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
   if (!deepSeekKey) throw new Error("DEEPSEEK_API_KEY Railway Variables içinde yok.");
@@ -62,20 +103,14 @@ async function askDeepSeek(body = {}) {
   const maxTokens = clampMaxTokens(body.options?.max_tokens || body.max_tokens || body._lucyPlan?.max_tokens, 1024);
 
   const finalMessages = [{ role: "system", content: buildSystemPrompt(body) }, ...cleanMessages];
-  const basePayload = { model, messages: finalMessages, temperature, max_tokens: maxTokens, stream: false };
-  const payload = thinkingEnabled ? { ...basePayload, thinking: { type: "enabled" }, enable_thinking: true } : basePayload;
+  const basePayload = buildDeepSeekPayload({ model, messages: finalMessages, temperature, maxTokens, stream: false });
 
-  let { response, data } = await callDeepSeek(payload, deepSeekKey);
-  if (!response.ok && thinkingEnabled) {
-    const message = String(data?.error?.message || data?.message || "").toLowerCase();
-    if (response.status === 400 || message.includes("thinking") || message.includes("enable_thinking")) {
-      ({ response, data } = await callDeepSeek(basePayload, deepSeekKey));
-    }
-  }
+  let { response, data } = await callDeepSeek(basePayload, deepSeekKey);
 
   if (!response.ok) throw new Error(data?.error?.message || data?.message || `DeepSeek API hatası: ${response.status}`);
   const choiceMessage = data?.choices?.[0]?.message || {};
   let answer = sanitizeLucyAnswer(choiceMessage.content || "");
+  answer = await continueAnswerIfLength(basePayload, deepSeekKey, answer, getFinishReason(data));
   if (looksLikeInternalAnswer(answer)) {
     const retry = await retryFinalAnswer(basePayload, deepSeekKey);
     if (retry && !looksLikeInternalAnswer(retry)) answer = retry;
@@ -107,8 +142,7 @@ async function askDeepSeekStream(body = {}, res) {
   const maxTokens = clampMaxTokens(body.options?.max_tokens || body.max_tokens || body._lucyPlan?.max_tokens, 1024);
   const finalMessages = [{ role: "system", content: buildSystemPrompt(body) }, ...cleanMessages];
 
-  const basePayload = { model, messages: finalMessages, temperature, max_tokens: maxTokens, stream: true };
-  const payload = thinkingEnabled ? { ...basePayload, thinking: { type: "enabled" }, enable_thinking: true } : basePayload;
+  const basePayload = buildDeepSeekPayload({ model, messages: finalMessages, temperature, maxTokens, stream: true });
 
   async function callStream(requestPayload) {
     return fetch("https://api.deepseek.com/chat/completions", {
@@ -118,47 +152,61 @@ async function askDeepSeekStream(body = {}, res) {
     });
   }
 
-  let response = await callStream(payload);
-  if (!response.ok && thinkingEnabled) response = await callStream(basePayload);
-  if (!response.ok) {
-    const errorData = await response.json().catch(async () => ({ message: await response.text().catch(() => "") }));
-    throw new Error(errorData?.error?.message || errorData?.message || `DeepSeek stream API hatası: ${response.status}`);
-  }
-
-  const reader = response.body?.getReader?.();
-  if (!reader) throw new Error("DeepSeek stream gövdesi okunamadı.");
-
   const decoder = new TextDecoder("utf-8");
-  let buffer = "";
   let fullAnswer = "";
-  const sanitizeDelta = createLucyStreamSanitizer();
+  let requestPayload = basePayload;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith(":")) continue;
-      if (!line.startsWith("data:")) continue;
-      const payloadText = line.replace(/^data:\s*/, "");
-      if (payloadText === "[DONE]") {
-        writeSse(res, { done: true, answer: fullAnswer });
-        return fullAnswer;
-      }
-      try {
-        const json = JSON.parse(payloadText);
-        const delta = extractDeepSeekStreamDelta(json);
-        const cleanDelta = sanitizeDelta(delta);
-        if (cleanDelta) {
-          fullAnswer += cleanDelta;
-          writeSse(res, { delta: cleanDelta });
-        }
-      } catch {}
+  for (let continueCount = 0; continueCount <= LENGTH_CONTINUE_LIMIT; continueCount += 1) {
+    let response = await callStream(requestPayload);
+    if (!response.ok) {
+      const errorData = await response.json().catch(async () => ({ message: await response.text().catch(() => "") }));
+      throw new Error(errorData?.error?.message || errorData?.message || `DeepSeek stream API hatası: ${response.status}`);
     }
+
+    const reader = response.body?.getReader?.();
+    if (!reader) throw new Error("DeepSeek stream gövdesi okunamadı.");
+
+    let buffer = "";
+    let finishReason = "";
+    let sawDone = false;
+    const sanitizeDelta = createLucyStreamSanitizer();
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith(":")) continue;
+        if (!line.startsWith("data:")) continue;
+        const payloadText = line.replace(/^data:\s*/, "");
+        if (payloadText === "[DONE]") {
+          sawDone = true;
+          break;
+        }
+        try {
+          const json = JSON.parse(payloadText);
+          finishReason = json?.choices?.[0]?.finish_reason || finishReason;
+          const delta = extractDeepSeekStreamDelta(json);
+          const cleanDelta = sanitizeDelta(delta);
+          if (cleanDelta) {
+            fullAnswer += cleanDelta;
+            writeSse(res, { delta: cleanDelta });
+          }
+        } catch {}
+      }
+      if (sawDone) break;
+    }
+
+    if (finishReason !== "length" || continueCount >= LENGTH_CONTINUE_LIMIT) break;
+    requestPayload = {
+      ...basePayload,
+      messages: buildLengthContinuationMessages(basePayload.messages, fullAnswer),
+      stream: true,
+    };
   }
 
   writeSse(res, { done: true, answer: fullAnswer });
