@@ -263,10 +263,35 @@ function fallbackContextualUserQuery(messages = []) {
   return last;
 }
 
-function clampMaxTokens(value, fallback = 4000) {
+function clampMaxTokens(value, fallback = 1024) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
-  return Math.max(400, Math.min(16000, Math.round(n)));
+  return Math.max(256, Math.min(16000, Math.round(n)));
+}
+
+function fastMaxTokens(body = {}, fallback = 1024) {
+  const explicit = body.options?.max_tokens || body.max_tokens;
+  if (explicit) return clampMaxTokens(explicit, fallback);
+
+  const last = getLastUserText(body.messages);
+  const len = last.length;
+  const lower = last.toLowerCase();
+
+  if (lower.includes("20 sayfa") || lower.includes("roman") || lower.includes("uzun hikaye") || lower.includes("çok uzun")) return 16000;
+  if (lower.includes("uzun yaz") || lower.includes("detaylı") || lower.includes("detayli") || lower.includes("rapor")) return 8000;
+  if (len <= 25) return 512;
+  if (len <= 120) return 1024;
+  if (len <= 500) return 3000;
+  return 5000;
+}
+
+function withWebOffHint(body = {}) {
+  return {
+    ...body,
+    max_tokens: fastMaxTokens(body),
+    systemHint: `${body.systemHint || ""}
+Web arama kapalı. İnternete/anlık verilere erişimin yok. Kullanıcı güncel fiyat, kur, haber, canlı veri veya site araştırması isterse uydurma; kısa ve net biçimde "İnternet erişimim şu an kapalı aşkım." de.`.trim(),
+  };
 }
 
 async function planLucyRequestWithDeepSeek(body = {}) {
@@ -672,7 +697,7 @@ async function askDeepSeek(body = {}) {
   const model = pickDeepSeekModel(body);
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.45));
-  const maxTokens = clampMaxTokens(body.options?.max_tokens || body.max_tokens || body._lucyPlan?.max_tokens, 4000);
+  const maxTokens = clampMaxTokens(body.options?.max_tokens || body.max_tokens || body._lucyPlan?.max_tokens, 1024);
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
@@ -753,7 +778,7 @@ async function askDeepSeekStream(body = {}, res) {
   const thinkingEnabled = wantsDeepSeekThinking(body);
   const model = pickDeepSeekModel(body);
   const temperature = Number(body.options?.temperature ?? (thinkingEnabled ? 0.55 : 0.42));
-  const maxTokens = clampMaxTokens(body.options?.max_tokens || body.max_tokens || body._lucyPlan?.max_tokens, 4000);
+  const maxTokens = clampMaxTokens(body.options?.max_tokens || body.max_tokens || body._lucyPlan?.max_tokens, 1024);
 
   const finalMessages = [
     { role: "system", content: buildSystemPrompt(body) },
@@ -924,7 +949,7 @@ app.get("/", (req, res) => {
     message: "LUCY Core backend çalışıyor",
     brain: "DeepSeek",
     modes: ["fast", "think", "pro_fast", "pro_think"],
-    autoWeb: true,
+    autoWeb: false,
     elevenLabs: true,
     tools: false,
     export: false,
@@ -947,18 +972,16 @@ app.get("/api/models", (req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   try {
-
     const body = req.body || {};
-    const plan = await planLucyRequestWithDeepSeek(body);
-    const plannedBody = { ...body, _lucyPlan: plan, max_tokens: body.max_tokens || body.options?.max_tokens || plan.max_tokens };
 
-    const liveAnswer = await answerLiveWebIfNeeded(plannedBody, plan);
-    if (liveAnswer) {
+    if (isWebMode(body)) {
+      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: fastMaxTokens(body, 8000) }, { needs_web: true, query: getLastUserText(body.messages), max_tokens: fastMaxTokens(body, 8000) });
       return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
     }
 
-    const answer = await askDeepSeek(plannedBody);
-    res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(plannedBody), answer });
+    const fastBody = withWebOffHint(body);
+    const answer = await askDeepSeek(fastBody);
+    res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(fastBody), answer });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -973,11 +996,10 @@ app.post("/api/chat-stream", async (req, res) => {
 
   try {
     const body = req.body || {};
-    const plan = await planLucyRequestWithDeepSeek(body);
-    const plannedBody = { ...body, _lucyPlan: plan, max_tokens: body.max_tokens || body.options?.max_tokens || plan.max_tokens };
 
-    if (plan.needs_web) {
-      const liveWeb = await buildLiveWebBody(plannedBody, plan);
+    if (isWebMode(body)) {
+      const webPlan = { needs_web: true, query: getLastUserText(body.messages), max_tokens: fastMaxTokens(body, 8000) };
+      const liveWeb = await buildLiveWebBody({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
       if (liveWeb.instantAnswer) {
         writeSse(res, { delta: liveWeb.instantAnswer });
         writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
@@ -988,7 +1010,7 @@ app.post("/api/chat-stream", async (req, res) => {
       return res.end();
     }
 
-    await askDeepSeekStream(plannedBody, res);
+    await askDeepSeekStream(withWebOffHint(body), res);
     return res.end();
   } catch (error) {
     writeSse(res, { error: error.message || "Stream hatası" });
