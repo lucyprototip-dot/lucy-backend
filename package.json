@@ -1,0 +1,18 @@
+{
+  "name": "lucy-backend-zero-ds-only",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "system.js",
+  "scripts": {
+    "start": "node system.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.19.2"
+  }
+}
