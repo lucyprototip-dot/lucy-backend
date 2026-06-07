@@ -1,7 +1,7 @@
-const { normalizeMessages } = require("../utils/text");
+const { normalizeMessages, cleanAssistantContext } = require("../utils/text");
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 6;
-const MAX_MESSAGES = 8;
+const MAX_MESSAGES = 10;
 const sessions = new Map();
 
 function sessionKey(req, body = {}) {
@@ -27,62 +27,97 @@ function compact(messages = []) {
   return out.slice(-MAX_MESSAGES);
 }
 
-function getStored(req, body = {}) {
+function emptyItem() {
+  return { updatedAt: Date.now(), chatMessages: [], webMessages: [] };
+}
+
+function getItem(req, body = {}) {
   const key = sessionKey(req, body);
   const item = sessions.get(key);
-  if (!item) return [];
+  if (!item) return emptyItem();
   if (Date.now() - item.updatedAt > SESSION_TTL_MS) {
     sessions.delete(key);
-    return [];
+    return emptyItem();
   }
-  return item.messages || [];
+  return {
+    updatedAt: item.updatedAt,
+    chatMessages: item.chatMessages || item.messages || [],
+    webMessages: item.webMessages || [],
+  };
 }
 
-function save(req, body = {}, messages = []) {
+function saveItem(req, body = {}, item = emptyItem()) {
   const key = sessionKey(req, body);
-  sessions.set(key, { updatedAt: Date.now(), messages: compact(messages) });
+  sessions.set(key, {
+    updatedAt: Date.now(),
+    chatMessages: compact(item.chatMessages || []),
+    webMessages: compact(item.webMessages || []),
+  });
 }
 
-function shouldIgnoreStoredForThisMessage(messages = []) {
-  const incoming = normalizeMessages(messages);
-  const lastUser = [...incoming].reverse().find((message) => message.role === "user")?.content || "";
-  const value = String(lastUser || "").toLowerCase().trim();
+function lastUserText(messages = []) {
+  return [...normalizeMessages(messages)].reverse().find((m) => m.role === "user")?.content || "";
+}
+
+function isCasualReset(text = "") {
+  const value = String(text || "").toLowerCase().trim();
   if (!value) return false;
-  return /^(aşkım|askim|nasılsın|nasilsin|merhaba|selam|tamam|ok|boşver|bosver|sohbet edelim|seni özledim|seni ozledim|sikişken|arsız)/i.test(value);
+  return /^(aşkım|askim|nasılsın|nasilsin|merhaba|selam|boşver|bosver|siktiret|sohbet edelim|sohbete devam|seni özledim|seni ozledim|sikişken|arsız)/i.test(value);
 }
 
 function withServerContext(req, body = {}) {
   const incoming = normalizeMessages(body.messages);
-  if (shouldIgnoreStoredForThisMessage(incoming)) {
+  const item = getItem(req, body);
+  const webOn = body.webSearch === true || body.webSearch === "true" || body.webSearch === 1 || body.webSearch === "1";
+  const lastUser = lastUserText(incoming);
+
+  if (webOn) {
+    // Web açıkken sadece web takip bağlamı + gelen mesajlar. Normal sohbet kaynakları karışmaz.
+    return { ...body, messages: compact([...item.webMessages, ...incoming]) };
+  }
+
+  if (isCasualReset(lastUser)) {
+    // Normal sohbet anında web bağlamını tamamen dışarıda bırak.
     return { ...body, messages: incoming };
   }
-  const stored = getStored(req, body);
-  const merged = compact([...stored, ...incoming]);
-  return { ...body, messages: merged };
+
+  return { ...body, messages: compact([...item.chatMessages, ...incoming]) };
 }
 
 function cleanAssistantMemory(text = "") {
-  let value = String(text || "").trim();
-  value = value.replace(/\n\s*Kaynaklar\s*:[\s\S]*$/i, "").trim();
-  value = value.replace(/\n\s*Kaynak URL'?leri\s*:[\s\S]*$/i, "").trim();
-  value = value.replace(/https?:\/\/\S+/gi, "").trim();
-  return value.slice(0, 1200);
+  return cleanAssistantContext(text).slice(0, 1200);
 }
 
 function rememberExchange(req, originalBody = {}, assistantText = "", options = {}) {
-  const stored = getStored(req, originalBody);
+  const item = getItem(req, originalBody);
   const incoming = normalizeMessages(originalBody.messages);
   const lastUser = [...incoming].reverse().find((message) => message.role === "user");
+  const lastText = lastUser?.content || "";
+
+  if (options.web || options.webPending) {
+    const add = [];
+    if (lastUser) add.push(lastUser);
+    // Web assistant cevabını normal sohbete sokma; sadece kısa, kaynak temizli web takip bağlamında tut.
+    if (options.web && assistantText) {
+      const clean = cleanAssistantMemory(assistantText);
+      if (clean) add.push({ role: "assistant", content: clean });
+    }
+    saveItem(req, originalBody, { ...item, webMessages: compact([...item.webMessages, ...add]) });
+    return;
+  }
+
+  // Sohbete dönüşte web bağlamını sıfırla.
+  const clearWeb = isCasualReset(lastText);
   const add = [];
   if (lastUser) add.push(lastUser);
-
-  // Web cevapları kaynak/context taşır. Normal sohbet hafızasına web kaynaklarını sokma.
-  if (!options.web && assistantText) {
+  if (assistantText) {
     const clean = cleanAssistantMemory(assistantText);
     if (clean) add.push({ role: "assistant", content: clean });
   }
-
-  save(req, originalBody, [...stored, ...add]);
+  saveItem(req, originalBody, {
+    chatMessages: compact([...item.chatMessages, ...add]),
+    webMessages: clearWeb ? [] : item.webMessages,
+  });
 }
 
 module.exports = { withServerContext, rememberExchange };

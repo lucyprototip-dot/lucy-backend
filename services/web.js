@@ -160,6 +160,7 @@ function buildWebSearchQuery(text = "") {
   const clean = normalizeText(text)
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/https?:\/\/[^\s)\]}>'"]+/gi, " ")
+    .replace(/\b(aşkım|askim|canım|canim|bana|bak|bakalım|bajalım|şimdi|simdi|tekrar|lütfen|lutfen)\b/gi, " ")
     .replace(/[#*_>`~|{}[\]();]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -295,7 +296,18 @@ async function collectWebContext(query = "") {
   const urls = extractUrlsFromText(query);
   const searchQuery = buildWebSearchQuery(query);
   const pages = [];
-  for (const url of urls) pages.push(await fetchPageSummary(url));
+
+  // URL/domain verildiyse önce doğrudan o adres okunur. Arama sonuçlarıyla başka siteye savrulmaz.
+  for (const url of urls) {
+    const page = await fetchPageSummary(url);
+    if (page.text) pages.push(page);
+  }
+
+  const usefulDirectPages = pages.filter((item) => normalizeText(item.text).length >= 120);
+  if (urls.length && usefulDirectPages.length) {
+    return { urls, pages, usefulPages: usefulDirectPages, searchResults: [], searchQuery };
+  }
+
   const searchResults = await searchWeb(searchQuery).catch((error) => [{ title: "Arama hatası", text: error.message, url: "" }]);
   for (const item of searchResults.slice(0, LUCY_WEB_PAGE_READ_LIMIT)) {
     if (item.url && /^https?:\/\//i.test(item.url)) {
@@ -369,10 +381,6 @@ function needsWebForFreshData(body = {}) {
   const lastUser = normalizeText(users[users.length - 1] || "");
   if (!lastUser) return false;
 
-  const lower = lastUser.toLowerCase();
-  const isCasual = /^(aşkım|askim|nasılsın|nasilsin|merhaba|selam|tamam|ok|boşver|bosver|sohbet edelim|seni özledim|seni ozledim|sikişken|arsız)/i.test(lower);
-  if (isCasual) return false;
-
   const directFreshAsk = (
     /https?:\/\//i.test(lastUser) ||
     /\b[a-z0-9-]+\.[a-z]{2,}(?:\/|\b)/i.test(lastUser) ||
@@ -380,6 +388,10 @@ function needsWebForFreshData(body = {}) {
     /\b(canlı|canli|güncel|guncel|anlık|anlik|fiyat|fiyatı|fiyatları|stok|ürün|urun|ürünleri|urunleri|araştır|arastir|incele)\b/i.test(lastUser)
   );
   if (directFreshAsk) return true;
+
+  const lower = lastUser.toLowerCase();
+  const isCasual = /^(aşkım|askim|nasılsın|nasilsin|merhaba|selam|tamam|ok|boşver|bosver|siktiret|sohbet edelim|seni özledim|seni ozledim|sikişken|arsız)/i.test(lower);
+  if (isCasual) return false;
 
   const followUp = /\b(şimdi bak|simdi bak|tekrar bak|bak bakalım|bajalım|listele|daha detaylı|detaylı araştır|devam et)\b/i.test(lastUser);
   if (!followUp) return false;

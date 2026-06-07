@@ -35,23 +35,28 @@ app.post("/api/chat", async (req, res) => {
     const body = withServerContext(req, originalBody);
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
 
-    if (isWebMode(body)) {
-      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: fastMaxTokens(body, 8000) });
+    const webOn = isWebMode(originalBody);
+
+    if (webOn) {
+      const liveAnswer = await answerLiveWebIfNeeded({ ...body, webSearch: true, max_tokens: fastMaxTokens({ ...body, webSearch: true }, 8000) });
       if (liveAnswer) {
         rememberExchange(req, originalBody, liveAnswer, { web: true });
         return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
       }
     }
 
-    if (needsWebForFreshData(body)) {
-      rememberExchange(req, originalBody, WEB_OFF_MESSAGE);
+    if (!webOn && needsWebForFreshData(body)) {
+      rememberExchange(req, originalBody, WEB_OFF_MESSAGE, { webPending: true });
       return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(body), answer: WEB_OFF_MESSAGE });
     }
 
-    const fastBody = withWebOffHint(body);
-    const answer = await askDeepSeek(fastBody);
+    const finalBody = webOn
+      ? { ...body, systemHint: `${body.systemHint || ""}
+Normal sohbet modu. WEB_CONTEXT yoksa kaynak listesi yazma. Kaynak uydurma.`.trim(), max_tokens: fastMaxTokens({ ...body, webSearch: false }) }
+      : withWebOffHint(body);
+    const answer = await askDeepSeek(finalBody);
     rememberExchange(req, originalBody, answer);
-    return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(fastBody), answer });
+    return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(finalBody), answer });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -69,8 +74,10 @@ app.post("/api/chat-stream", async (req, res) => {
     const body = withServerContext(req, originalBody);
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
 
-    if (isWebMode(body)) {
-      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: fastMaxTokens(body, 8000) });
+    const webOn = isWebMode(originalBody);
+
+    if (webOn) {
+      const liveAnswer = await answerLiveWebIfNeeded({ ...body, webSearch: true, max_tokens: fastMaxTokens({ ...body, webSearch: true }, 8000) });
       if (liveAnswer) {
         writeSse(res, { delta: liveAnswer });
         writeSse(res, { done: true, answer: liveAnswer, provider: "live-web" });
@@ -79,14 +86,18 @@ app.post("/api/chat-stream", async (req, res) => {
       }
     }
 
-    if (needsWebForFreshData(body)) {
+    if (!webOn && needsWebForFreshData(body)) {
       writeSse(res, { delta: WEB_OFF_MESSAGE });
       writeSse(res, { done: true, answer: WEB_OFF_MESSAGE });
-      rememberExchange(req, originalBody, WEB_OFF_MESSAGE);
+      rememberExchange(req, originalBody, WEB_OFF_MESSAGE, { webPending: true });
       return res.end();
     }
 
-    const answer = await askDeepSeekStream(withWebOffHint(body), res);
+    const finalBody = webOn
+      ? { ...body, systemHint: `${body.systemHint || ""}
+Normal sohbet modu. WEB_CONTEXT yoksa kaynak listesi yazma. Kaynak uydurma.`.trim(), max_tokens: fastMaxTokens({ ...body, webSearch: false }) }
+      : withWebOffHint(body);
+    const answer = await askDeepSeekStream(finalBody, res);
     rememberExchange(req, originalBody, answer);
     return res.end();
   } catch (error) {
