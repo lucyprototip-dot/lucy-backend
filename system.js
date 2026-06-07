@@ -338,25 +338,26 @@ function buildSystemPrompt(body = {}) {
     "Tool sonuçları backend tarafından lucy-widget olarak ekrana kart şeklinde render edilir."
   ].join("\n"));
 
-    if (listLoadedTools().length) {
+  parts.push([
+    "=== DS FIRST INTENT ROUTER ===",
+    "Backend artık kelime/regex/typo ile tool seçmez. Tool kararı sadece senin aşağıdaki JSON kontratındaki needs_tool alanından gelir.",
+    "Kullanıcıyla normal konuşurken de sadece JSON döndür. Backend kullanıcıya sadece reply alanını gösterir; JSON kullanıcıya basılmaz.",
+    "JSON dışında açıklama, markdown fence, tool_call, ekstra metin yazma.",
+    "Kontrat:",
+    '{"reply":"kullanıcıya gösterilecek doğal cevap","intent":"chat|create_pdf|create_excel|create_document|create_zip|create_chart|calculate|read_web|time|other","needs_tool":false,"tool":null,"confidence":0.0,"tool_input":{}}',
+    "Sohbet, açıklama, fikir, kod, tabloyu chat içinde yazma gibi işlerde needs_tool=false yap.",
+    "PDF/Excel/ZIP/DOCX/grafik/saat/web/calculator gibi gerçek backend işi açıkça gerekiyorsa needs_tool=true yap ve tool alanına sadece şu adlardan birini yaz: pdf, excel, document, zip, chartData, calculator, time, webFetch, mermaid, qr, ocr, textStats, fileManager, mail, whatsapp, telegram.",
+    'Tool için gerekli içeriği tool_input içine koy. Örnek PDF: {"title":"Rapor","text":"...rapor metni...","filename":"rapor.pdf"}.',
+    "Emin değilsen needs_tool=false yap ve reply içinde kısa net soru sor.",
+    "Hazırladım/yaptım deme; backend tool çalıştırırsa son durumu backend ekler."
+  ].join("\n"));
+
+  if (process.env.LUCY_LEGACY_TOOL_PROMPT === "true" && listLoadedTools().length) {
     const toolList = listLoadedTools().map((tool) => tool.name).join(", ");
     parts.push([
-      "=== LUCY TOOL ENGINE ===",
+      "=== LEGACY LUCY TOOL ENGINE ===",
       `Yüklü tool'lar: ${toolList}`,
-      "Tool kararını backend generic AI planner verir. Sen komut ezberleme, ham JSON üretmeye çalışma.",
-      "Kullanıcı bilgi soruyorsa veya sohbet ediyorsa normal cevap ver; tool kullanma.",
-      "Kullanıcı sadece mevcut bir artifact/dosya/metin üzerinde işlem istiyorsa kısa ve temiz niyet metniyle cevap ver; backend tool'u çalıştırır.",
-      "Ama kullanıcı yeni içerik üretip bunu PDF/Word/Excel/dosya olarak istiyorsa, önce ekrana yazılabilecek temiz nihai içeriği üret. 'Hazırlayıp göndereceğim', 'PDF olarak ileteceğim', 'hemen hazırlıyorum' gibi vaat/ara cevap yazma; backend bu temiz içeriği dosyaya dönüştürür.",
-      "Örnek: 'Almanya hakkında kısa rapor hazırla ve PDF olarak ver' isteğinde Almanya raporunun gövdesini yaz; sadece 'Almanya raporunu PDF olarak hazırlayıp sana ileteceğim' deme.",
-      "Belirsiz referanslarda uydurma yapma: 'Aşkım bunu tam anlayamadım. Biraz daha detay verir misin?' veya 'Hangisini kastettin?' diye sor.",
-      "Yapılmayan iş için 'hazırladım/yaptım' deme. Raw HTML, raw JSON, tool_call veya kod sızıntısı gösterme.",
-      "Kullanıcı sadece tablo isterse format sorma; tabloyu doğrudan sohbet içinde markdown tablo olarak oluştur.",
-      "Kullanıcı 'burada/burda yap' derse önceki format sorusunun cevabı say ve işi sohbet içinde yap.",
-      "Kendi yazdığın tabloyu, grafiği, dosyayı ve önceki çıktıları konuşma boyunca hatırla; 'bu tablo', 'senin yazdığın', 'ilk tablo', 'bunu' referanslarını ona bağla.",
-      "Kullanıcı tabloya emoji/görsel ekle derse önce son tabloyu düzenle; gerçek görsel yoksa uygun emoji/URL/yer tutucu ekle.",
-      "Tabloyu grafik yaparken satırları veri noktası kabul et; Ürün/Ay/Kategori label, Toplam/Fiyat/Tutar/Değer value olsun; kolon toplamlarını grafik verisi yapma.",
-      "HTML kodu ancak özellikle 'HTML kodunu ver' derse yaz.",
-      "Çoklu çıktı isteklerinde kullanıcı ne istediyse hepsinin üretilmesi backend tarafından planlanır; sen eksik çıktı vaat etme."
+      "Bu blok yalnızca LUCY_LEGACY_TOOL_PROMPT=true ise aktiftir. Normalde DS FIRST INTENT ROUTER kullanılır."
     ].join("\n"));
   }
 

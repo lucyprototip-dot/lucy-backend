@@ -50,8 +50,15 @@ function registerChatRoutes(app, deps) {
 
       const liveAnswer = await answerLiveWebIfNeeded(body);
       if (liveAnswer) {
-        writeSse(res, { delta: liveAnswer });
-        writeSse(res, { done: true, answer: liveAnswer, provider: "live-web" });
+        const livePayload = await executeToolCallsFromAnswer(liveAnswer, req);
+        if (livePayload.finalAnswer) writeSse(res, { delta: livePayload.finalAnswer });
+        writeSse(res, {
+          done: true,
+          answer: livePayload.finalAnswer,
+          toolCalls: livePayload.toolCalls,
+          toolResults: livePayload.toolResults,
+          provider: "live-web",
+        });
         return res.end();
       }
 
@@ -80,7 +87,15 @@ function registerChatRoutes(app, deps) {
 
       const liveAnswer = await answerLiveWebIfNeeded(req.body || {});
       if (liveAnswer) {
-        return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
+        const livePayload = await executeToolCallsFromAnswer(liveAnswer, req);
+        return res.json({
+          success: true,
+          provider: "live-web",
+          model: "google-duckduckgo-deepseek",
+          answer: livePayload.finalAnswer,
+          toolCalls: livePayload.toolCalls,
+          toolResults: livePayload.toolResults,
+        });
       }
 
       const answer = await askDeepSeek(req.body || {});
