@@ -19,8 +19,8 @@ function trace(label, data = {}) {
 }
 
 function isWebMode(body = {}) {
-  // Tek kaynak: frontend webSearch boolean. mode/modeId/web geçmişi web açamaz.
-  return body.webSearch === true || body.webSearch === "true" || body.webSearch === 1 || body.webSearch === "1";
+  // Tek kaynak: request body içindeki gerçek boolean webSearch bayrağı.
+  return body.webSearch === true;
 }
 
 function compactConversation(messages = [], limit = 10) {
@@ -28,6 +28,14 @@ function compactConversation(messages = [], limit = 10) {
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(-limit)
     .map((m) => `${m.role === "user" ? "Kullanıcı" : "Lucy"}: ${m.content}`)
+    .join("\n");
+}
+
+function compactUserIntentContext(messages = [], limit = 4) {
+  return normalizeMessages(messages)
+    .filter((m) => m.role === "user")
+    .slice(-limit)
+    .map((m) => `Kullanıcı: ${m.content}`)
     .join("\n");
 }
 
@@ -347,7 +355,7 @@ function isTrustedMarketSource(item = {}) {
 }
 
 function hasTrustedMarketContext(web = {}) {
-  const candidates = [...(web.usefulPages || []), ...(web.searchResults || [])];
+  const candidates = web.trustedMarketPages || [];
   const trusted = candidates.filter(isTrustedMarketSource);
   const joined = trusted.map((item) => `${item.title || ""}\n${item.text || ""}\n${item.url || ""}`).join("\n");
   return trusted.length > 0 && /\d/.test(joined);
@@ -373,14 +381,19 @@ async function resolveWebSearchText(body = {}, plan = {}) {
 }
 
 async function buildLiveWebBody(body = {}, plan = {}) {
-  const conversation = compactConversation(body.messages, 10);
   const lastUserText = getLastUserText(body.messages);
   const searchText = await resolveWebSearchText(body, plan);
   const web = await collectWebContext(searchText);
+  const marketQuery = isLiveMarketQuery(`${lastUserText}\n${searchText}`);
+  const trustedMarketPages = marketQuery ? web.usefulPages.filter(isTrustedMarketSource) : [];
+  web.trustedMarketPages = trustedMarketPages;
+  const sourcePages = marketQuery ? trustedMarketPages : web.usefulPages;
+  const sourceResults = marketQuery ? [] : web.searchResults;
+  const intentContext = compactUserIntentContext(body.messages, 1);
   const contextItems = [];
 
-  web.usefulPages.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 2400)}`));
-  web.searchResults.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title}\nURL: ${item.url || "yok"}\nÖzet:\n${item.text || ""}`));
+  sourcePages.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 2400)}`));
+  sourceResults.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title}\nURL: ${item.url || "yok"}\nÖzet:\n${item.text || ""}`));
 
   trace("web.context", { searchText, sourceCount: contextItems.length, urls: web.urls, directUrlMode: web.directUrlMode === true, searchResults: web.searchResults.slice(0, 3).map((r) => ({ title: r.title, url: r.url })) });
 
@@ -388,14 +401,14 @@ async function buildLiveWebBody(body = {}, plan = {}) {
     return { instantAnswer: "Web açık aşkım ama güvenilir kaynak bulamadım. Kaynak yoksa kur, fiyat veya canlı veri söyleyemem." };
   }
 
-  if (isLiveMarketQuery(`${lastUserText}\n${searchText}`) && !hasTrustedMarketContext(web)) {
+  if (marketQuery && !hasTrustedMarketContext(web)) {
     return { instantAnswer: "Web açık aşkım ama güvenilir canlı finans kaynağı bulamadım. Güvenilir kaynak olmadan döviz, coin, fiyat veya kur sayısı söylemem doğru olmaz." };
   }
 
   const webContext = contextItems.slice(0, 5).map((item) => limitText(item, 2600)).join("\n\n---\n\n");
   const finalUserContent = [
-    "Konuşma bağlamı (yalnızca niyeti ve takip sorusunu anlamak için; bilgi kaynağı değildir):",
-    conversation,
+    "Kullanıcı bağlamı (yalnızca niyeti anlamak için; bilgi kaynağı değildir):",
+    intentContext || `Kullanıcı: ${lastUserText}`,
     "",
     `Kullanıcının son isteği: ${lastUserText}`,
     `Web arama sorgusu: ${searchText}`,

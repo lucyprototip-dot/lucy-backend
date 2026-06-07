@@ -35,7 +35,7 @@ app.post("/api/chat", async (req, res) => {
     const body = withServerContext(req, originalBody);
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
 
-    if (isWebMode(body)) {
+    if (isWebMode(originalBody)) {
       const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
       const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
       rememberExchange(req, originalBody, liveAnswer);
@@ -68,7 +68,7 @@ app.post("/api/chat-stream", async (req, res) => {
     const body = withServerContext(req, originalBody);
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
 
-    if (isWebMode(body)) {
+    if (isWebMode(originalBody)) {
       const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
       const liveWeb = await buildLiveWebBody({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
       if (liveWeb.instantAnswer) {
