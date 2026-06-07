@@ -6,7 +6,7 @@ dotenv.config();
 
 const { pickDeepSeekModel, modelList } = require("./core/models");
 const { withWebOffHint } = require("./core/prompt");
-const { fastMaxTokens, getLastUserText } = require("./utils/text");
+const { fastMaxTokens, normalizeMessages } = require("./utils/text");
 const { askDeepSeek, askDeepSeekStream, writeSse } = require("./services/deepseek");
 const { isWebMode, isLiveMarketQuery, answerLiveWebIfNeeded, buildLiveWebBody } = require("./services/web");
 const { speak } = require("./services/voice");
@@ -20,6 +20,29 @@ const PORT = process.env.PORT || 5050;
 const TRACE = String(process.env.LUCY_TRACE || "").toLowerCase() === "true";
 const WEB_OFF_LIVE_DATA_MESSAGE = "WEB arama kapalı aşkım. Açarsan canlı veriye bakabilirim.";
 function trace(label, data = {}) { if (TRACE) { try { console.log(`[LUCY_TRACE] ${label}`, JSON.stringify(data).slice(0, 4000)); } catch {} } }
+
+function isLiveDataIntentText(text = "") {
+  const value = String(text || "").toLowerCase();
+  return isLiveMarketQuery(value) || /\b(haber|son dakika|güncel haber|guncel haber)\b/i.test(value);
+}
+
+function isWebOffLiveDataFollowup(text = "") {
+  const value = String(text || "")
+    .toLowerCase()
+    .replace(/[.!?…]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return /^(açtım|actim|açtım aşkım|actim askim|şimdi açtım|simdi actim|şimdi açtım aşkım|simdi actim askim|bak|bak aşkım|bak askim|hadi bak|bakabilir misin|devam|tamam)$/.test(value);
+}
+
+function shouldBlockWebOffLiveDataRequest(messages = []) {
+  const users = normalizeMessages(messages).filter((message) => message.role === "user");
+  const last = users[users.length - 1]?.content || "";
+  if (!last) return false;
+  if (isLiveDataIntentText(last)) return true;
+  if (!isWebOffLiveDataFollowup(last)) return false;
+  return users.slice(0, -1).reverse().slice(0, 4).some((message) => isLiveDataIntentText(message.content));
+}
 
 app.get("/", (req, res) => {
   res.json({ success: true, message: "LUCY Core backend çalışıyor", brain: "DeepSeek", modes: ["fast", "think", "pro_fast", "pro_think"], webSearch: true, elevenLabs: true, port: PORT });
@@ -42,7 +65,7 @@ app.post("/api/chat", async (req, res) => {
       return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
     }
 
-    if (isLiveMarketQuery(getLastUserText(body.messages))) {
+    if (shouldBlockWebOffLiveDataRequest(body.messages)) {
       rememberExchange(req, originalBody, WEB_OFF_LIVE_DATA_MESSAGE);
       return res.json({ success: true, provider: "web-off-guard", model: null, answer: WEB_OFF_LIVE_DATA_MESSAGE });
     }
@@ -82,7 +105,7 @@ app.post("/api/chat-stream", async (req, res) => {
       return res.end();
     }
 
-    if (isLiveMarketQuery(getLastUserText(body.messages))) {
+    if (shouldBlockWebOffLiveDataRequest(body.messages)) {
       writeSse(res, { delta: WEB_OFF_LIVE_DATA_MESSAGE });
       writeSse(res, { done: true, answer: WEB_OFF_LIVE_DATA_MESSAGE, provider: "web-off-guard" });
       rememberExchange(req, originalBody, WEB_OFF_LIVE_DATA_MESSAGE);

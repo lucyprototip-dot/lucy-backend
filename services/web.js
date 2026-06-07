@@ -64,12 +64,8 @@ function isLowInformationQuery(query = "") {
 
 function strengthenQueryWithContext(query = "", body = {}) {
   let out = normalizeText(query);
-  const fallback = fallbackQueryFromConversation(body.messages);
-  const recentDomain = extractRecentDomain(body.messages);
+  const fallback = normalizeText(getLastUserText(body.messages));
   if (isLowInformationQuery(out) && fallback) out = fallback;
-  if (recentDomain && !out.toLowerCase().includes(recentDomain.toLowerCase())) {
-    out = normalizeText(`${recentDomain} ${out}`);
-  }
   return out || fallback;
 }
 
@@ -362,7 +358,7 @@ function hasTrustedMarketContext(web = {}) {
 }
 
 function shouldUseWebPlannerForQuery(query = "", body = {}) {
-  const fallback = strengthenQueryWithContext(query || fallbackQueryFromConversation(body.messages), body);
+  const fallback = normalizeText(query || getLastUserText(body.messages));
   if (!fallback) return false;
   if (extractUrlsFromText(fallback).length) return false;
   return isLowInformationQuery(fallback);
@@ -372,9 +368,9 @@ async function resolveWebSearchText(body = {}, plan = {}) {
   const plannedQuery = normalizeText(plan.query || "");
   if (plannedQuery) return strengthenQueryWithContext(plannedQuery, body);
 
-  const fallbackQuery = fallbackQueryFromConversation(body.messages);
-  if (!shouldUseWebPlannerForQuery(fallbackQuery, body)) {
-    return strengthenQueryWithContext(fallbackQuery, body);
+  const lastUserQuery = normalizeText(getLastUserText(body.messages));
+  if (!shouldUseWebPlannerForQuery(lastUserQuery, body)) {
+    return strengthenQueryWithContext(lastUserQuery, body);
   }
 
   return strengthenQueryWithContext(await planWebSearchQueryWithDeepSeek(body), body);
