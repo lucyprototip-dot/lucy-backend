@@ -18,6 +18,34 @@ async function callDeepSeek(payload, apiKey) {
   return { response, data };
 }
 
+
+function looksLikeInternalAnswer(text = "") {
+  const value = String(text || "").toLowerCase();
+  if (!value.trim()) return true;
+  return (
+    value.includes("kullanıcı ") && value.includes("sormuş") ||
+    value.includes("yanıt verirken") ||
+    value.includes("cevap verirken") ||
+    value.includes("web arama kapalı ama açık") ||
+    value.includes("hadi bakalım") && value.includes("doğru ve güncel")
+  );
+}
+
+async function retryFinalAnswer(basePayload, apiKey) {
+  const retryPayload = {
+    ...basePayload,
+    stream: false,
+    max_tokens: Math.min(Number(basePayload.max_tokens || 1024), 1200),
+    messages: [
+      ...basePayload.messages,
+      { role: "user", content: "Önceki yanıtın iç analiz gibi oldu. Sadece kullanıcıya verilecek nihai cevabı kısa, net ve Türkçe yaz. İç plan, analiz, gerekçe yazma." }
+    ]
+  };
+  const { response, data } = await callDeepSeek(retryPayload, apiKey);
+  if (!response.ok) return "";
+  return sanitizeLucyAnswer(data?.choices?.[0]?.message?.content || "");
+}
+
 async function askDeepSeek(body = {}) {
   const deepSeekKey = envValue("DEEPSEEK_API_KEY") || envValue("DEEPSEEK_API_KEY_ALT");
   if (!deepSeekKey) throw new Error("DEEPSEEK_API_KEY Railway Variables içinde yok.");
@@ -44,7 +72,12 @@ async function askDeepSeek(body = {}) {
 
   if (!response.ok) throw new Error(data?.error?.message || data?.message || `DeepSeek API hatası: ${response.status}`);
   const choiceMessage = data?.choices?.[0]?.message || {};
-  return sanitizeLucyAnswer(choiceMessage.content || "Cevap üretemedim.");
+  let answer = sanitizeLucyAnswer(choiceMessage.content || "");
+  if (looksLikeInternalAnswer(answer)) {
+    const retry = await retryFinalAnswer(basePayload, deepSeekKey);
+    if (retry && !looksLikeInternalAnswer(retry)) answer = retry;
+  }
+  return answer || "Cevap üretemedim.";
 }
 
 function extractDeepSeekStreamDelta(data = {}) {

@@ -1,7 +1,7 @@
 const { normalizeMessages } = require("../utils/text");
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 6;
-const MAX_MESSAGES = 14;
+const MAX_MESSAGES = 8;
 const sessions = new Map();
 
 function sessionKey(req, body = {}) {

@@ -32,11 +32,37 @@ function compactConversation(messages = [], limit = 10) {
 }
 
 function fallbackQueryFromConversation(messages = []) {
-  const users = normalizeMessages(messages).filter((m) => m.role === "user").map((m) => m.content);
+  const normalized = normalizeMessages(messages);
+  const users = normalized.filter((m) => m.role === "user").map((m) => m.content);
   if (!users.length) return "";
   const last = users[users.length - 1] || "";
   const previous = [...users].slice(0, -1).reverse().find((t) => normalizeText(t).length > 3) || "";
   return normalizeText(previous ? `${previous}\nTakip: ${last}` : last);
+}
+
+function extractRecentDomain(messages = []) {
+  const text = normalizeMessages(messages).slice(-8).map((m) => m.content).join("\n");
+  const match = text.match(/\b([a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=#:+]*)?/i);
+  return match ? match[0].replace(/[.,;:!?]+$/, "") : "";
+}
+
+function isLowInformationQuery(query = "") {
+  const clean = normalizeText(query).replace(/https?:\/\/[^\s]+/gi, "");
+  if (!clean) return true;
+  if (/\b([a-z0-9-]+\.)+[a-z]{2,}/i.test(clean)) return false;
+  const words = clean.split(/\s+/).filter(Boolean);
+  return words.length <= 3 && clean.length <= 40;
+}
+
+function strengthenQueryWithContext(query = "", body = {}) {
+  let out = normalizeText(query);
+  const fallback = fallbackQueryFromConversation(body.messages);
+  const recentDomain = extractRecentDomain(body.messages);
+  if (isLowInformationQuery(out) && fallback) out = fallback;
+  if (recentDomain && !out.toLowerCase().includes(recentDomain.toLowerCase())) {
+    out = normalizeText(`${recentDomain} ${out}`);
+  }
+  return out || fallback;
 }
 
 async function planWebSearchQueryWithDeepSeek(body = {}) {
@@ -57,8 +83,10 @@ async function planWebSearchQueryWithDeepSeek(body = {}) {
         content: [
           "Sen sadece web arama sorgusu üreten iç planlayıcısın.",
           "Kullanıcıya cevap yazma.",
-          "Konuşmanın tamamını yorumla; son mesaj 'açtım', 'bak', 'tekrar bak', 'dedim ya', 'daha detaylı' gibi takip ise önceki somut isteğe bağla.",
+          "Konuşmanın tamamını yorumla; son mesaj tek başına anlamsızsa önceki somut isteğe bağla.",
+          "Önceki konuşmada site/domain/firma/para birimi geçiyorsa takip isteğini ona bağla.",
           "Yazım hatalarını bağlama göre düzelt.",
+          "Kullanıcıya cevap yazma, yalnızca arama motoru sorgusu üret.",
           "Cevap sadece JSON olsun.",
           "Şema: {\"query\":\"arama sorgusu\",\"reason\":\"kısa iç neden\"}",
           "query arama motoruna uygun, kısa ve net Türkçe olsun."
@@ -78,12 +106,13 @@ async function planWebSearchQueryWithDeepSeek(body = {}) {
     const raw = data?.choices?.[0]?.message?.content || "";
     const jsonText = raw.match(/\{[\s\S]*\}/)?.[0] || "";
     const parsed = JSON.parse(jsonText);
-    const query = normalizeText(parsed?.query || "");
-    trace("web.plan", { query, reason: parsed?.reason || "", fallbackQuery });
+    const query = strengthenQueryWithContext(parsed?.query || "", body);
+    trace("web.plan", { query, rawQuery: parsed?.query || "", reason: parsed?.reason || "", fallbackQuery });
     return query || fallbackQuery;
   } catch (error) {
-    trace("web.plan.error", { error: error.message, fallbackQuery });
-    return fallbackQuery;
+    const query = strengthenQueryWithContext(fallbackQuery, body);
+    trace("web.plan.error", { error: error.message, fallbackQuery: query });
+    return query;
   }
 }
 
@@ -274,7 +303,7 @@ function hasNumericOrSubstantialContext(contextItems = []) {
 async function buildLiveWebBody(body = {}, plan = {}) {
   const conversation = compactConversation(body.messages, 10);
   const lastUserText = getLastUserText(body.messages);
-  const searchText = plan.query || await planWebSearchQueryWithDeepSeek(body);
+  const searchText = strengthenQueryWithContext(plan.query || await planWebSearchQueryWithDeepSeek(body), body);
   const web = await collectWebContext(searchText);
   const contextItems = [];
 
@@ -284,7 +313,7 @@ async function buildLiveWebBody(body = {}, plan = {}) {
   trace("web.context", { searchText, sourceCount: contextItems.length, urls: web.urls, searchResults: web.searchResults.slice(0, 3).map((r) => ({ title: r.title, url: r.url })) });
 
   if (!contextItems.length || !hasNumericOrSubstantialContext(contextItems)) {
-    return { instantAnswer: "Web açık ama güvenilir/okunabilir kaynak bulamadım aşkım. Kaynak yoksa sayı veya canlı veri söyleyemem." };
+    return { instantAnswer: "Web açık aşkım ama güvenilir kaynak bulamadım. Kaynak yoksa kur, fiyat veya canlı veri söyleyemem." };
   }
 
   const webContext = contextItems.slice(0, 5).map((item) => limitText(item, 2600)).join("\n\n---\n\n");
@@ -300,6 +329,7 @@ async function buildLiveWebBody(body = {}, plan = {}) {
     "Kaynakta olmayan kur, fiyat, oran, tarih veya sayı yazma.",
     "Eski sohbet hafızasındaki kur/fiyat/sayıları yok say; canlı/güncel veri sadece WEB_CONTEXT'ten alınır.",
     "İç analiz, plan, akıl yürütme, 'kullanıcı şöyle demiş' açıklaması yazma.",
+    "Asla kendi düşünme sürecini, planını veya görev yorumunu yazma.",
     "Sadece kullanıcıya verilecek nihai cevabı Türkçe yaz.",
     "Sonunda kaynak URL'lerini kısa listele.",
     "",
