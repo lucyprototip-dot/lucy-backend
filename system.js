@@ -6,7 +6,7 @@ dotenv.config();
 
 const { pickDeepSeekModel, modelList } = require("./core/models");
 const { withWebOffHint } = require("./core/prompt");
-const { getLastUserText, fastMaxTokens } = require("./utils/text");
+const { fastMaxTokens } = require("./utils/text");
 const { askDeepSeek, askDeepSeekStream, writeSse } = require("./services/deepseek");
 const { isWebMode, answerLiveWebIfNeeded, buildLiveWebBody } = require("./services/web");
 const { speak } = require("./services/voice");
@@ -30,7 +30,7 @@ app.post("/api/chat", async (req, res) => {
     const body = req.body || {};
 
     if (isWebMode(body)) {
-      const webPlan = { needs_web: true, query: getLastUserText(body.messages), max_tokens: fastMaxTokens(body, 8000) };
+      const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
       const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
       return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
     }
@@ -54,7 +54,7 @@ app.post("/api/chat-stream", async (req, res) => {
     const body = req.body || {};
 
     if (isWebMode(body)) {
-      const webPlan = { needs_web: true, query: getLastUserText(body.messages), max_tokens: fastMaxTokens(body, 8000) };
+      const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
       const liveWeb = await buildLiveWebBody({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
       if (liveWeb.instantAnswer) {
         writeSse(res, { delta: liveWeb.instantAnswer });

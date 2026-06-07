@@ -77,10 +77,10 @@ function fastMaxTokens(body = {}, fallback = 1024) {
   const lower = last.toLowerCase();
   if (lower.includes("20 sayfa") || lower.includes("roman") || lower.includes("uzun hikaye") || lower.includes("çok uzun")) return 16000;
   if (lower.includes("uzun yaz") || lower.includes("detaylı") || lower.includes("detayli") || lower.includes("rapor")) return 8000;
-  if (len <= 25) return 512;
-  if (len <= 120) return 1024;
-  if (len <= 500) return 3000;
-  return 5000;
+  if (len <= 25) return 384;
+  if (len <= 120) return 768;
+  if (len <= 500) return 2000;
+  return 4000;
 }
 
 module.exports = {
