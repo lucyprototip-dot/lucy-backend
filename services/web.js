@@ -1,5 +1,6 @@
 const { envValue, numberEnv } = require("../core/env");
 const { DEEPSEEK_MODEL_FAST } = require("../core/models");
+const { logRouteDebug } = require("../core/payloadDebug");
 const { askDeepSeek } = require("./deepseek");
 const {
   normalizeText,
@@ -580,19 +581,54 @@ async function buildLiveWebBody(body = {}, plan = {}) {
   if (!contextItems.length || !hasNumericOrSubstantialContext(contextItems)) {
     if (isAltinkaynakRequest(`${lastUserText}\n${searchText}`)) {
       trace("web.altinkaynak.unreadable", { searchText, urls: web.urls, pages: web.pages?.map((item) => ({ url: item.url, title: item.title, error: item.error, textLength: String(item.text || "").length })) || [] });
+      logRouteDebug({
+        body: { ...body, _lucyRouteDebug: { ...(body._lucyRouteDebug || {}), route: "live-web", provider: "live-web", noSourceGuardRoute: true, webFinalPromptAddons: false } },
+        route: "live-web",
+        provider: "live-web",
+        event: "route.no_source_guard",
+        extra: { noSourceReason: "altinkaynak_unreadable" },
+      });
       return { instantAnswer: "Altınkaynak sayfasından güvenilir okunabilir veri çekemedim. Eski döviz.com veya başka sohbet kaynağına göre sayı veremem." };
     }
     if (cryptoQuery) {
+      logRouteDebug({
+        body: { ...body, _lucyRouteDebug: { ...(body._lucyRouteDebug || {}), route: "live-web", provider: "live-web", noSourceGuardRoute: true, webFinalPromptAddons: false } },
+        route: "live-web",
+        provider: "live-web",
+        event: "route.no_source_guard",
+        extra: { noSourceReason: "crypto_no_trusted_context" },
+      });
       return { instantAnswer: "Güvenilir canlı kripto verisi bulamadım aşkım. Kaynak yoksa fiyat söyleyemem." };
     }
+    logRouteDebug({
+      body: { ...body, _lucyRouteDebug: { ...(body._lucyRouteDebug || {}), route: "live-web", provider: "live-web", noSourceGuardRoute: true, webFinalPromptAddons: false } },
+      route: "live-web",
+      provider: "live-web",
+      event: "route.no_source_guard",
+      extra: { noSourceReason: "empty_or_weak_context" },
+    });
     return { instantAnswer: "Web açık aşkım ama güvenilir kaynak bulamadım. Kaynak yoksa kur, fiyat veya canlı veri söyleyemem." };
   }
 
   if (cryptoQuery && !hasTrustedCryptoContext(web)) {
+    logRouteDebug({
+      body: { ...body, _lucyRouteDebug: { ...(body._lucyRouteDebug || {}), route: "live-web", provider: "live-web", noSourceGuardRoute: true, webFinalPromptAddons: false } },
+      route: "live-web",
+      provider: "live-web",
+      event: "route.no_source_guard",
+      extra: { noSourceReason: "crypto_untrusted_source" },
+    });
     return { instantAnswer: "Güvenilir canlı kripto verisi bulamadım aşkım. Kaynak yoksa fiyat söyleyemem." };
   }
 
   if (marketQuery && !hasTrustedMarketContext(web)) {
+    logRouteDebug({
+      body: { ...body, _lucyRouteDebug: { ...(body._lucyRouteDebug || {}), route: "live-web", provider: "live-web", noSourceGuardRoute: true, webFinalPromptAddons: false } },
+      route: "live-web",
+      provider: "live-web",
+      event: "route.no_source_guard",
+      extra: { noSourceReason: "market_untrusted_source" },
+    });
     return { instantAnswer: "Web açık aşkım ama güvenilir canlı finans kaynağı bulamadım. Güvenilir kaynak olmadan döviz, coin, fiyat veya kur sayısı söylemem doğru olmaz." };
   }
 
@@ -624,6 +660,7 @@ async function buildLiveWebBody(body = {}, plan = {}) {
     requestBody: {
       ...body,
       max_tokens: clampMaxTokens(plan.max_tokens || body.max_tokens || body.options?.max_tokens, 8000),
+      _lucyRouteDebug: { ...(body._lucyRouteDebug || {}), route: "live-web", provider: "live-web", webFinalPromptAddons: true },
       messages: [{ role: "user", content: finalUserContent }],
       systemHint: `${body.systemHint || ""}\nWeb modu aktif. Cevap final kanalındadır. İç analiz/planner/reasoning yazma. Kaynak dışı sayı veya canlı veri verme.`.trim(),
     },

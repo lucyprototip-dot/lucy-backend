@@ -11,6 +11,7 @@ const { askDeepSeek, askDeepSeekStream, writeSse } = require("./services/deepsee
 const { isWebMode, isLiveMarketQuery, shouldUseLiveWebRequest, answerLiveWebIfNeeded, buildLiveWebBody } = require("./services/web");
 const { speak } = require("./services/voice");
 const { withServerContext, rememberExchange } = require("./core/sessionMemory");
+const { logRouteDebug } = require("./core/payloadDebug");
 
 const app = express();
 app.use(cors());
@@ -135,6 +136,17 @@ function extractSourceFollowupAnswer(messages = []) {
   return "Son cevabımda tam kaynak URL görünmüyor aşkım. Kaynak net değilse bunu güvenilir canlı veri saymam; web açıkken yeniden kontrol edebilirim.";
 }
 
+function routeDebug(originalBody = {}, route = "", provider = "", extra = {}) {
+  return {
+    route,
+    provider,
+    webSearch: originalBody.webSearch === true,
+    mode: originalBody.apiMode || originalBody.mode || originalBody.modeId || null,
+    frontendSystemHintPresent: Boolean(String(originalBody.systemHint || "").trim()),
+    ...extra,
+  };
+}
+
 app.get("/", (req, res) => {
   res.json({ success: true, message: "LUCY Core backend çalışıyor", brain: "DeepSeek", modes: ["fast", "think", "pro_fast", "pro_think"], webSearch: true, elevenLabs: true, port: PORT });
 });
@@ -151,23 +163,45 @@ app.post("/api/chat", async (req, res) => {
 
     const sourceFollowupAnswer = extractSourceFollowupAnswer(body.messages);
     if (sourceFollowupAnswer) {
+      logRouteDebug({
+        body: { ...body, _lucyRouteDebug: routeDebug(originalBody, "source-followup", "source-followup", { sourceFollowupRoute: true }) },
+        route: "source-followup",
+        provider: "source-followup",
+        stream: false,
+        event: "route.source_followup",
+      });
       rememberExchange(req, originalBody, sourceFollowupAnswer);
       return res.json({ success: true, provider: "source-followup", model: null, answer: sourceFollowupAnswer });
     }
 
     if (isWebMode(originalBody) && shouldUseLiveWebRequest(body)) {
       const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
-      const liveAnswer = await answerLiveWebIfNeeded({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
+      const liveAnswer = await answerLiveWebIfNeeded({
+        ...body,
+        max_tokens: webPlan.max_tokens,
+        _lucyRouteDebug: routeDebug(originalBody, "live-web", "live-web", { webFinalPromptAddons: true }),
+      }, webPlan);
       rememberExchange(req, originalBody, liveAnswer);
       return res.json({ success: true, provider: "live-web", model: "google-duckduckgo-deepseek", answer: liveAnswer });
     }
 
     if (!isWebMode(originalBody) && shouldBlockWebOffLiveDataRequest(body.messages)) {
+      logRouteDebug({
+        body: { ...body, _lucyRouteDebug: routeDebug(originalBody, "web-off-guard", "web-off-guard", { webOffGuardRoute: true }) },
+        route: "web-off-guard",
+        provider: "web-off-guard",
+        stream: false,
+        event: "route.web_off_guard",
+      });
       rememberExchange(req, originalBody, WEB_OFF_LIVE_DATA_MESSAGE);
       return res.json({ success: true, provider: "web-off-guard", model: null, answer: WEB_OFF_LIVE_DATA_MESSAGE });
     }
 
-    const fastBody = isWebMode(originalBody) ? body : withWebOffHint(body);
+    const baseChatBody = isWebMode(originalBody) ? body : withWebOffHint(body);
+    const fastBody = {
+      ...baseChatBody,
+      _lucyRouteDebug: routeDebug(originalBody, "chat", "deepseek", { webOffHintApplied: !isWebMode(originalBody) }),
+    };
     const answer = await askDeepSeek(fastBody);
     rememberExchange(req, originalBody, answer);
     return res.json({ success: true, provider: "deepseek", model: pickDeepSeekModel(fastBody), answer });
@@ -190,6 +224,13 @@ app.post("/api/chat-stream", async (req, res) => {
 
     const sourceFollowupAnswer = extractSourceFollowupAnswer(body.messages);
     if (sourceFollowupAnswer) {
+      logRouteDebug({
+        body: { ...body, _lucyRouteDebug: routeDebug(originalBody, "source-followup", "source-followup", { sourceFollowupRoute: true }) },
+        route: "source-followup",
+        provider: "source-followup",
+        stream: true,
+        event: "route.source_followup",
+      });
       writeSse(res, { delta: sourceFollowupAnswer });
       writeSse(res, { done: true, answer: sourceFollowupAnswer, provider: "source-followup" });
       rememberExchange(req, originalBody, sourceFollowupAnswer);
@@ -198,7 +239,11 @@ app.post("/api/chat-stream", async (req, res) => {
 
     if (isWebMode(originalBody) && shouldUseLiveWebRequest(body)) {
       const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
-      const liveWeb = await buildLiveWebBody({ ...body, max_tokens: webPlan.max_tokens }, webPlan);
+      const liveWeb = await buildLiveWebBody({
+        ...body,
+        max_tokens: webPlan.max_tokens,
+        _lucyRouteDebug: routeDebug(originalBody, "live-web", "live-web", { webFinalPromptAddons: true }),
+      }, webPlan);
       if (liveWeb.instantAnswer) {
         writeSse(res, { delta: liveWeb.instantAnswer });
         writeSse(res, { done: true, answer: liveWeb.instantAnswer, provider: "live-web" });
@@ -211,13 +256,24 @@ app.post("/api/chat-stream", async (req, res) => {
     }
 
     if (!isWebMode(originalBody) && shouldBlockWebOffLiveDataRequest(body.messages)) {
+      logRouteDebug({
+        body: { ...body, _lucyRouteDebug: routeDebug(originalBody, "web-off-guard", "web-off-guard", { webOffGuardRoute: true }) },
+        route: "web-off-guard",
+        provider: "web-off-guard",
+        stream: true,
+        event: "route.web_off_guard",
+      });
       writeSse(res, { delta: WEB_OFF_LIVE_DATA_MESSAGE });
       writeSse(res, { done: true, answer: WEB_OFF_LIVE_DATA_MESSAGE, provider: "web-off-guard" });
       rememberExchange(req, originalBody, WEB_OFF_LIVE_DATA_MESSAGE);
       return res.end();
     }
 
-    const streamBody = isWebMode(originalBody) ? body : withWebOffHint(body);
+    const baseStreamBody = isWebMode(originalBody) ? body : withWebOffHint(body);
+    const streamBody = {
+      ...baseStreamBody,
+      _lucyRouteDebug: routeDebug(originalBody, "chat-stream", "deepseek", { webOffHintApplied: !isWebMode(originalBody) }),
+    };
     const answer = await askDeepSeekStream(streamBody, res);
     rememberExchange(req, originalBody, answer);
     return res.end();

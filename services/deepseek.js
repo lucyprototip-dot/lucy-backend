@@ -1,6 +1,7 @@
 const { envValue } = require("../core/env");
 const { buildSystemPrompt } = require("../core/prompt");
 const { pickDeepSeekModel, wantsDeepSeekThinking } = require("../core/models");
+const { buildDebugMetadata, logPromptDebug } = require("../core/payloadDebug");
 const {
   normalizeMessages,
   sanitizeLucyAnswer,
@@ -34,7 +35,7 @@ function looksLikeInternalAnswer(text = "") {
   );
 }
 
-async function retryFinalAnswer(basePayload, apiKey) {
+async function retryFinalAnswer(basePayload, apiKey, debugContext = {}) {
   const retryPayload = {
     ...basePayload,
     stream: false,
@@ -44,6 +45,13 @@ async function retryFinalAnswer(basePayload, apiKey) {
       { role: "user", content: "Önceki yanıtın iç analiz gibi oldu. Sadece kullanıcıya verilecek nihai cevabı kısa, net ve Türkçe yaz. İç plan, analiz, gerekçe yazma." }
     ]
   };
+  logPromptDebug(buildDebugMetadata({
+    ...debugContext,
+    payload: retryPayload,
+    stream: false,
+    event: "deepseek.retry_payload",
+    extra: { retryFinalAnswer: true },
+  }));
   const { response, data } = await callDeepSeek(retryPayload, apiKey);
   if (!response.ok) return "";
   return sanitizeLucyAnswer(data?.choices?.[0]?.message?.content || "");
@@ -69,7 +77,7 @@ function buildLengthContinuationMessages(messages = [], answer = "") {
   ];
 }
 
-async function continueAnswerIfLength(basePayload, apiKey, firstAnswer = "", firstFinishReason = "") {
+async function continueAnswerIfLength(basePayload, apiKey, firstAnswer = "", firstFinishReason = "", debugContext = {}) {
   let answer = firstAnswer;
   let finishReason = firstFinishReason;
 
@@ -79,6 +87,16 @@ async function continueAnswerIfLength(basePayload, apiKey, firstAnswer = "", fir
       stream: false,
       messages: buildLengthContinuationMessages(basePayload.messages, answer),
     };
+    logPromptDebug(buildDebugMetadata({
+      ...debugContext,
+      payload: continuationPayload,
+      stream: false,
+      event: "deepseek.length_continue_payload",
+      extra: {
+        lengthContinueAttempt: i + 1,
+        lengthContinueSystemPreserved: continuationPayload.messages?.[0]?.role === "system",
+      },
+    }));
     const { response, data } = await callDeepSeek(continuationPayload, apiKey);
     if (!response.ok) break;
     const next = sanitizeLucyAnswer(data?.choices?.[0]?.message?.content || "");
@@ -104,15 +122,31 @@ async function askDeepSeek(body = {}) {
 
   const finalMessages = [{ role: "system", content: buildSystemPrompt(body) }, ...cleanMessages];
   const basePayload = buildDeepSeekPayload({ model, messages: finalMessages, temperature, maxTokens, stream: false });
+  const debugContext = {
+    body,
+    route: body._lucyRouteDebug?.route || "chat",
+    provider: body._lucyRouteDebug?.provider || "deepseek",
+    model,
+  };
+  logPromptDebug(buildDebugMetadata({
+    ...debugContext,
+    payload: basePayload,
+    stream: false,
+    event: "deepseek.payload",
+    extra: {
+      lengthContinueConfigured: LENGTH_CONTINUE_LIMIT,
+      lengthContinueSystemPreservedIfTriggered: basePayload.messages?.[0]?.role === "system",
+    },
+  }));
 
   let { response, data } = await callDeepSeek(basePayload, deepSeekKey);
 
   if (!response.ok) throw new Error(data?.error?.message || data?.message || `DeepSeek API hatası: ${response.status}`);
   const choiceMessage = data?.choices?.[0]?.message || {};
   let answer = sanitizeLucyAnswer(choiceMessage.content || "");
-  answer = await continueAnswerIfLength(basePayload, deepSeekKey, answer, getFinishReason(data));
+  answer = await continueAnswerIfLength(basePayload, deepSeekKey, answer, getFinishReason(data), debugContext);
   if (looksLikeInternalAnswer(answer)) {
-    const retry = await retryFinalAnswer(basePayload, deepSeekKey);
+    const retry = await retryFinalAnswer(basePayload, deepSeekKey, debugContext);
     if (retry && !looksLikeInternalAnswer(retry)) answer = retry;
   }
   return answer || "Cevap üretemedim.";
@@ -143,6 +177,22 @@ async function askDeepSeekStream(body = {}, res) {
   const finalMessages = [{ role: "system", content: buildSystemPrompt(body) }, ...cleanMessages];
 
   const basePayload = buildDeepSeekPayload({ model, messages: finalMessages, temperature, maxTokens, stream: true });
+  const debugContext = {
+    body,
+    route: body._lucyRouteDebug?.route || "chat-stream",
+    provider: body._lucyRouteDebug?.provider || "deepseek",
+    model,
+  };
+  logPromptDebug(buildDebugMetadata({
+    ...debugContext,
+    payload: basePayload,
+    stream: true,
+    event: "deepseek.stream_payload",
+    extra: {
+      lengthContinueConfigured: LENGTH_CONTINUE_LIMIT,
+      lengthContinueSystemPreservedIfTriggered: basePayload.messages?.[0]?.role === "system",
+    },
+  }));
 
   async function callStream(requestPayload) {
     return fetch("https://api.deepseek.com/chat/completions", {
@@ -207,6 +257,16 @@ async function askDeepSeekStream(body = {}, res) {
       messages: buildLengthContinuationMessages(basePayload.messages, fullAnswer),
       stream: true,
     };
+    logPromptDebug(buildDebugMetadata({
+      ...debugContext,
+      payload: requestPayload,
+      stream: true,
+      event: "deepseek.stream_length_continue_payload",
+      extra: {
+        lengthContinueAttempt: continueCount + 1,
+        lengthContinueSystemPreserved: requestPayload.messages?.[0]?.role === "system",
+      },
+    }));
   }
 
   writeSse(res, { done: true, answer: fullAnswer });
