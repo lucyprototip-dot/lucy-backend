@@ -93,6 +93,48 @@ function shouldBlockWebOffLiveDataRequest(messages = []) {
   return users.slice(0, -1).reverse().slice(0, 8).some((message) => isLiveDataIntentText(message.content));
 }
 
+function isSourceFollowupText(text = "") {
+  const value = foldTurkishText(text);
+  return /^(nereden buldun|nerden buldun|bunu nereden buldun|bunu nerden buldun|kaynak ne|kaynagin ne|kaynaklar ne|kaynak goster|kaynaklari goster)$/.test(value);
+}
+
+function extractSourceFollowupAnswer(messages = []) {
+  const normalized = normalizeMessages(messages);
+  const lastUser = [...normalized].reverse().find((message) => message.role === "user")?.content || "";
+  if (!isSourceFollowupText(lastUser)) return "";
+
+  const previousAssistant = normalized.slice(0, -1).reverse().find((message) => message.role === "assistant")?.content || "";
+  if (!previousAssistant) return "";
+
+  const folded = foldTurkishText(previousAssistant);
+  if (
+    folded.includes("guvenilir canli kripto verisi bulamadim") ||
+    folded.includes("guvenilir kaynak bulamadim") ||
+    folded.includes("kaynak yoksa fiyat soyleyemem") ||
+    folded.includes("guvenilir okunabilir veri cekemedim")
+  ) {
+    return "Kaynak yoktu aşkım; güvenilir okunabilir kaynak bulamadığım için fiyat ya da sayı vermedim.";
+  }
+
+  const urls = Array.from(new Set(String(previousAssistant).match(/https?:\/\/[^\s`)\]}>'"]+/gi) || []))
+    .map((url) => url.replace(/[.,;:!?]+$/, ""))
+    .slice(0, 5);
+  const timeLines = String(previousAssistant)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /okunma zaman|tarih|saat/i.test(line))
+    .slice(0, 3);
+
+  if (urls.length) {
+    const lines = ["Bunu şu kaynaklardan aldım aşkım:"];
+    urls.forEach((url) => lines.push(`- ${url}`));
+    timeLines.forEach((line) => lines.push(`- ${line}`));
+    return lines.join("\n");
+  }
+
+  return "Son cevabımda tam kaynak URL görünmüyor aşkım. Kaynak net değilse bunu güvenilir canlı veri saymam; web açıkken yeniden kontrol edebilirim.";
+}
+
 app.get("/", (req, res) => {
   res.json({ success: true, message: "LUCY Core backend çalışıyor", brain: "DeepSeek", modes: ["fast", "think", "pro_fast", "pro_think"], webSearch: true, elevenLabs: true, port: PORT });
 });
@@ -106,6 +148,12 @@ app.post("/api/chat", async (req, res) => {
     const originalBody = req.body || {};
     const body = withServerContext(req, originalBody);
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
+
+    const sourceFollowupAnswer = extractSourceFollowupAnswer(body.messages);
+    if (sourceFollowupAnswer) {
+      rememberExchange(req, originalBody, sourceFollowupAnswer);
+      return res.json({ success: true, provider: "source-followup", model: null, answer: sourceFollowupAnswer });
+    }
 
     if (isWebMode(originalBody) && shouldUseLiveWebRequest(body)) {
       const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };
@@ -139,6 +187,14 @@ app.post("/api/chat-stream", async (req, res) => {
     const originalBody = req.body || {};
     const body = withServerContext(req, originalBody);
     trace("chat.request", { webSearch: originalBody.webSearch, mode: originalBody.mode, modeId: originalBody.modeId, messageCount: Array.isArray(body.messages) ? body.messages.length : 0 });
+
+    const sourceFollowupAnswer = extractSourceFollowupAnswer(body.messages);
+    if (sourceFollowupAnswer) {
+      writeSse(res, { delta: sourceFollowupAnswer });
+      writeSse(res, { done: true, answer: sourceFollowupAnswer, provider: "source-followup" });
+      rememberExchange(req, originalBody, sourceFollowupAnswer);
+      return res.end();
+    }
 
     if (isWebMode(originalBody) && shouldUseLiveWebRequest(body)) {
       const webPlan = { needs_web: true, max_tokens: fastMaxTokens(body, 8000) };

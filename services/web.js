@@ -338,6 +338,7 @@ async function fetchPageSummary(url = "") {
   if (url.startsWith("https://")) attempts.push(url.replace("https://", "http://"));
   if (!url.includes("www.")) attempts.push(url.replace(/^https?:\/\//, (m) => `${m}www.`));
   let lastError = "";
+  const fetchedAt = new Date().toISOString();
   for (const attempt of Array.from(new Set(attempts))) {
     try {
       const result = await fetchText(attempt);
@@ -347,13 +348,13 @@ async function fetchPageSummary(url = "") {
       const description = isHtml ? extractMetaDescription(result.text) : "";
       const bodyText = isHtml ? stripHtml(result.text) : normalizeText(result.text);
       const content = limitText([description, bodyText].filter(Boolean).join("\n\n"), 18000);
-      if (content.length >= 160 || title || description) return { title: title || attempt, text: content, url: result.finalUrl || attempt };
+      if (content.length >= 160 || title || description) return { title: title || attempt, text: content, url: result.finalUrl || attempt, fetchedAt };
       lastError = "Sayfadan yeterli metin çıkmadı";
     } catch (error) {
       lastError = error.message || "erişim hatası";
     }
   }
-  return { title: url, text: "", url, error: lastError || "Sayfa okunamadı" };
+  return { title: url, text: "", url, error: lastError || "Sayfa okunamadı", fetchedAt };
 }
 
 async function searchGoogleApi(query = "") {
@@ -467,8 +468,13 @@ function hasNumericOrSubstantialContext(contextItems = []) {
 }
 
 function isLiveMarketQuery(text = "") {
-  const value = String(text || "").toLowerCase();
-  return /\b(usd|eur|try|btc|eth|xau|gram altın|altın|dolar|euro|sterlin|kur|döviz|doviz|coin|kripto|bitcoin|ethereum|borsa|hisse|nasdaq|bist)\b/i.test(value);
+  const value = foldTurkishText(text);
+  return /\b(usd|eur|try|btc|eth|sol|xau|gram altin|altin|dolar|euro|sterlin|kur|doviz|coin|crypto|kripto|bitcoin|bitcoine|ethereum|etherium|solana|borsa|hisse|nasdaq|bist)\b/i.test(value);
+}
+
+function isCryptoMarketQuery(text = "") {
+  const value = foldTurkishText(text);
+  return /\b(btc|eth|sol|bitcoin|bitcoine|ethereum|etherium|solana|coin|crypto|kripto)\b/i.test(value);
 }
 
 function isTrustedMarketSource(item = {}) {
@@ -493,9 +499,32 @@ function isTrustedMarketSource(item = {}) {
   ].some((domain) => url.includes(domain));
 }
 
+function isTrustedCryptoSource(item = {}) {
+  const url = String(item.url || "").toLowerCase();
+  return [
+    "coingecko.com",
+    "coinmarketcap.com",
+    "binance.com",
+    "coinbase.com",
+    "kraken.com",
+    "tradingview.com",
+    "finance.yahoo.com",
+    "google.com/finance",
+    "investing.com",
+    "btcturk.com",
+  ].some((domain) => url.includes(domain));
+}
+
 function hasTrustedMarketContext(web = {}) {
   const candidates = web.trustedMarketPages || [];
   const trusted = candidates.filter(isTrustedMarketSource);
+  const joined = trusted.map((item) => `${item.title || ""}\n${item.text || ""}\n${item.url || ""}`).join("\n");
+  return trusted.length > 0 && /\d/.test(joined);
+}
+
+function hasTrustedCryptoContext(web = {}) {
+  const candidates = web.trustedMarketPages || [];
+  const trusted = candidates.filter(isTrustedCryptoSource);
   const joined = trusted.map((item) => `${item.title || ""}\n${item.text || ""}\n${item.url || ""}`).join("\n");
   return trusted.length > 0 && /\d/.test(joined);
 }
@@ -533,15 +562,17 @@ async function buildLiveWebBody(body = {}, plan = {}) {
   const lastUserText = getLastUserText(body.messages);
   const searchText = await resolveWebSearchText(body, plan);
   const web = await collectWebContext(searchText);
-  const marketQuery = isLiveMarketQuery(`${lastUserText}\n${searchText}`);
-  const trustedMarketPages = marketQuery ? web.usefulPages.filter(isTrustedMarketSource) : [];
+  const marketText = `${lastUserText}\n${searchText}`;
+  const marketQuery = isLiveMarketQuery(marketText);
+  const cryptoQuery = isCryptoMarketQuery(marketText);
+  const trustedMarketPages = marketQuery ? web.usefulPages.filter(cryptoQuery ? isTrustedCryptoSource : isTrustedMarketSource) : [];
   web.trustedMarketPages = trustedMarketPages;
   const sourcePages = marketQuery ? trustedMarketPages : web.usefulPages;
   const sourceResults = marketQuery ? [] : web.searchResults;
   const intentContext = compactUserIntentContext(body.messages, 1);
   const contextItems = [];
 
-  sourcePages.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nMetin:\n${limitText(item.text, 2400)}`));
+  sourcePages.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title || item.url}\nURL: ${item.url}\nOkunma zamanı (sunucu): ${item.fetchedAt || new Date().toISOString()}\nMetin:\n${limitText(item.text, 2400)}`));
   sourceResults.forEach((item) => contextItems.push(`KAYNAK ${contextItems.length + 1}\nSağlayıcı: ${item.provider || "web"}\nBaşlık: ${item.title}\nURL: ${item.url || "yok"}\nÖzet:\n${item.text || ""}`));
 
   trace("web.context", { searchText, sourceCount: contextItems.length, urls: web.urls, directUrlMode: web.directUrlMode === true, searchResults: web.searchResults.slice(0, 3).map((r) => ({ title: r.title, url: r.url })) });
@@ -551,7 +582,14 @@ async function buildLiveWebBody(body = {}, plan = {}) {
       trace("web.altinkaynak.unreadable", { searchText, urls: web.urls, pages: web.pages?.map((item) => ({ url: item.url, title: item.title, error: item.error, textLength: String(item.text || "").length })) || [] });
       return { instantAnswer: "Altınkaynak sayfasından güvenilir okunabilir veri çekemedim. Eski döviz.com veya başka sohbet kaynağına göre sayı veremem." };
     }
+    if (cryptoQuery) {
+      return { instantAnswer: "Güvenilir canlı kripto verisi bulamadım aşkım. Kaynak yoksa fiyat söyleyemem." };
+    }
     return { instantAnswer: "Web açık aşkım ama güvenilir kaynak bulamadım. Kaynak yoksa kur, fiyat veya canlı veri söyleyemem." };
+  }
+
+  if (cryptoQuery && !hasTrustedCryptoContext(web)) {
+    return { instantAnswer: "Güvenilir canlı kripto verisi bulamadım aşkım. Kaynak yoksa fiyat söyleyemem." };
   }
 
   if (marketQuery && !hasTrustedMarketContext(web)) {
@@ -565,10 +603,13 @@ async function buildLiveWebBody(body = {}, plan = {}) {
     "",
     `Kullanıcının son isteği: ${lastUserText}`,
     `Web arama sorgusu: ${searchText}`,
+    `Sunucu zamanı: ${new Date().toISOString()}`,
     "",
     "WEB_CONTEXT aşağıda. Gerçek bilgi kaynağın yalnızca WEB_CONTEXT içeriğidir.",
     "Sadece WEB_CONTEXT içindeki kaynaklara dayanarak cevap ver.",
     "Kaynakta olmayan kur, fiyat, oran, tarih veya sayı yazma.",
+    "Canlı kur, fiyat, kripto veya piyasa cevabında kullanılan kaynak URL'sini tam ve kesmeden yaz.",
+    "Kaynakta yayın/tarih/saat görünmüyorsa tarih uydurma; 'kaynakta tarih/saat görünmüyor' de ve Okunma zamanı (sunucu) bilgisini yaz.",
     "Eski sohbet hafızasındaki kur/fiyat/sayıları yok say; canlı/güncel veri sadece WEB_CONTEXT'ten alınır.",
     "Döviz, coin, fiyat veya canlı piyasa verisi istenirse kaynakta açık sayı ve güvenilir kaynak yoksa sayı verme; bunu net söyle.",
     "İç analiz, plan, akıl yürütme, 'kullanıcı şöyle demiş' açıklaması yazma.",
