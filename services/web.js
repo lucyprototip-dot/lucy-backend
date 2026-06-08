@@ -23,6 +23,71 @@ function isWebMode(body = {}) {
   return body.webSearch === true;
 }
 
+function foldTurkishText(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\u0131/g, "i")
+    .replace(/\u011f/g, "g")
+    .replace(/\u00fc/g, "u")
+    .replace(/\u015f/g, "s")
+    .replace(/\u00f6/g, "o")
+    .replace(/\u00e7/g, "c")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isCasualChatText(text = "") {
+  const value = foldTurkishText(text).replace(/[.!?…]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!value) return false;
+  if (isLiveMarketQuery(text) || extractUrlsFromText(text).length || inferSiteUrlFromCurrentRequest(text)) return false;
+  if (/\b(web|internette|internet|google|ara|arastir|bul|link|kaynak|site|sitesi|sitesine|siteye|sitesini|sitesinde|sitede|siteyi|incele|bak|guncel|canli|haber)\b/.test(value)) return false;
+  if (/^(sagol|sag ol|tesekkurler|tesekkur ederim|tamam|askim|merhaba|selam|slm|ok|eyvallah|hmm|ha|nasilsin|iyi misin|ne yapiyorsun)$/.test(value)) return true;
+  return value.length <= 60 && /\b(sagol|tesekkur|askim|nasilsin|iyi misin|ne yapiyorsun)\b/.test(value);
+}
+
+function isExplicitWebRequestText(text = "") {
+  const value = foldTurkishText(text);
+  if (!value || isCasualChatText(text)) return false;
+  if (extractUrlsFromText(text).length || inferSiteUrlFromCurrentRequest(text)) return true;
+  if (isLiveMarketQuery(text)) return true;
+  if (/\b(web|internette|internet|google|ara|arastir|link|kaynak|site|sitesi|sitesine|siteye|sitesini|sitesinde|sitede|siteyi|incele)\b/.test(value)) return true;
+  if (/\b(program|uygulama|haber|son dakika|guncel)\b/.test(value) && /\b(ara|bul|oner|link|web|internet)\b/.test(value)) return true;
+  return false;
+}
+
+function isLiveWebFollowupText(text = "") {
+  const value = foldTurkishText(text).replace(/[.!?…]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!value || isCasualChatText(text)) return false;
+  if (isLiveMarketQuery(text)) return true;
+  if (/^(actim|simdi actim|aa acmis olmam lazim|evet|soyle|bak|arastir|bul|arastir bul soyle|tamam|devam)$/.test(value)) return true;
+  return value.length <= 80 && /\b(acmis|actim|arastir|bul|soyle|bak)\b/.test(value);
+}
+
+function isPriorWebGuardAnswer(text = "") {
+  const value = foldTurkishText(text);
+  return value.includes("web arama kapali") || value.includes("guvenilir kaynak bulamadim") || value.includes("guvenilir canli finans kaynagi bulamadim");
+}
+
+function hasRecentLiveWebContext(messages = []) {
+  return normalizeMessages(messages)
+    .slice(0, -1)
+    .reverse()
+    .slice(0, 12)
+    .some((message) => {
+      if (message.role === "assistant") return isPriorWebGuardAnswer(message.content);
+      return isExplicitWebRequestText(message.content) || isLiveMarketQuery(message.content);
+    });
+}
+
+function shouldUseLiveWebRequest(body = {}) {
+  const lastUserText = getLastUserText(body.messages);
+  if (!lastUserText || isCasualChatText(lastUserText)) return false;
+  if (isExplicitWebRequestText(lastUserText)) return true;
+  return isLiveWebFollowupText(lastUserText) && hasRecentLiveWebContext(body.messages);
+}
+
 function compactConversation(messages = [], limit = 10) {
   return normalizeMessages(messages)
     .filter((m) => m.role === "user" || m.role === "assistant")
@@ -150,10 +215,13 @@ function extractMetaDescription(html = "") {
 function extractUrlsFromText(text = "") {
   const value = String(text || "");
   const urls = new Set();
-  for (const match of value.match(/https?:\/\/[^\s)\]}>'"]+/gi) || []) urls.add(match.replace(/[.,;:!?]+$/, ""));
-  for (const match of value.match(/\b([a-z0-9-]+\.)+[a-z]{2,}(?:\/[\w\-./?%&=#:+]*)?/gi) || []) {
-    const clean = match.replace(/[.,;:!?]+$/, "");
-    if (!/^https?:\/\//i.test(clean)) urls.add(`https://${clean}`);
+  for (const match of value.match(/https?:\/\/[^\s)\]}>'"]+/giu) || []) {
+    const clean = normalizeUrlCandidate(match);
+    if (clean) urls.add(clean);
+  }
+  for (const match of value.matchAll(/(?:^|[\s(<\["'])((?:[\p{L}0-9-]+\.)+[\p{L}]{2,})(\/[^\s)\]}>'"]*)?/giu)) {
+    const clean = normalizeUrlCandidate(`${match[1] || ""}${match[2] || ""}`);
+    if (clean) urls.add(clean);
   }
   return Array.from(urls).slice(0, 4);
 }
@@ -172,6 +240,11 @@ const SITE_NAME_STOPWORDS = new Set([
   "site",
   "sitesi",
   "sitesine",
+  "siteye",
+  "sitesini",
+  "sitesinde",
+  "sitede",
+  "siteyi",
   "web",
 ]);
 
@@ -189,17 +262,43 @@ function asciiDomainSlug(value = "") {
     .replace(/[^a-z0-9-]/g, "");
 }
 
-function inferSiteUrlFromCurrentRequest(text = "") {
-  const value = normalizeText(text);
-  if (!value || extractUrlsFromText(value).length) return "";
-  if (!/\b(?:site|sitesi|sitesine|siteye|web\s*sitesi|websitesi)\b/i.test(value)) return "";
+function normalizeUrlCandidate(candidate = "") {
+  let clean = String(candidate || "").trim().replace(/[.,;:!?]+$/, "");
+  if (!clean) return "";
+  const withoutProtocol = clean.replace(/^https?:\/\//i, "");
+  const match = withoutProtocol.match(/^([^/?#]+)([/?#][\s\S]*)?$/);
+  const hostPart = match?.[1] || "";
+  const suffix = match?.[2] || "";
+  const host = hostPart
+    .split(".")
+    .map((part) => asciiDomainSlug(part))
+    .filter(Boolean)
+    .join(".");
+  if (!host || !host.includes(".")) return "";
+  return `https://${host}${suffix}`;
+}
 
-  const match =
-    value.match(/(?:^|\s)([a-z0-9çğıöşü-]{3,})\s+(?:web\s*)?(?:site|sitesi|sitesine|siteye|websitesi)(?:\s|$)/i) ||
-    value.match(/(?:^|\s)([a-z0-9çğıöşü-]{3,})(?=[\s\S]{0,80}(?:^|\s)(?:site|sitesi|sitesine|siteye|websitesi)(?:\s|$))/i);
-  const slug = asciiDomainSlug(match?.[1] || "");
-  if (!slug || slug.length < 3 || SITE_NAME_STOPWORDS.has(slug) || SITE_NAME_STOPWORDS.has(match?.[1] || "")) return "";
-  return `https://www.${slug}.com`;
+function inferSiteUrlsFromCurrentRequest(text = "") {
+  const value = normalizeText(text);
+  if (!value || !/\b(?:site|sitesi|sitesine|siteye|sitesini|sitesinde|sitede|siteyi|web\s*sitesi|websitesi)\b/i.test(value)) return [];
+
+  const out = new Set();
+  const siteWord = "(?:site|sitesi|sitesine|siteye|sitesini|sitesinde|sitede|siteyi|websitesi)";
+  const directPattern = new RegExp(`(?:^|\\s)([\\p{L}0-9-]{3,})\\s+(?:web\\s*)?${siteWord}(?:\\s|$)`, "giu");
+  const nearbyPattern = new RegExp(`(?:^|\\s)([\\p{L}0-9-]{3,})(?=[\\s\\S]{0,80}(?:^|\\s)${siteWord}(?:\\s|$))`, "giu");
+  for (const pattern of [directPattern, nearbyPattern]) {
+    for (const match of value.matchAll(pattern)) {
+      const raw = match?.[1] || "";
+      const slug = asciiDomainSlug(raw);
+      if (!slug || slug.length < 3 || SITE_NAME_STOPWORDS.has(slug) || SITE_NAME_STOPWORDS.has(raw)) continue;
+      out.add(`https://www.${slug}.com`);
+    }
+  }
+  return Array.from(out).slice(0, 3);
+}
+
+function inferSiteUrlFromCurrentRequest(text = "") {
+  return inferSiteUrlsFromCurrentRequest(text)[0] || "";
 }
 
 function buildWebSearchQuery(text = "") {
@@ -401,6 +500,10 @@ function hasTrustedMarketContext(web = {}) {
   return trusted.length > 0 && /\d/.test(joined);
 }
 
+function isAltinkaynakRequest(text = "") {
+  return foldTurkishText(text).includes("altinkaynak");
+}
+
 function shouldUseWebPlannerForQuery(query = "", body = {}) {
   const fallback = normalizeText(query || getLastUserText(body.messages));
   if (!fallback) return false;
@@ -410,8 +513,11 @@ function shouldUseWebPlannerForQuery(query = "", body = {}) {
 
 async function resolveWebSearchText(body = {}, plan = {}) {
   const lastUserQuery = normalizeText(getLastUserText(body.messages));
-  const inferredSiteUrl = inferSiteUrlFromCurrentRequest(lastUserQuery);
-  if (inferredSiteUrl) return inferredSiteUrl;
+  const currentRequestUrls = Array.from(new Set([
+    ...extractUrlsFromText(lastUserQuery),
+    ...inferSiteUrlsFromCurrentRequest(lastUserQuery),
+  ]));
+  if (currentRequestUrls.length) return currentRequestUrls.join("\n");
 
   const plannedQuery = normalizeText(plan.query || "");
   if (plannedQuery) return strengthenQueryWithContext(plannedQuery, body);
@@ -441,6 +547,10 @@ async function buildLiveWebBody(body = {}, plan = {}) {
   trace("web.context", { searchText, sourceCount: contextItems.length, urls: web.urls, directUrlMode: web.directUrlMode === true, searchResults: web.searchResults.slice(0, 3).map((r) => ({ title: r.title, url: r.url })) });
 
   if (!contextItems.length || !hasNumericOrSubstantialContext(contextItems)) {
+    if (isAltinkaynakRequest(`${lastUserText}\n${searchText}`)) {
+      trace("web.altinkaynak.unreadable", { searchText, urls: web.urls, pages: web.pages?.map((item) => ({ url: item.url, title: item.title, error: item.error, textLength: String(item.text || "").length })) || [] });
+      return { instantAnswer: "Altınkaynak sayfasından güvenilir okunabilir veri çekemedim. Eski döviz.com veya başka sohbet kaynağına göre sayı veremem." };
+    }
     return { instantAnswer: "Web açık aşkım ama güvenilir kaynak bulamadım. Kaynak yoksa kur, fiyat veya canlı veri söyleyemem." };
   }
 
@@ -487,4 +597,4 @@ async function answerLiveWebIfNeeded(body = {}, plan = null) {
   return askDeepSeek(liveWeb.requestBody);
 }
 
-module.exports = { isWebMode, isLiveMarketQuery, planWebSearchQueryWithDeepSeek, buildLiveWebBody, answerLiveWebIfNeeded };
+module.exports = { isWebMode, isLiveMarketQuery, shouldUseLiveWebRequest, planWebSearchQueryWithDeepSeek, buildLiveWebBody, answerLiveWebIfNeeded };
