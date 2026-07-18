@@ -1,0 +1,18 @@
+{
+  "name": "lucy-backend-v2",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Lucy Web V2 clean DeepSeek backend",
+  "type": "commonjs",
+  "main": "system.js",
+  "scripts": {
+    "start": "node system.js",
+    "check": "node --check system.js && node --check core/env.js && node --check core/models.js && node --check core/prompt.js && node --check services/deepseek.js && node --check utils/messages.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
