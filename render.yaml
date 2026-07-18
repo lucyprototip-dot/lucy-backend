@@ -1,4 +1,22 @@
 services:
   - type: web
     name: lucy-backend-v2
-    runtime
+    runtime: node
+    plan: free
+    branch: lucy-v2
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 20.19.0
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_MODEL_FAST
+        value: deepseek-v4-flash
+      - key: DEEPSEEK_MODEL_PRO
+        value: deepseek-v4-pro
+      - key: ALLOWED_ORIGINS
+        sync: false
